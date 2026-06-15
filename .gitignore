@@ -1,0 +1,34 @@
+# Rust / Cargo
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Editor / OS
+.idea/
+.vscode/
+.cursor/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Variables de entorno
+.env
+.env.local
+.env.*.local
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.dll
+*.pdb
+
+# Documentation
+docs/*
+!docs/README.md
+!docs/specs
+!docs/decisions
+
+# AI
+src/prompts/*

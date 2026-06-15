@@ -1,0 +1,14 @@
+[package]
+name = "baud"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.87.0"
+
+[dependencies]
+nix = { version = "0.31", features = ["term", "fs", "signal"] }
+winit = "0.30"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints.rust]
+unused = "warn"

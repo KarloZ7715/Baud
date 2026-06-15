@@ -1,0 +1,33 @@
+# Configuracion markdownlint
+# Docs: https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
+
+default: true
+
+# Longitud de linea: 100 chars (bloom blocks不受影响)
+MD013:
+  line_length: 100
+  code_blocks: false
+  tables: false
+  head: false
+
+# Permitir encabezados duplicados en subsecciones
+MD024:
+  siblings_only: true
+
+# Permitir HTML inline cuando sea necesario
+MD033: false
+
+# Bloques de codigo: siempre fenced (```)
+MD046: fenced
+
+# Estilo de pipes en tablas
+MD055: leading_and_trailing
+
+# Lineas en blanco alrededor de tablas
+MD058: true
+
+# Solo un H1 por documento
+MD025: true
+
+# Archivo debe terminar en nueva linea
+MD047: true
