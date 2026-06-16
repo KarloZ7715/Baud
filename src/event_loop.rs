@@ -1,13 +1,10 @@
 //! Event loop central de Baud.
-//!
-//! Fase 0: hilo PTY lee del master y envia bytes por mpsc.
-//! Un hilo placeholder loguea esos bytes con tracing.
-//! El canal GUI->PTY existe pero no se alimenta (Fase 1).
 
 use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::thread;
 
+use crate::ansi::Term;
 use crate::pty;
 
 /// Eventos que el hilo PTY envia al hilo GUI.
@@ -48,20 +45,24 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Drenar input pendiente del canal GUI->PTY (no bloqueante).
-            // ponytail: en Fase 1 esto se alimenta con input real del teclado.
+            // ponytail: keyboard input real llega en Sprint 3 con el renderer.
             while let Ok(bytes) = rx_gui_to_pty.try_recv() {
-                let _ = master.write_all(&bytes); // ponytail: ignorar errores en Fase 0
+                let _ = master.write_all(&bytes); // ponytail: error handling real en Sprint 4
             }
         }
     });
 
-    // Hilo placeholder: drena el canal y loguea bytes. NO renderea nada.
-    // ponytail: en Fase 2 esto se reemplaza por el render real via winit.
+    // Hilo drain: alimenta el parser vte con bytes del PTY.
+    // ponytail: el render visual via wgpu llega en Fase 2 (Sprint 3); este
+    // hilo se mantiene, solo cambia el consumidor del estado de Term.
     let drain_handle = thread::spawn(move || {
+        let mut parser = vte::Parser::new();
+        let mut term = Term::new();
+
         while let Ok(event) = rx_pty_to_gui.recv() {
             match event {
                 PtyEvent::Output(bytes) => {
-                    tracing::info!(bytes_len = bytes.len(), "pty output");
+                    parser.advance(&mut term, &bytes);
                 }
             }
         }

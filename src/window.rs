@@ -9,7 +9,7 @@ struct App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // ponytail: fase 0 no necesita renderer, solo ventana basica
+        // ponytail: solo ventana basica, el render real llega en Fase 2 (Sprint 3)
         let attrs = WindowAttributes::default()
             .with_title("baud")
             .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0));
