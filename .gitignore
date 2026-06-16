@@ -32,3 +32,5 @@ docs/*
 
 # AI
 src/prompts/*
+.agents/*
+skills-lock.json
