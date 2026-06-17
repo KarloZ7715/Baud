@@ -72,4 +72,75 @@ impl Grid {
             self.rows[row][col] = Cell::default();
         }
     }
+
+    /// Scroll up: mueve todas las filas de la region [top, bottom] una posicion
+    /// hacia arriba. La fila `bottom` queda en blanco.
+    pub fn scroll_up_region(&mut self, n: usize, top: usize, bottom: usize) {
+        for _ in 0..n {
+            if top < ROWS && bottom < ROWS && top <= bottom {
+                self.rows.remove(top);
+                self.rows.insert(bottom, vec![Cell::default(); COLS]);
+            }
+        }
+    }
+
+    /// Scroll down: mueve todas las filas de la region [top, bottom] una posicion
+    /// hacia abajo. La fila `top` queda en blanco. En Sprint 4 solo se usa
+    /// internamente; no expuesto en CSI todavia.
+    #[allow(dead_code)]
+    pub fn scroll_down_region(&mut self, n: usize, top: usize, bottom: usize) {
+        for _ in 0..n {
+            if top < ROWS && bottom < ROWS && top <= bottom {
+                self.rows.remove(bottom);
+                self.rows.insert(top, vec![Cell::default(); COLS]);
+            }
+        }
+    }
+
+    /// Desplaza las filas [row, total_rows) una posicion hacia abajo. La fila
+    /// `row` queda en blanco. Usado por IL (insert line).
+    /// ponytail: xterm NO respeta la scroll region en IL/DL.
+    pub fn insert_line(&mut self, row: usize) {
+        if row < ROWS {
+            let blank = vec![Cell::default(); COLS];
+            self.rows.remove(ROWS - 1);
+            self.rows.insert(row, blank);
+        }
+    }
+
+    /// Desplaza las filas [row+1, total_rows) una posicion hacia arriba. La fila
+    /// (total_rows - 1) queda en blanco. Usado por DL (delete line).
+    /// ponytail: xterm NO respeta la scroll region en IL/DL.
+    pub fn delete_line(&mut self, row: usize) {
+        if row < ROWS {
+            self.rows.remove(row);
+            self.rows.push(vec![Cell::default(); COLS]);
+        }
+    }
+
+    /// Inserta `n` caracteres en blanco en la posicion (row, col), desplazando
+    /// el resto de la linea a la derecha. Caracteres que salen por la derecha
+    /// se pierden. Usado por ICH (insert character).
+    pub fn insert_chars(&mut self, row: usize, col: usize, n: usize) {
+        if row < ROWS && col < COLS {
+            let actual_n = n.min(COLS - col);
+            for _ in 0..actual_n {
+                self.rows[row].pop();
+                self.rows[row].insert(col, Cell::default());
+            }
+        }
+    }
+
+    /// Borra `n` caracteres en la posicion (row, col), desplazando el resto de
+    /// la linea a la izquierda. Caracteres que quedan al final se llenan con
+    /// blancos. Usado por DCH (delete character).
+    pub fn delete_chars(&mut self, row: usize, col: usize, n: usize) {
+        if row < ROWS && col < COLS {
+            let actual_n = n.min(COLS - col);
+            for _ in 0..actual_n {
+                self.rows[row].remove(col);
+                self.rows[row].push(Cell::default());
+            }
+        }
+    }
 }
