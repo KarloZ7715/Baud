@@ -6,11 +6,62 @@ use std::process::Stdio;
 /// Implementa Read y Write delegando a nix::unistd.
 pub struct Pty {
     fd: OwnedFd,
+    // ponytail: child_pid se guarda para SIGHUP en Drop (Ronda 4) y set_winsize.
+    // None en open(), Some(_) en spawn().
+    child_pid: Option<i32>,
 }
 
 impl Pty {
     pub fn fd(&self) -> &OwnedFd {
         &self.fd
+    }
+
+    pub fn child_pid(&self) -> Option<i32> {
+        self.child_pid
+    }
+
+    /// Envia SIGHUP al child. No-op si child_pid es None o si el child ya murio.
+    pub fn send_sighup(&self) -> bool {
+        if let Some(pid) = self.child_pid {
+            let nix_pid = nix::unistd::Pid::from_raw(pid);
+            match nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGHUP) {
+                Ok(()) => true,
+                Err(_) => false, // ESRCH = child ya murio, otros errores tambien false
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Actualiza el winsize del PTY via ioctl(TIOCSWINSZ). El kernel envia SIGWINCH al child.
+    pub fn set_winsize(&self, rows: u16, cols: u16) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let ws = nix::libc::winsize {
+            ws_row: rows,
+            ws_col: cols,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let res = unsafe { nix::libc::ioctl(self.fd.as_raw_fd(), nix::libc::TIOCSWINSZ, &ws) };
+        if res < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        // Safety net: si el GUI no envio SIGHUP explicitamente, Drop lo hace.
+        // SIGKILL aqui es OK porque Drop solo corre cuando baud sale (o el Pty
+        // se recrea), y en ambos casos queremos que el child muera.
+        // ponytail: Drop envia SIGKILL como safety net; el flujo normal es
+        // SIGHUP explicito desde el GUI via PtyCommand::Shutdown.
+        if let Some(pid) = self.child_pid {
+            let nix_pid = nix::unistd::Pid::from_raw(pid);
+            let _ = nix::sys::signal::kill(nix_pid, nix::sys::signal::Signal::SIGKILL);
+        }
     }
 }
 
@@ -34,7 +85,16 @@ impl std::io::Write for Pty {
 /// Crea un par de pseudoterminales (master, slave) sin configurar.
 pub fn open() -> nix::Result<(Pty, Pty)> {
     let result = nix::pty::openpty(None, None)?;
-    Ok((Pty { fd: result.master }, Pty { fd: result.slave }))
+    Ok((
+        Pty {
+            fd: result.master,
+            child_pid: None,
+        },
+        Pty {
+            fd: result.slave,
+            child_pid: None,
+        },
+    ))
 }
 
 /// Lanza un proceso en un nuevo PTY (pseudo-terminal).
@@ -69,10 +129,18 @@ pub fn spawn(shell: &str, args: &[&str]) -> nix::Result<Pty> {
         });
     }
 
-    cmd.spawn()
+    let child = cmd
+        .spawn()
         .map_err(|e| nix::errno::Errno::from_raw(e.raw_os_error().unwrap_or(0)))?;
+    let pid = child.id() as i32;
+    // ponytail: el Child se dropea al final del spawn para no acumular handles,
+    // pero el PID se guarda para SIGHUP y set_winsize.
+    drop(child);
 
-    Ok(Pty { fd: result.master })
+    Ok(Pty {
+        fd: result.master,
+        child_pid: Some(pid),
+    })
 }
 
 #[cfg(test)]
@@ -138,6 +206,55 @@ mod tests {
             output.contains("hola"),
             "Se esperaba 'hola' en output: {:?}",
             output
+        );
+    }
+
+    #[test]
+    fn test_set_winsize_succeeds() {
+        let master = spawn("bash", &["-c", "echo hola"]).expect("spawn fallo");
+        let result = master.set_winsize(24, 80);
+        assert!(
+            result.is_ok(),
+            "set_winsize deberia retornar Ok, obtuve: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_pty_drop_sends_sigkill() {
+        // Spawn bash que duerme 10 segundos. Dropear el Pty debe enviar SIGKILL.
+        let master = spawn("bash", &["-c", "sleep 10"]).expect("spawn fallo");
+        let child_pid = master.child_pid().expect("child_pid deberia ser Some");
+        let nix_pid = nix::unistd::Pid::from_raw(child_pid);
+
+        // Verificar que el child esta vivo antes del drop.
+        let alive_before = nix::sys::signal::kill(nix_pid, None).is_ok();
+        assert!(alive_before, "child deberia estar vivo antes del drop");
+
+        // Dropear el Pty. Drop envia SIGKILL.
+        drop(master);
+
+        // Esperar que la senal llegue y reapear el zombie con waitpid.
+        // ponytail: kill(pid, None) retorna Ok mientras el zombie exista en la
+        // tabla de procesos. Necesitamos waitpid para cosechar el zombie y
+        // luego verificar ESRCH.
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            // Reapear si ya termino. WNOHANG no bloquea.
+            let _ = nix::sys::wait::waitpid(nix_pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG));
+            if nix::sys::signal::kill(nix_pid, None).is_err() {
+                return; // ESRCH: child ya no existe, test pasa
+            }
+        }
+        panic!("child aun existe tras 1 segundo post-SIGKILL");
+    }
+
+    #[test]
+    fn test_send_sighup_returns_false_for_no_child() {
+        let (master, _slave) = open().expect("open failed");
+        assert!(
+            !master.send_sighup(),
+            "send_sighup sin child debe retornar false"
         );
     }
 }
