@@ -21,12 +21,21 @@ pub struct Renderer {
     viewport: glyphon::Viewport,
     text_renderer: glyphon::TextRenderer,
     swash_cache: glyphon::SwashCache,
-    buffer: glyphon::Buffer,
-    // ponytail: celdas 8x16 hardcoded, configurables en Sprint 5 con SIGWINCH
-    #[expect(dead_code)]
+    // ponytail: 1 buffer por fila del grid. 24 buffers en lugar de 1 buffer
+    // compartido permite que cada fila tenga su propio top y que el resize
+    // solo reconfigure los buffers afectados, no todo el buffer.
+    buffers: Vec<glyphon::Buffer>,
+    // ponytail: 1 buffer para overlays (cursor block, mensajes de status).
+    // Renderizado encima del grid, con color diferente.
+    overlay_buffer: glyphon::Buffer,
+    // ponytail: cell_w y cell_h se calculan en new() y se actualizan en resize().
+    // NO son #[expect(dead_code)] en este sprint; el renderer los usa para
+    // posicionar cada TextArea.
     cell_w: f32,
-    #[expect(dead_code)]
     cell_h: f32,
+    // ponytail: flag del overlay. Se activa con set_status(), se desactiva
+    // cuando se llama con texto vacio o cuando se hace render() sin status.
+    status_active: bool,
 }
 
 impl Renderer {
@@ -35,8 +44,8 @@ impl Renderer {
     /// Recibe la ventana (`Arc<Window>` para lifetime `'static` de la surface),
     /// el device, queue, surface y configuracion de surface pre-creados.
     ///
-    /// La surface `'static` se logra porque wgpu internamente retiene el
-    /// `Arc<Window>` que se pasa al crear la surface.
+    /// Calcula cell_w, cell_h y font_size a partir del tamano de la ventana
+    /// y crea 24 buffers (uno por fila) + 1 overlay buffer.
     pub fn new(
         _window: Arc<Window>,
         device: wgpu::Device,
@@ -58,13 +67,19 @@ impl Renderer {
         );
         let swash_cache = glyphon::SwashCache::new();
 
-        // ponytail: el font size se calcula proporcional al tamano del grid
-        // (24x80) y de la ventana. Si el font es fijo, una ventana grande
-        // muestra texto microscopico en la esquina. Si escala, el texto
-        // ocupa la ventana de forma natural.
-        let initial_font_size = font_size_for_window(config.width, config.height);
-        let metrics = glyphon::Metrics::new(initial_font_size, initial_font_size * 1.4);
-        let buffer = glyphon::Buffer::new(&mut font_system, metrics);
+        // Calcular tamano de celda y font size para el grid 24x80.
+        let (cell_w, cell_h) = Self::cell_size_for_window(config.width, config.height);
+        let font_size = Self::font_size_for_cells(cell_w, cell_h);
+
+        // Crear 24 buffers (uno por fila del grid).
+        let metrics = glyphon::Metrics::new(font_size, font_size * 1.4);
+        let mut buffers = Vec::with_capacity(ROWS);
+        for _ in 0..ROWS {
+            buffers.push(glyphon::Buffer::new(&mut font_system, metrics));
+        }
+
+        // Crear 1 buffer para overlays (cursor, status).
+        let overlay_buffer = glyphon::Buffer::new(&mut font_system, metrics);
 
         Self {
             device,
@@ -76,32 +91,68 @@ impl Renderer {
             viewport,
             text_renderer,
             swash_cache,
-            buffer,
-            cell_w: 8.0,
-            cell_h: 16.0,
+            buffers,
+            overlay_buffer,
+            cell_w,
+            cell_h,
+            status_active: false,
         }
     }
 
-    /// Actualiza el tamano de la surface, el viewport y el font size.
-    /// El Buffer se recrea con metrics que escalan el texto al nuevo tamano.
+    /// Calcula cell_w y cell_h para un tamano de ventana dado.
+    fn cell_size_for_window(width: u32, height: u32) -> (f32, f32) {
+        (width as f32 / COLS as f32, height as f32 / ROWS as f32)
+    }
+
+    /// Calcula el font size optimo para las celdas.
+    /// Usa GLYPH_RATIO (0.6) para el ancho y LINE_RATIO (1.4) para el alto,
+    /// tomando el minimo y aplicando un piso MIN_SIZE (6.0).
+    fn font_size_for_cells(cell_w: f32, cell_h: f32) -> f32 {
+        const GLYPH_RATIO: f32 = 0.6;
+        const LINE_RATIO: f32 = 1.4;
+        const MIN_SIZE: f32 = 6.0;
+        let from_w = cell_w / GLYPH_RATIO;
+        let from_h = cell_h / LINE_RATIO;
+        from_w.min(from_h).max(MIN_SIZE)
+    }
+
+    /// Actualiza el tamano de la surface, el viewport, cell_w, cell_h y
+    /// recrea los 24 buffers + 1 overlay buffer con el nuevo font size.
+    ///
+    /// ponytail: 25 buffers es barato (cada buffer es 0 costo si no se usa).
+    /// Si en Sprint 6+ medimos que esto es lento, refactorizamos a un solo
+    /// buffer con multiples TextArea o a lazy allocation.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.viewport
             .update(&self.queue, glyphon::Resolution { width, height });
-        // Recalcular font size para que el texto escale a la nueva ventana.
-        let new_size = font_size_for_window(width, height);
-        self.buffer.set_metrics(
-            &mut self.font_system,
-            glyphon::Metrics::new(new_size, new_size * 1.4),
-        );
+
+        // Recalcular cell_w, cell_h y font size.
+        let (cell_w, cell_h) = Self::cell_size_for_window(width, height);
+        self.cell_w = cell_w;
+        self.cell_h = cell_h;
+        let font_size = Self::font_size_for_cells(cell_w, cell_h);
+
+        // Recrear todos los buffers con el nuevo font size.
+        let metrics = glyphon::Metrics::new(font_size, font_size * 1.4);
+        self.buffers.clear();
+        for _ in 0..ROWS {
+            self.buffers
+                .push(glyphon::Buffer::new(&mut self.font_system, metrics));
+        }
+        self.overlay_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+
+        // ponytail: status_active se mantiene a traves de resize.
+        // Si hay un status activo antes del resize, seguira activo.
     }
 
     /// Renderiza el grid 24x80 del terminal en la surface GPU.
     ///
-    /// Construye el contenido de texto a partir del estado de `Term`, lo
-    /// prepara con glyphon y lo dibuja en un render pass con fondo negro.
+    /// Construye 24 TextArea (uno por fila del grid activo), cada uno con
+    /// left=0, top=row*cell_h, y bounds que recortan a la celda. Si
+    /// status_active esta activo, agrega un TextArea extra para el overlay.
     ///
     /// # Errors
     /// Retorna un `String` si la GPU no puede presentar el frame, preparar
@@ -119,7 +170,7 @@ impl Renderer {
                 return Ok(());
             }
             wgpu::CurrentSurfaceTexture::Validation => {
-                return Err("error: validacion de surface falló".to_string());
+                return Err("error: validacion de surface fallo".to_string());
             }
         };
         let view = frame
@@ -129,76 +180,106 @@ impl Renderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-        // 2. Construir contenido de texto con estilo por celda usando
-        //    set_rich_text (cosmic-text 0.18.2) que acepta spans con color
-        let mut text = String::with_capacity(ROWS * COLS);
-        // Almacenar info de estilo por caracter: (byte_start, byte_end, bold, fg)
-        struct CharStyle {
-            start: usize,
-            end: usize,
-            bold: bool,
-            fg: Color,
-        }
-        let mut styles: Vec<CharStyle> = Vec::with_capacity(ROWS * COLS);
+        // 2. Construir 24 TextArea, uno por fila del grid activo.
+        let default_attrs = glyphon::Attrs::new().family(glyphon::Family::Monospace);
+        let active = term.active_grid();
+        let mut text_areas = Vec::with_capacity(ROWS + 1);
 
+        // Fase A: llenar los 24 buffers (borrow mutable). Fase B abajo (borrow inmutable).
         for row in 0..ROWS {
+            // 2a. Construir el string de la fila (80 chars).
+            let mut line = String::with_capacity(COLS);
+            // Almacenar informacion de estilo por celda para esta fila.
+            struct CellStyle {
+                start: usize,
+                end: usize,
+                bold: bool,
+                fg: Color,
+            }
+            let mut styles: Vec<CellStyle> = Vec::with_capacity(COLS);
+
             for col in 0..COLS {
-                let cell = &term.active_grid().rows[row][col];
-                let start = text.len();
-                text.push(cell.ch);
-                let end = text.len();
-                styles.push(CharStyle {
+                let cell = &active.rows[row][col];
+                let start = line.len();
+                line.push(cell.ch);
+                let end = line.len();
+                styles.push(CellStyle {
                     start,
                     end,
                     bold: cell.attrs.bold,
                     fg: cell.attrs.fg,
                 });
             }
+
+            // 2b. set_rich_text en el buffer de esta fila con spans por celda.
+            // ponytail: colores SGR individuales via color_to_glyphon.
+            let spans = styles.iter().map(|s| {
+                let fg = color_to_glyphon(s.fg);
+                let color = glyphon::Color::rgba(fg.r(), fg.g(), fg.b(), 255);
+                let mut attrs = glyphon::Attrs::new().family(glyphon::Family::Monospace);
+                if s.bold {
+                    attrs = attrs.weight(glyphon::Weight::BOLD);
+                }
+                // ponytail: underline no soportado nativamente por glyphon
+                // 0.11. Pendiente para Sprint 4 via wgpu::RenderPass separado.
+                attrs = attrs.color(color);
+                (&line[s.start..s.end], attrs)
+            });
+
+            self.buffers[row].set_rich_text(
+                &mut self.font_system,
+                spans,
+                &default_attrs,
+                glyphon::Shaping::Advanced,
+                None,
+            );
+            self.buffers[row].set_size(
+                &mut self.font_system,
+                Some(self.config.width as f32),
+                Some(self.config.height as f32),
+            );
+            self.buffers[row].shape_until_scroll(&mut self.font_system, false);
         }
 
-        // 3. Configurar buffer de cosmic-text via set_rich_text
-        let default_attrs = glyphon::Attrs::new().family(glyphon::Family::Monospace);
-        let spans = styles.iter().map(|s| {
-            let fg = color_to_glyphon(s.fg);
-            let color = glyphon::Color::rgba(fg.r(), fg.g(), fg.b(), 255);
-            let mut attrs = glyphon::Attrs::new().family(glyphon::Family::Monospace);
-            if s.bold {
-                attrs = attrs.weight(glyphon::Weight::BOLD);
-            }
-            // ponytail: underline no soportado nativamente por glyphon
-            // 0.11. Pendiente para Sprint 4 via wgpu::RenderPass separado.
-            attrs = attrs.color(color);
-            (&text[s.start..s.end], attrs)
-        });
+        // Fase B: referencias inmutables como TextArea, una por fila con top = row * cell_h.
+        for row in 0..ROWS {
+            let top = row as f32 * self.cell_h;
+            text_areas.push(glyphon::TextArea {
+                buffer: &self.buffers[row],
+                left: 0.0,
+                top,
+                scale: 1.0,
+                bounds: glyphon::TextBounds {
+                    left: 0,
+                    top: top as i32,
+                    right: self.config.width as i32,
+                    bottom: (top + self.cell_h) as i32,
+                },
+                default_color: glyphon::Color::rgb(0xcd, 0xd6, 0xf4),
+                custom_glyphs: &[],
+            });
+        }
 
-        self.buffer.set_rich_text(
-            &mut self.font_system,
-            spans,
-            &default_attrs,
-            glyphon::Shaping::Advanced,
-            None,
-        );
-        self.buffer.set_size(
-            &mut self.font_system,
-            Some(self.config.width as f32),
-            Some(self.config.height as f32),
-        );
-        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        // 2d. Si hay overlay activo (status), agregar TextArea extra.
+        if self.status_active {
+            text_areas.push(glyphon::TextArea {
+                buffer: &self.overlay_buffer,
+                left: 0.0,
+                top: 0.0,
+                scale: 1.0,
+                bounds: glyphon::TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: self.config.width as i32,
+                    bottom: self.config.height as i32,
+                },
+                // ponytail: rojo para status (Catppuccin Mocha Red).
+                default_color: glyphon::Color::rgb(0xf3, 0x8b, 0xa8),
+                custom_glyphs: &[],
+            });
+        }
 
-        // 4. Preparar area de texto para glyphon
-        // ponytail: bg no soportado nativamente por glyphon; se limpia con
-        // negro. Renderizado de bg por celda requiere wgpu::RenderPass
-        // separado (Sprint 4).
-        let text_area = glyphon::TextArea {
-            buffer: &self.buffer,
-            left: 0.0,
-            top: 0.0,
-            scale: 1.0,
-            bounds: glyphon::TextBounds::default(),
-            default_color: glyphon::Color::rgb(0xcd, 0xd6, 0xf4),
-            custom_glyphs: &[],
-        };
-
+        // 3. Preparar todos los TextArea para glyphon
         self.text_renderer
             .prepare(
                 &self.device,
@@ -206,12 +287,12 @@ impl Renderer {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [text_area],
+                text_areas,
                 &mut self.swash_cache,
             )
             .map_err(|e| format!("error al preparar texto: {e}"))?;
 
-        // 5. Renderizar en el render pass
+        // 4. Renderizar en el render pass
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("glyphon render pass"),
@@ -233,11 +314,46 @@ impl Renderer {
                 .map_err(|e| format!("error al renderizar texto: {e}"))?;
         }
 
-        // 6. Enviar comandos y presentar
+        // 5. Enviar comandos y presentar
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
 
         Ok(())
+    }
+
+    /// Establece el texto del overlay de status.
+    ///
+    /// Si `text` esta vacio, desactiva el overlay. Si no, llena el
+    /// overlay_buffer con el texto y activa el flag `status_active`.
+    /// El overlay se renderiza encima del grid en el proximo render().
+    pub fn set_status(&mut self, text: &str) {
+        if text.is_empty() {
+            self.status_active = false;
+            return;
+        }
+
+        let default_attrs = glyphon::Attrs::new().family(glyphon::Family::Monospace);
+        let mut attrs = glyphon::Attrs::new().family(glyphon::Family::Monospace);
+        // ponytail: color rojo para status. Refinable en Sprint 8 con theme.
+        attrs = attrs.color(glyphon::Color::rgb(0xf3, 0x8b, 0xa8));
+        let spans = [(text, attrs)];
+
+        self.overlay_buffer.set_rich_text(
+            &mut self.font_system,
+            spans,
+            &default_attrs,
+            glyphon::Shaping::Advanced,
+            None,
+        );
+        self.overlay_buffer.set_size(
+            &mut self.font_system,
+            Some(self.config.width as f32),
+            Some(self.config.height as f32),
+        );
+        self.overlay_buffer
+            .shape_until_scroll(&mut self.font_system, false);
+
+        self.status_active = true;
     }
 }
 
@@ -257,34 +373,15 @@ fn color_to_glyphon(color: Color) -> glyphon::Color {
     }
 }
 
-/// Calcula el font size optimo para que el grid 24x80 llene la ventana
-/// sin recorte. Usa el minimo entre el ancho de celda (con ratio monospace
-/// 0.6) y el alto de celda (con line-height ratio 1.4). Asi, una ventana
-/// 1920x1080 produce ~32px, una ventana 941x1030 produce ~20px, una
-/// ventana pequena produce ~10px. El texto escala, no queda fijo.
-///
-/// ponytail: ratios hardcoded; refinables en Sprint 5 con SIGWINCH
-/// cuando midamos el ancho real de un glyph monospace del sistema.
-fn font_size_for_window(width: u32, height: u32) -> f32 {
-    const GLYPH_RATIO: f32 = 0.6; // glyph width / font size para monospace
-    const LINE_RATIO: f32 = 1.4; // line height / font size
-    const MIN_SIZE: f32 = 6.0; // piso para que el texto sea legible
-    let cell_w = width as f32 / COLS as f32;
-    let cell_h = height as f32 / ROWS as f32;
-    let from_w = cell_w / GLYPH_RATIO;
-    let from_h = cell_h / LINE_RATIO;
-    from_w.min(from_h).max(MIN_SIZE)
-}
-
 // ---------------------------------------------------------------------------
-// Suite de tests unitarios del Renderer y pipeline de render
+// Tests unitarios del Renderer y pipeline de render
 // ---------------------------------------------------------------------------
 //
 // Tests de color mapping: verifican que color_to_glyphon mapea correctamente
 // los 9 colores ANSI a los valores Catppuccin Mocha hardcoded.
 //
-// Tests de propagacion SGR: verifican que el parser ANSI alimenta correctamente
-// los attrs que el Renderer consume para construir los rich text spans.
+// Tests de propagacion SGR: verifican que el parser ANSI alimenta
+// correctamente los attrs que el Renderer consume para los rich text spans.
 #[cfg(test)]
 mod tests {
     use super::*;

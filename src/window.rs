@@ -6,10 +6,12 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use crate::ansi::Term;
+use crate::event_loop::PtyCommand;
+use crate::grid::{COLS, ROWS};
 use crate::renderer::Renderer;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
@@ -21,6 +23,10 @@ use winit::window::{Window, WindowId};
 pub enum UserEvent {
     /// El drain termino de procesar bytes del PTY; la GUI debe redibujar.
     RedrawNeeded,
+    /// El child termino (EOF en master fd).
+    PtyExited(i32),
+    /// Error de I/O del PTY.
+    PtyError(String),
 }
 
 /// Estado de la aplicación GUI.
@@ -28,15 +34,20 @@ pub struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     term: Arc<Mutex<Term>>,
+    pty_tx: Arc<Mutex<Option<mpsc::Sender<PtyCommand>>>>,
 }
 
 impl App {
     /// Crea una nueva instancia de App con el term compartido.
-    pub fn new(term: Arc<Mutex<Term>>) -> Self {
+    pub fn new(
+        term: Arc<Mutex<Term>>,
+        pty_tx: Arc<Mutex<Option<mpsc::Sender<PtyCommand>>>>,
+    ) -> Self {
         Self {
             window: None,
             renderer: None,
             term,
+            pty_tx,
         }
     }
 }
@@ -118,10 +129,27 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // Enviar Shutdown al hilo PTY para que envie SIGHUP al child.
+                if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
+                    let _ = tx.send(PtyCommand::Shutdown);
+                }
+                // Salir del event loop. El hilo PTY recibira el Shutdown, hara SIGHUP,
+                // esperara 100ms, y morira. El Pty se dropea con SIGKILL safety net.
+                event_loop.exit();
+            }
             WindowEvent::Resized(new_size) => {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(new_size.width, new_size.height);
+                }
+                // Enviar resize al hilo PTY para que haga ioctl(TIOCSWINSZ).
+                // ponytail: el grid logico sigue siendo 24x80 hardcoded; el child
+                // recibe SIGWINCH para ajustar su output. Reflow en Sprint 6.
+                if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
+                    let _ = tx.send(PtyCommand::Resize {
+                        rows: ROWS as u16,
+                        cols: COLS as u16,
+                    });
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -148,6 +176,22 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::RedrawNeeded => {
                 // Solicitar un redraw para actualizar la pantalla.
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            UserEvent::PtyExited(code) => {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_status(&format!("[Proceso terminado: codigo {}]", code));
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            UserEvent::PtyError(msg) => {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_status(&format!("[Error PTY: {}]", msg));
+                }
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
