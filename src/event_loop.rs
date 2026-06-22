@@ -4,13 +4,15 @@
 //! El Term se comparte entre el hilo drain y la GUI via Arc<Mutex<Term>>.
 //! El hilo drain envía UserEvent::RedrawNeeded al GUI vía EventLoopProxy.
 
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use crate::ansi::Term;
 use crate::pty;
 use crate::window::{App, UserEvent};
+use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use winit::event_loop::EventLoop;
 
 /// Comandos del GUI al hilo PTY.
@@ -66,6 +68,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                             term_drain.lock().expect("term mutex poisoned en drain");
                         parser.advance(&mut *term_guard, &bytes);
                     }
+                    tracing::info!(
+                        "drain: processed {} bytes: {:02x?}, sending RedrawNeeded",
+                        bytes.len(),
+                        &bytes[..bytes.len().min(40)]
+                    );
                     // Envia tick al GUI loop para que redibuje.
                     if let Some(proxy) = proxy_for_drain_clone
                         .lock()
@@ -117,58 +124,70 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let pty_thread = thread::spawn(move || {
         let mut master = master;
         let mut buf = [0u8; 4096];
+
+        // Configurar el master fd como no-bloqueante para evitar deadlock:
+        // el hilo PTY debe poder procesar comandos del GUI incluso cuando
+        // no hay datos disponibles del master (bash esperando input).
+        // ponytail: non-blocking + sleep(1ms) es mas simple que poll/mio.
+        if let Ok(flags) = fcntl(master.fd(), FcntlArg::F_GETFL) {
+            let nonblock = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
+            let _ = fcntl(master.fd(), FcntlArg::F_SETFL(nonblock));
+        }
+
         loop {
-            // Drenar comandos pendientes del GUI->PTY (no bloqueante).
-            // ponytail: se procesan antes de la lectura bloqueante para que
-            // Resize se aplique inmediatamente y Shutdown pueda interrumpir.
-            while let Ok(cmd) = rx_gui_to_pty.try_recv() {
-                match cmd {
-                    PtyCommand::Input(bytes) => {
-                        let _ = master.write_all(&bytes);
+            let mut had_activity = false;
+
+            // Leer todos los datos disponibles del master (no-bloqueante).
+            loop {
+                match master.read(&mut buf) {
+                    Ok(0) => {
+                        // EOF: child termino.
+                        let _ = tx_pty_to_gui.send(PtyEvent::Exited(-1));
+                        return;
                     }
-                    PtyCommand::Resize { rows, cols } => {
-                        // ponytail: el ioctl se hace en el hilo PTY, no en el GUI,
-                        // para evitar concurrencia con la lectura del master fd.
-                        if let Err(e) = master.set_winsize(rows, cols) {
-                            tracing::warn!("error al setear winsize: {e}");
+                    Ok(n) => {
+                        had_activity = true;
+                        let data = PtyEvent::Output(buf[..n].to_vec());
+                        tracing::info!("pty_thread: read {} bytes: {:02x?}", n, &buf[..n.min(40)]);
+                        if tx_pty_to_gui.send(data).is_err() {
+                            return; // drain cerro el canal
                         }
                     }
-                    PtyCommand::Shutdown => {
-                        // Enviar SIGHUP al child para que haga cleanup.
-                        let sent = master.send_sighup();
-                        if sent {
-                            // Esperar 100ms para que el child procese el SIGHUP.
-                            // ponytail: el sleep esta en el hilo PTY, NO en el GUI, para
-                            // evitar que el compositor (Hyprland) marque la ventana como
-                            // "no responde" al cerrar.
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                        }
-                        // Salir del loop del pty_thread.
-                        // ponytail: usamos return en vez de break para salir del closure.
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break, // no more data
+                    Err(e) => {
+                        tracing::warn!("error de I/O en PTY: {e}");
+                        let _ = tx_pty_to_gui.send(PtyEvent::IoError(e.to_string()));
                         return;
                     }
                 }
             }
 
-            // Leer datos del master (bloqueante).
-            match master.read(&mut buf) {
-                Ok(0) => {
-                    // EOF: child termino. Enviar Exited al drain antes de salir.
-                    let _ = tx_pty_to_gui.send(PtyEvent::Exited(-1));
-                    break;
-                }
-                Ok(n) => {
-                    let data = PtyEvent::Output(buf[..n].to_vec());
-                    if tx_pty_to_gui.send(data).is_err() {
-                        break; // drain cerro el canal
+            // Procesar comandos pendientes del GUI (Input, Resize, Shutdown).
+            while let Ok(cmd) = rx_gui_to_pty.try_recv() {
+                had_activity = true;
+                match cmd {
+                    PtyCommand::Input(bytes) => {
+                        tracing::info!("pty_thread: write {} bytes: {:02x?}", bytes.len(), bytes);
+                        let _ = master.write_all(&bytes);
+                    }
+                    PtyCommand::Resize { rows, cols } => {
+                        if let Err(e) = master.set_winsize(rows, cols) {
+                            tracing::warn!("error al setear winsize: {e}");
+                        }
+                    }
+                    PtyCommand::Shutdown => {
+                        let sent = master.send_sighup();
+                        if sent {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        return;
                     }
                 }
-                Err(e) => {
-                    // Error de I/O: NO panic. Loguear y enviar IoError al drain.
-                    tracing::warn!("error de I/O en PTY: {e}");
-                    let _ = tx_pty_to_gui.send(PtyEvent::IoError(e.to_string()));
-                    break;
-                }
+            }
+
+            // Si no hubo actividad, dormir 1ms para evitar spin-loop.
+            if !had_activity {
+                std::thread::sleep(Duration::from_millis(1));
             }
         }
     });

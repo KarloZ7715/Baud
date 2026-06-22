@@ -104,12 +104,36 @@ pub fn open() -> nix::Result<(Pty, Pty)> {
 pub fn spawn(shell: &str, args: &[&str]) -> nix::Result<Pty> {
     let result = nix::pty::openpty(None, None)?;
 
+    // ponytail: configurar slave en raw mode para que el child reciba
+    // caracteres uno a uno sin buffering del kernel ni eco automatico.
+    // IMPORTANTE: cfmakeraw desactiva ECHO. Lo reactivamos para que el
+    // terminal driver haga eco aunque readline no se active.
+    // ponytail: eco del kernel como fallback para shells sin readline.
+    {
+        use nix::sys::termios;
+        let mut termios = termios::tcgetattr(&result.slave)?;
+        termios::cfmakeraw(&mut termios);
+        // Reactivar ECHO para que los caracteres se vean al escribir.
+        termios.local_flags |= nix::sys::termios::LocalFlags::ECHO;
+        // Reactivar OPOST + ONLCR para que \n se convierta en \r\n.
+        // cfmakeraw desactiva OPOST, lo que deshabilita todo el procesamiento
+        // de output. Sin ONLCR, cuando bash escribe \n, el cursor no vuelve
+        // a columna 0, causando que el prompt aparezca en la posicion incorrecta.
+        // OPOST+ONLCR es el comportamiento estandar de terminales.
+        termios.output_flags |=
+            nix::sys::termios::OutputFlags::OPOST | nix::sys::termios::OutputFlags::ONLCR;
+        termios::tcsetattr(&result.slave, termios::SetArg::TCSANOW, &termios)?;
+    }
+
     // ponytail: duplicamos el slave 3 veces (stdin, stdout, stderr)
     let slave_stdin = nix::unistd::dup(&result.slave)?;
     let slave_stdout = nix::unistd::dup(&result.slave)?;
 
     let mut cmd = std::process::Command::new(shell);
     cmd.args(args);
+    // ponytail: TERM necesario para que bash active readline.
+    // xterm-256color es el estandar y compatible con la mayoria de programas TUI.
+    cmd.env("TERM", "xterm-256color");
     cmd.stdin(Stdio::from(std::fs::File::from(slave_stdin)));
     cmd.stdout(Stdio::from(std::fs::File::from(slave_stdout)));
     cmd.stderr(Stdio::from(std::fs::File::from(result.slave)));
@@ -217,6 +241,44 @@ mod tests {
             result.is_ok(),
             "set_winsize deberia retornar Ok, obtuve: {:?}",
             result
+        );
+    }
+
+    #[test]
+    fn test_pty_write_and_read() {
+        // Spawn bash sin flags (lee de stdin). Escribir un comando, leer la respuesta.
+        let mut master = spawn("bash", &[] as &[&str]).expect("spawn fallo");
+
+        // Escribir un comando en el master.
+        let cmd = b"echo PIPELINE_TEST_OK\n";
+        nix::unistd::write(master.fd(), cmd).expect("write fallo");
+
+        // Leer la respuesta: debe contener PIPELINE_TEST_OK.
+        let mut buf = [0u8; 4096];
+        let mut output = Vec::new();
+        loop {
+            match master.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    output.extend_from_slice(&buf[..n]);
+                    if output
+                        .windows(b"PIPELINE_TEST_OK".len())
+                        .any(|w| w == b"PIPELINE_TEST_OK")
+                    {
+                        break;
+                    }
+                    if output.len() > 4096 {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let output_str = String::from_utf8_lossy(&output);
+        assert!(
+            output_str.contains("PIPELINE_TEST_OK"),
+            "Se esperaba PIPELINE_TEST_OK en output: {:?}",
+            output_str
         );
     }
 
