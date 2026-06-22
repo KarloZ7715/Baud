@@ -28,6 +28,8 @@ pub struct Renderer {
     // ponytail: 1 buffer para overlays (cursor block, mensajes de status).
     // Renderizado encima del grid, con color diferente.
     overlay_buffer: glyphon::Buffer,
+    // Buffer separado para el cursor (no comparte con overlay_buffer de status).
+    cursor_buffer: glyphon::Buffer,
     // ponytail: cell_w y cell_h se calculan en new() y se actualizan en resize().
     // NO son #[expect(dead_code)] en este sprint; el renderer los usa para
     // posicionar cada TextArea.
@@ -39,6 +41,13 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    // Tamano de fuente fijo (estandar de terminales).
+    const FONT_SIZE: f32 = 14.0;
+    const LINE_HEIGHT_RATIO: f32 = 1.4;
+    // Ancho de celda = font_size * 0.6 (ratio tipica monospace).
+    // cell_h = font_size * LINE_HEIGHT_RATIO.
+    const CELL_ASPECT: f32 = 0.4286; // font_size * 0.6 / (font_size * 1.4) = 0.6/1.4
+
     /// Inicializa wgpu, glyphon y la surface configuration.
     ///
     /// Recibe la ventana (`Arc<Window>` para lifetime `'static` de la surface),
@@ -67,12 +76,15 @@ impl Renderer {
         );
         let swash_cache = glyphon::SwashCache::new();
 
-        // Calcular tamano de celda y font size para el grid 24x80.
-        let (cell_w, cell_h) = Self::cell_size_for_window(config.width, config.height);
-        let font_size = Self::font_size_for_cells(cell_w, cell_h);
+        // ponytail: tamano de fuente fijo (estandar de terminales).
+        // cell_h = font_size * line_height, cell_w = cell_h * aspect (monospace).
+        let font_size = Self::FONT_SIZE;
+        let cell_h = font_size * Self::LINE_HEIGHT_RATIO;
+        let cell_w = cell_h * Self::CELL_ASPECT;
 
         // Crear 24 buffers (uno por fila del grid).
-        let metrics = glyphon::Metrics::new(font_size, font_size * 1.4);
+        let metrics =
+            glyphon::Metrics::new(Self::FONT_SIZE, Self::FONT_SIZE * Self::LINE_HEIGHT_RATIO);
         let mut buffers = Vec::with_capacity(ROWS);
         for _ in 0..ROWS {
             buffers.push(glyphon::Buffer::new(&mut font_system, metrics));
@@ -80,6 +92,8 @@ impl Renderer {
 
         // Crear 1 buffer para overlays (cursor, status).
         let overlay_buffer = glyphon::Buffer::new(&mut font_system, metrics);
+        // Buffer separado para cursor (no comparte con status).
+        let cursor_buffer = glyphon::Buffer::new(&mut font_system, metrics);
 
         Self {
             device,
@@ -93,27 +107,11 @@ impl Renderer {
             swash_cache,
             buffers,
             overlay_buffer,
+            cursor_buffer,
             cell_w,
             cell_h,
             status_active: false,
         }
-    }
-
-    /// Calcula cell_w y cell_h para un tamano de ventana dado.
-    fn cell_size_for_window(width: u32, height: u32) -> (f32, f32) {
-        (width as f32 / COLS as f32, height as f32 / ROWS as f32)
-    }
-
-    /// Calcula el font size optimo para las celdas.
-    /// Usa GLYPH_RATIO (0.6) para el ancho y LINE_RATIO (1.4) para el alto,
-    /// tomando el minimo y aplicando un piso MIN_SIZE (6.0).
-    fn font_size_for_cells(cell_w: f32, cell_h: f32) -> f32 {
-        const GLYPH_RATIO: f32 = 0.6;
-        const LINE_RATIO: f32 = 1.4;
-        const MIN_SIZE: f32 = 6.0;
-        let from_w = cell_w / GLYPH_RATIO;
-        let from_h = cell_h / LINE_RATIO;
-        from_w.min(from_h).max(MIN_SIZE)
     }
 
     /// Actualiza el tamano de la surface, el viewport, cell_w, cell_h y
@@ -129,20 +127,21 @@ impl Renderer {
         self.viewport
             .update(&self.queue, glyphon::Resolution { width, height });
 
-        // Recalcular cell_w, cell_h y font size.
-        let (cell_w, cell_h) = Self::cell_size_for_window(width, height);
-        self.cell_w = cell_w;
-        self.cell_h = cell_h;
-        let font_size = Self::font_size_for_cells(cell_w, cell_h);
+        // ponytail: tamano de fuente fijo (estandar de terminales).
+        let font_size = Self::FONT_SIZE;
+        self.cell_h = font_size * Self::LINE_HEIGHT_RATIO;
+        self.cell_w = self.cell_h * Self::CELL_ASPECT;
 
         // Recrear todos los buffers con el nuevo font size.
-        let metrics = glyphon::Metrics::new(font_size, font_size * 1.4);
+        let metrics =
+            glyphon::Metrics::new(Self::FONT_SIZE, Self::FONT_SIZE * Self::LINE_HEIGHT_RATIO);
         self.buffers.clear();
         for _ in 0..ROWS {
             self.buffers
                 .push(glyphon::Buffer::new(&mut self.font_system, metrics));
         }
         self.overlay_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+        self.cursor_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
 
         // ponytail: status_active se mantiene a traves de resize.
         // Si hay un status activo antes del resize, seguira activo.
@@ -260,6 +259,52 @@ impl Renderer {
             });
         }
 
+        // 2c. Cursor visible: bloque claro en la posicion del cursor.
+        if term.cursor_visible {
+            let cur_row = term.cursor.row;
+            let cur_col = term.cursor.col;
+            if cur_row < ROWS && cur_col < COLS {
+                let mut cursor_text = String::with_capacity(1);
+                // Usar un caracter bloque completo para el cursor (visible siempre)
+                cursor_text.push('\u{2588}'); // FULL BLOCK '█'
+                let cursor_spans = [(
+                    cursor_text.as_str(),
+                    glyphon::Attrs::new()
+                        .family(glyphon::Family::Monospace)
+                        .color(glyphon::Color::rgb(0xcd, 0xd6, 0xf4)),
+                )]; // Catppuccin Mocha Text
+                self.cursor_buffer.set_rich_text(
+                    &mut self.font_system,
+                    cursor_spans,
+                    &glyphon::Attrs::new().family(glyphon::Family::Monospace),
+                    glyphon::Shaping::Basic,
+                    None,
+                );
+                self.cursor_buffer.set_size(
+                    &mut self.font_system,
+                    Some(self.config.width as f32),
+                    Some(self.config.height as f32),
+                );
+                self.cursor_buffer
+                    .shape_until_scroll(&mut self.font_system, false);
+                let cursor_top = cur_row as f32 * self.cell_h;
+                text_areas.push(glyphon::TextArea {
+                    buffer: &self.cursor_buffer,
+                    left: cur_col as f32 * self.cell_w,
+                    top: cursor_top,
+                    scale: 1.0,
+                    bounds: glyphon::TextBounds {
+                        left: (cur_col as f32 * self.cell_w) as i32,
+                        top: cursor_top as i32,
+                        right: ((cur_col as f32 * self.cell_w) + self.cell_w) as i32,
+                        bottom: (cursor_top + self.cell_h) as i32,
+                    },
+                    default_color: glyphon::Color::rgb(0xcd, 0xd6, 0xf4),
+                    custom_glyphs: &[],
+                });
+            }
+        }
+
         // 2d. Si hay overlay activo (status), agregar TextArea extra.
         if self.status_active {
             text_areas.push(glyphon::TextArea {
@@ -367,7 +412,7 @@ fn color_to_glyphon(color: Color) -> glyphon::Color {
         Color::Green => glyphon::Color::rgb(0xa6, 0xe3, 0xa1),
         Color::Yellow => glyphon::Color::rgb(0xf9, 0xe2, 0xaf),
         Color::Blue => glyphon::Color::rgb(0x89, 0xb4, 0xfa),
-        Color::Magenta => glyphon::Color::rgb(0xc6, 0x9b, 0x6d),
+        Color::Magenta => glyphon::Color::rgb(0xf5, 0xc2, 0xe7),
         Color::Cyan => glyphon::Color::rgb(0x94, 0xe2, 0xd5),
         Color::White => glyphon::Color::rgb(0xcd, 0xd6, 0xf4),
     }
@@ -410,7 +455,7 @@ mod tests {
             (Color::Green, (0xa6, 0xe3, 0xa1)),
             (Color::Yellow, (0xf9, 0xe2, 0xaf)),
             (Color::Blue, (0x89, 0xb4, 0xfa)),
-            (Color::Magenta, (0xc6, 0x9b, 0x6d)),
+            (Color::Magenta, (0xf5, 0xc2, 0xe7)),
             (Color::Cyan, (0x94, 0xe2, 0xd5)),
             (Color::White, (0xcd, 0xd6, 0xf4)),
         ];
