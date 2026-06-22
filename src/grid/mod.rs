@@ -1,9 +1,14 @@
 use crate::ansi::Attrs;
+use std::collections::VecDeque;
 
 /// Numero de filas del grid virtual.
 pub const ROWS: usize = 24;
 /// Numero de columnas del grid virtual.
 pub const COLS: usize = 80;
+
+/// Maximo numero de lineas guardadas en el scrollback (MVP).
+// ponytail: 100 lineas fijas, sin configuracion. Sprint 6 agrega config.
+pub const MAX_SCROLLBACK: usize = 100;
 
 /// Celda individual del terminal: un caracter con sus atributos.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -19,6 +24,10 @@ pub struct Cell {
 pub struct Grid {
     /// Matriz de celdas: rows[row][col].
     pub rows: Vec<Vec<Cell>>,
+    /// Lineas que hicieron scroll por arriba de la region.
+    /// La fila mas reciente esta al final.
+    // ponytail: scrollback minimo sin reflow; Sprint 6 agrega reflow + page up/down.
+    pub scrollback: VecDeque<Vec<Cell>>,
 }
 
 impl Default for Cell {
@@ -41,6 +50,7 @@ impl Grid {
     pub fn new() -> Self {
         Self {
             rows: vec![vec![Cell::default(); COLS]; ROWS],
+            scrollback: VecDeque::with_capacity(MAX_SCROLLBACK),
         }
     }
 
@@ -75,9 +85,12 @@ impl Grid {
 
     /// Scroll up: mueve todas las filas de la region [top, bottom] una posicion
     /// hacia arriba. La fila `bottom` queda en blanco.
+    // ponytail: alt screen tambien acumula scrollback (bug aceptado); Sprint 6 decide si lo limpia.
     pub fn scroll_up_region(&mut self, n: usize, top: usize, bottom: usize) {
         for _ in 0..n {
             if top < ROWS && bottom < ROWS && top <= bottom {
+                let row_to_save = self.rows[top].clone();
+                self.push_scrollback(row_to_save);
                 self.rows.remove(top);
                 self.rows.insert(bottom, vec![Cell::default(); COLS]);
             }
@@ -142,5 +155,35 @@ impl Grid {
                 self.rows[row].push(Cell::default());
             }
         }
+    }
+
+    /// Guarda una fila en el scrollback cuando sale por arriba de la pantalla.
+    fn push_scrollback(&mut self, row: Vec<Cell>) {
+        if self.scrollback.len() >= MAX_SCROLLBACK {
+            self.scrollback.pop_front();
+        }
+        self.scrollback.push_back(row);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_scrollback_pushes_on_scroll_up() {
+        let mut grid = Grid::new();
+        // Llenar 24 lineas + 1 mas para forzar scroll up
+        grid.scroll_up_region(1, 0, ROWS - 1);
+        assert_eq!(grid.scrollback.len(), 1);
+    }
+
+    #[test]
+    fn test_scrollback_drops_oldest_when_full() {
+        let mut grid = Grid::new();
+        for _ in 0..=MAX_SCROLLBACK {
+            grid.scroll_up_region(1, 0, ROWS - 1);
+        }
+        assert_eq!(grid.scrollback.len(), MAX_SCROLLBACK);
     }
 }
