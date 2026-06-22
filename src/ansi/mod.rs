@@ -69,6 +69,8 @@ pub struct Term {
     pub cursor_visible: bool,
     /// Cursor guardado para DEC 1049 y DECSC/DECRC.
     pub saved_cursor: Option<(usize, usize)>,
+    // NUEVO en Sprint 5b: bracketed paste mode (DEC 2004)
+    pub bracketed_paste: bool,
 }
 
 impl Default for Term {
@@ -92,6 +94,8 @@ impl Term {
             attrs: Attrs::default(),
             cursor_visible: true,
             saved_cursor: None,
+            // NUEVO en Sprint 5b: bracketed paste mode (DEC 2004)
+            bracketed_paste: false,
         }
     }
 
@@ -260,6 +264,9 @@ impl vte::Perform for Term {
                 ('l', 1049) => self.exit_alt_screen(),
                 // ponytail: 1000-1006 son mouse reporting, se ignoran en este sprint
                 ('h' | 'l', 1000..=1006) => {}
+                // NUEVO en Sprint 5b: bracketed paste mode DEC 2004
+                ('h', 2004) => self.bracketed_paste = true,
+                ('l', 2004) => self.bracketed_paste = false,
                 _ => {}
             }
             return;
@@ -1076,5 +1083,63 @@ mod tests {
         feed(&mut term, b"\x1b[?1006l");
         // El grid NO debe haber cambiado (sigue siendo el char default, espacio).
         assert_eq!(term.grid.rows[0][0].ch, ' ');
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests Sprint 5b (Ronda 2): bracketed paste mode DEC 2004
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bracketed_paste_mode_activated() {
+        let mut term = Term::new();
+        assert!(!term.bracketed_paste);
+        // Usar feed que es el helper existing que procesa bytes a traves del parser
+        feed(&mut term, b"\x1b[?2004h");
+        assert!(term.bracketed_paste);
+    }
+    #[test]
+    fn test_bracketed_paste_mode_deactivated() {
+        let mut term = Term::new();
+        term.bracketed_paste = true;
+        feed(&mut term, b"\x1b[?2004l");
+        assert!(!term.bracketed_paste);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests C1 control decoding (Sprint 5b: Ronda 4)
+    // -----------------------------------------------------------------------
+
+    /// C1 control 0x9B (CSI 8-bit): vte 0.15 lo pasa a execute(0x9B).
+    /// No debe panic, y los bytes ASCII restantes se imprimen como chars normales.
+    #[test]
+    fn test_c1_csi_8bit_execute() {
+        let mut term = Term::new();
+        // 0x9B = CSI 8-bit, seguido de "5;10H"
+        // vte llama execute(0x9B) (noop), luego imprime "5;10H" (5 chars)
+        feed(&mut term, b"\x9b5;10H");
+        // No panic: 5 chars impresos desde (0,0)
+        assert_eq!(term.cursor.row, 0);
+        assert_eq!(term.cursor.col, 5);
+    }
+
+    /// 7-bit CSI (ESC [) sigue funcionando (regression test).
+    #[test]
+    fn test_7bit_csi_works() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[5;10H");
+        assert_eq!(term.cursor.row, 4);
+        assert_eq!(term.cursor.col, 9);
+    }
+
+    /// 0x90 (DCS 8-bit) + 0x9C (ST): vte 0.15 pasa ambos a execute().
+    /// No debe panic, los bytes intermedios se imprimen como chars normales.
+    #[test]
+    fn test_c1_dcs_ignored() {
+        let mut term = Term::new();
+        // DCS 8-bit + "0;10" + ST (0x9C)
+        feed(&mut term, b"\x900;10\x9c");
+        // Sin panic: "0;10" = 4 chars impresos desde (0,0)
+        assert_eq!(term.cursor.row, 0);
+        assert_eq!(term.cursor.col, 4);
     }
 }
