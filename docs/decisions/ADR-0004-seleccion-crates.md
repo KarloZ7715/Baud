@@ -3,8 +3,8 @@ titulo: "ADR-0004: Seleccion Final de Crates"
 tipo: decision
 autor: "Carlos Canabal Cordero"
 fecha_creacion: "2026-06-14"
-fecha_modificacion: "2026-06-14"
-version: "0.1.0"
+fecha_modificacion: "2026-06-20"
+version: "0.2.0"
 estado: aceptado
 tags: [decision, crates, dependencias, mvp, msrc, wgpu]
 ```
@@ -24,7 +24,7 @@ de wgpu como backend de render impone una MSRV mayor.
 
 ## Decision
 
-Se seleccionan los siguientes 14 crates para `[dependencies]`
+Se seleccionan los siguientes 15 crates para `[dependencies]`
 y 1 para `[dev-dependencies]`:
 
 | Categoria        | Crate         | Version | MSRV               |
@@ -43,6 +43,7 @@ y 1 para `[dev-dependencies]`:
 | Serializacion    | serde         | 1       | 1.56               |
 | CLI              | clap          | 4       | 1.85               |
 | Lock             | parking_lot   | 0.12    | 1.65               |
+| Clipboard         | arboard        | 3.4     | 1.70               |
 | Benchmarks (dev) | criterion     | 0.8     | 1.86               |
 
 La MSRV efectiva del proyecto queda en **1.87.0**,
@@ -96,6 +97,18 @@ fija en 1.87.0.
 8. **criterion como dev-dependency.** criterion es el
    estándar de benchmarks en Rust. Solo se compila en
    `cargo bench`, no afecta el build de produccion.
+
+9. **arboard 3.4 sobre wl-clipboard-rs.** arboard es
+   el crate de clipboard mas usado en Rust (580M+ downloads),
+   cross-platform (X11, Wayland via XWayland, macOS, Windows),
+   mantenido por 1Password, MIT licensed. API simple
+   (`Clipboard::new()`, `set_text()`, `get_text()`).
+   La limitacion conocida es que en Wayland puro sin XWayland
+   no funciona; para el MVP en Hyprland con XWayland es
+   suficiente. wl-clipboard-rs seria nativo Wayland pero
+   menos maduro (18M downloads), sin soporte X11/macOS.
+   Se documenta con `// ponytail: arboard usa XWayland en
+   Wayland puro, no funciona sin XWayland`.
 
 ## Alternativas Consideradas
 
@@ -178,3 +191,4 @@ fija en 1.87.0.
 | Version | Fecha      | Cambios                                                               |
 | ------- | ---------- | --------------------------------------------------------------------- |
 | 0.1.0   | 2026-06-14 | Primer borrador. Decision adoptada. 14 deps + 1 dev-dep, MSRV 1.87.0. |
+| 0.2.0   | 2026-06-20 | Add arboard 3.4 para clipboard (Sprint 5b). 15 deps + 1 dev-dep. |

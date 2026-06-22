@@ -11,6 +11,7 @@ Cargo.lock.bak
 *.swo
 .DS_Store
 Thumbs.db
+tmp/
 
 # Variables de entorno
 .env
