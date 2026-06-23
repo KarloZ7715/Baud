@@ -21,7 +21,7 @@ pub enum PtyCommand {
     Input(Vec<u8>),
     /// Resize: el child debe actualizar su winsize.
     Resize { rows: u16, cols: u16 },
-    /// Shutdown: enviar SIGHUP al child y esperar. (Ronda 4)
+    /// Shutdown: enviar SIGHUP al child y esperar.
     Shutdown,
 }
 

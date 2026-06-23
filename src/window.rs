@@ -11,7 +11,7 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use crate::ansi::Term;
 use crate::event_loop::PtyCommand;
-use crate::grid::{COLS, ROWS};
+use crate::grid::Cell;
 use crate::renderer::Renderer;
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
@@ -56,7 +56,7 @@ impl App {
         }
     }
 
-    /// Copia todo el grid activo (24x80) al clipboard del sistema.
+    /// Copia todo el grid activo al clipboard del sistema.
     /// Usa wl-copy (Wayland nativo) porque arboard requiere XWayland.
     fn handle_copy(&mut self) {
         // 1. Serializar el grid activo.
@@ -109,7 +109,7 @@ impl App {
     /// Si bracketed paste mode (DEC 2004) esta activo, envuelve el texto en
     /// \x1b[200~...\x1b[201~ para que readline no ejecute comandos al pegar.
     fn handle_paste(&mut self) {
-        tracing::info!("handle_paste: iniciando");
+        tracing::debug!("handle_paste: iniciando");
         // Obtener texto via wl-paste (Wayland nativo).
         // ponytail: wl-paste debe estar instalado (parte de wl-clipboard).
         let output = match std::process::Command::new("wl-paste").output() {
@@ -135,12 +135,12 @@ impl App {
 
         // Filtrar y (si aplica) envolver en marcadores DEC 2004.
         let filtered = if bracketed {
-            tracing::info!("handle_paste: bracketed paste activo, envolviendo texto");
+            tracing::debug!("handle_paste: bracketed paste activo, envolviendo texto");
             crate::input::paste_with_bracketing(&text, true)
         } else {
             crate::input::paste_text(&text)
         };
-        tracing::info!("handle_paste: {} bytes filtrados", filtered.len());
+        tracing::debug!("handle_paste: {} bytes filtrados", filtered.len());
         if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
             let _ = tx.send(PtyCommand::Input(filtered));
         }
@@ -148,7 +148,13 @@ impl App {
 
     /// Envia bytes de input al hilo PTY para escribirlos en el master fd.
     fn send_input(&self, bytes: Vec<u8>) {
-        tracing::info!("send_input: {} bytes: {:02x?}", bytes.len(), bytes);
+        // Resetear scrollback offset al enviar cualquier input al PTY
+        if let Ok(mut guard) = self.term.lock() {
+            if guard.scrollback_offset > 0 {
+                guard.scrollback_offset = 0;
+            }
+        }
+        tracing::debug!("send_input: {} bytes: {:02x?}", bytes.len(), bytes);
         if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
             let _ = tx.send(PtyCommand::Input(bytes));
         }
@@ -211,7 +217,7 @@ impl ApplicationHandler<UserEvent> for App {
             .expect("no se encontro formato de surface compatible");
         surface.configure(&device, &config);
 
-        // 4. Crear Renderer (Ronda 1).
+        // 4. Crear Renderer.
         self.renderer = Some(Renderer::new(
             window.clone(),
             device,
@@ -243,23 +249,65 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::Resized(new_size) => {
                 if let Some(renderer) = &mut self.renderer {
-                    renderer.resize(new_size.width, new_size.height);
-                }
-                // Enviar resize al hilo PTY para que haga ioctl(TIOCSWINSZ).
-                // ponytail: el grid logico sigue siendo 24x80 hardcoded; el child
-                // recibe SIGWINCH para ajustar su output. Reflow en Sprint 6.
-                if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
-                    let _ = tx.send(PtyCommand::Resize {
-                        rows: ROWS as u16,
-                        cols: COLS as u16,
-                    });
+                    let new_rows = (new_size.height as f32 / renderer.cell_h).max(1.0) as usize;
+                    let new_cols = (new_size.width as f32 / renderer.cell_w).max(1.0) as usize;
+                    tracing::info!(
+                        "[RESIZE] cell_h={:.1} cell_w={:.1} win={}x{} -> grid={}x{}",
+                        renderer.cell_h, renderer.cell_w,
+                        new_size.width, new_size.height,
+                        new_rows, new_cols,
+                    );
+                    renderer.resize(new_size.width, new_size.height, new_rows);
+                    if let Ok(mut guard) = self.term.lock() {
+                        guard.resize_grid(new_rows, new_cols);
+                        guard.scrollback_offset = 0;
+                        // Log grid state after reflow
+                        let g = &guard.grid;
+                        let n = g.rows.len().min(5);
+                        let mut summary_top = String::new();
+                        for r in 0..n {
+                            let s: String = g.rows[r].iter().take(20).map(|c| c.ch).collect();
+                            let cont = if r < g.row_continuations.len() && g.row_continuations[r] { "~" } else { "|" };
+                            summary_top.push_str(&format!("{}{}", cont, s));
+                        }
+                        let mut summary_bot = String::new();
+                        let rows_len = g.rows.len();
+                        let bot_start = rows_len.saturating_sub(5);
+                        for r in bot_start..rows_len {
+                            let s: String = g.rows[r].iter().take(20).map(|c| c.ch).collect();
+                            let cont = if r < g.row_continuations.len() && g.row_continuations[r] { "~" } else { "|" };
+                            summary_bot.push_str(&format!("{}{}", cont, s));
+                        }
+                        let non_empty = g.rows.iter().filter(|r| r.iter().any(|c| *c != Cell::default())).count();
+                        tracing::info!(
+                            "[RESIZE] grid: {}x{} sb={} filled={}/{} top=[{}] bot=[{}]",
+                            g.rows_count, g.cols_count, g.scrollback.len(),
+                            non_empty, rows_len,
+                            summary_top, summary_bot,
+                        );
+                    }
+                    // Enviar resize al hilo PTY solo si el ancho cambio.
+                    // Si solo cambio el alto, bash re-ecoe el prompt y daña el
+                    // orden del contenido recuperado del scrollback.
+                    if let Ok(old_guard) = self.term.lock() {
+                        let old_cols = old_guard.grid.cols_count;
+                        if old_cols != new_cols {
+                            drop(old_guard);
+                            if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
+                                let _ = tx.send(PtyCommand::Resize {
+                                    rows: new_rows as u16,
+                                    cols: new_cols as u16,
+                                });
+                            }
+                        }
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
                 let Some(renderer) = &mut self.renderer else {
                     return;
                 };
-                tracing::info!("RedrawRequested: renderizando frame");
+                tracing::debug!("RedrawRequested: renderizando frame");
                 // Lockear el term directamente; el campo es solo lectura aqui.
                 let term_guard = match self.term.lock() {
                     Ok(g) => g,
@@ -278,12 +326,13 @@ impl ApplicationHandler<UserEvent> for App {
                 self.modifiers = modifiers;
             }
             // Input de teclado completo: letras, Enter, Backspace, Tab, Ctrl+letter, etc.
-            // ponytail: input basico sin manejo de flechas ni F-keys; Sprint 6 las agrega.
+            // ponytail: input basico sin manejo de teclas especiales (menu, print screen).
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let ctrl = self.modifiers.state().control_key();
                 let shift = self.modifiers.state().shift_key();
+                let alt = self.modifiers.state().alt_key();
 
-                // 1. Ctrl+Shift+C/V (copy/paste, ya implementado en Sprint 5b).
+                // 1. Ctrl+Shift+C/V (copy/paste).
                 if ctrl && shift {
                     match &event.logical_key {
                         Key::Character(c) if c.eq_ignore_ascii_case("c") => {
@@ -309,7 +358,6 @@ impl ApplicationHandler<UserEvent> for App {
                 }
 
                 // 3. Teclas con texto generado (letras, numeros, simbolos con Shift).
-                //    Fallback a logical_key si text es None (bug conocido en winit/Wayland).
                 if let Some(text) = event.text {
                     self.send_input(text.as_bytes().to_vec());
                     return;
@@ -328,14 +376,89 @@ impl ApplicationHandler<UserEvent> for App {
                     Key::Named(NamedKey::Backspace) => self.send_input(b"\x7f".to_vec()),
                     Key::Named(NamedKey::Tab) => self.send_input(b"\t".to_vec()),
                     Key::Named(NamedKey::Escape) => self.send_input(b"\x1b".to_vec()),
+                    Key::Named(NamedKey::ArrowUp) if ctrl && shift => {
+                        // Ctrl+Shift+Up: scroll up one line (para teclados sin scroll dedicado).
+                        let mut guard = self.term.lock().expect("term mutex poisoned");
+                        if !guard.alt_screen {
+                            let max_offset = guard.scrollback_len();
+                            guard.scrollback_offset =
+                                (guard.scrollback_offset + 1).min(max_offset as isize);
+                        }
+                        drop(guard);
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    Key::Named(NamedKey::ArrowDown) if ctrl && shift => {
+                        // Ctrl+Shift+Down: scroll down one line.
+                        let mut guard = self.term.lock().expect("term mutex poisoned");
+                        guard.scrollback_offset = (guard.scrollback_offset - 1).max(0);
+                        drop(guard);
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    Key::Named(NamedKey::ArrowUp) if alt => {
+                        // Alt+Up = page up (alternativa para teclados sin PageUp)
+                        let mut guard = self.term.lock().expect("term mutex poisoned");
+                        if !guard.alt_screen {
+                            let max_offset = guard.scrollback_len();
+                            let page = guard.grid.rows_count as isize - 1;
+                            guard.scrollback_offset =
+                                (guard.scrollback_offset + page).min(max_offset as isize);
+                        }
+                        drop(guard);
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    Key::Named(NamedKey::ArrowDown) if alt => {
+                        // Alt+Down = page down
+                        let mut guard = self.term.lock().expect("term mutex poisoned");
+                        let page = guard.grid.rows_count as isize - 1;
+                        guard.scrollback_offset = (guard.scrollback_offset - page).max(0);
+                        drop(guard);
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
                     Key::Named(NamedKey::ArrowUp) => self.send_input(b"\x1b[A".to_vec()),
                     Key::Named(NamedKey::ArrowDown) => self.send_input(b"\x1b[B".to_vec()),
                     Key::Named(NamedKey::ArrowLeft) => self.send_input(b"\x1b[D".to_vec()),
                     Key::Named(NamedKey::ArrowRight) => self.send_input(b"\x1b[C".to_vec()),
                     Key::Named(NamedKey::Home) => self.send_input(b"\x1b[H".to_vec()),
+                    Key::Named(NamedKey::End) if ctrl => {
+                        self.term
+                            .lock()
+                            .expect("term mutex poisoned")
+                            .scrollback_offset = 0;
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
                     Key::Named(NamedKey::End) => self.send_input(b"\x1b[F".to_vec()),
-                    Key::Named(NamedKey::PageUp) => self.send_input(b"\x1b[5~".to_vec()),
-                    Key::Named(NamedKey::PageDown) => self.send_input(b"\x1b[6~".to_vec()),
+                    Key::Named(NamedKey::PageUp) => {
+                        let mut guard = self.term.lock().expect("term mutex poisoned");
+                        if !guard.alt_screen {
+                            let max_offset = guard.scrollback_len();
+                            let page = guard.grid.rows_count as isize - 1;
+                            guard.scrollback_offset =
+                                (guard.scrollback_offset + page).min(max_offset as isize);
+                        }
+                        drop(guard);
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    Key::Named(NamedKey::PageDown) => {
+                        let mut guard = self.term.lock().expect("term mutex poisoned");
+                        let page = guard.grid.rows_count as isize - 1;
+                        guard.scrollback_offset = (guard.scrollback_offset - page).max(0);
+                        drop(guard);
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
                     Key::Named(NamedKey::Delete) => self.send_input(b"\x1b[3~".to_vec()),
                     Key::Named(NamedKey::Insert) => self.send_input(b"\x1b[2~".to_vec()),
                     Key::Named(NamedKey::F1) => self.send_input(b"\x1bOP".to_vec()),

@@ -6,7 +6,7 @@ use std::process::Stdio;
 /// Implementa Read y Write delegando a nix::unistd.
 pub struct Pty {
     fd: OwnedFd,
-    // ponytail: child_pid se guarda para SIGHUP en Drop (Ronda 4) y set_winsize.
+    // ponytail: child_pid se guarda para SIGHUP en Drop y set_winsize.
     // None en open(), Some(_) en spawn().
     child_pid: Option<i32>,
 }

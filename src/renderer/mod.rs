@@ -1,14 +1,15 @@
-//! Modulo de render GPU del grid 24x80.
+//! Modulo de render GPU del grid dinamico.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::ansi::{Color, Term};
-use crate::grid::{COLS, ROWS};
+use crate::grid::Cell;
 use winit::window::Window;
 
 /// Renderer GPU del terminal virtual.
 ///
-/// Mantiene los recursos wgpu y glyphon necesarios para pintar el grid 24x80.
+/// Mantiene los recursos wgpu y glyphon necesarios para pintar el grid dinamico.
 /// Los campos son privados: se inicializa via `Renderer::new` y se consume
 /// via `render` y `resize`.
 pub struct Renderer {
@@ -21,40 +22,42 @@ pub struct Renderer {
     viewport: glyphon::Viewport,
     text_renderer: glyphon::TextRenderer,
     swash_cache: glyphon::SwashCache,
-    // ponytail: 1 buffer por fila del grid. 24 buffers en lugar de 1 buffer
-    // compartido permite que cada fila tenga su propio top y que el resize
-    // solo reconfigure los buffers afectados, no todo el buffer.
+    // Un buffer por fila del grid. Cada fila tiene su propio top en screen-space
+    // (row * cell_h), permitiendo que el cursor coincida correctamente con la
+    // posicion de cada fila, a diferencia del buffer multilinea donde todo el
+    // texto fluye desde top=0.
     buffers: Vec<glyphon::Buffer>,
-    // ponytail: 1 buffer para overlays (cursor block, mensajes de status).
+    // Buffer para overlays (cursor block, mensajes de status).
     // Renderizado encima del grid, con color diferente.
     overlay_buffer: glyphon::Buffer,
     // Buffer separado para el cursor (no comparte con overlay_buffer de status).
     cursor_buffer: glyphon::Buffer,
     // ponytail: cell_w y cell_h se calculan en new() y se actualizan en resize().
-    // NO son #[expect(dead_code)] en este sprint; el renderer los usa para
-    // posicionar cada TextArea.
-    cell_w: f32,
-    cell_h: f32,
+    // El renderer los usa para posicionar cada TextArea.
+    pub cell_w: f32,
+    pub cell_h: f32,
     // ponytail: flag del overlay. Se activa con set_status(), se desactiva
     // cuando se llama con texto vacio o cuando se hace render() sin status.
     status_active: bool,
+    frame_count: u64,
+    // Shaper cache por fila: evita set_rich_text/set_size/shape_until_scroll
+    // cuando el contenido de una fila no cambió entre frames.
+    line_cache: Vec<String>,
 }
 
 impl Renderer {
-    // Tamano de fuente fijo (estandar de terminales).
     const FONT_SIZE: f32 = 14.0;
-    const LINE_HEIGHT_RATIO: f32 = 1.4;
-    // Ancho de celda = font_size * 0.6 (ratio tipica monospace).
-    // cell_h = font_size * LINE_HEIGHT_RATIO.
-    const CELL_ASPECT: f32 = 0.4286; // font_size * 0.6 / (font_size * 1.4) = 0.6/1.4
+    const LINE_HEIGHT_RATIO: f32 = 1.3;
+
+    pub fn cell_w(&self) -> f32 {
+        self.cell_w
+    }
+
+    pub fn cell_h(&self) -> f32 {
+        self.cell_h
+    }
 
     /// Inicializa wgpu, glyphon y la surface configuration.
-    ///
-    /// Recibe la ventana (`Arc<Window>` para lifetime `'static` de la surface),
-    /// el device, queue, surface y configuracion de surface pre-creados.
-    ///
-    /// Calcula cell_w, cell_h y font_size a partir del tamano de la ventana
-    /// y crea 24 buffers (uno por fila) + 1 overlay buffer.
     pub fn new(
         _window: Arc<Window>,
         device: wgpu::Device,
@@ -63,8 +66,7 @@ impl Renderer {
         config: wgpu::SurfaceConfiguration,
     ) -> Self {
         let mut font_system = glyphon::FontSystem::new();
-        font_system.db_mut().load_system_fonts();
-
+        // Cache necesario para glyphon 0.11
         let cache = glyphon::Cache::new(&device);
         let mut atlas = glyphon::TextAtlas::new(&device, &queue, &cache, config.format);
         let viewport = glyphon::Viewport::new(&device, &cache);
@@ -76,24 +78,36 @@ impl Renderer {
         );
         let swash_cache = glyphon::SwashCache::new();
 
-        // ponytail: tamano de fuente fijo (estandar de terminales).
-        // cell_h = font_size * line_height, cell_w = cell_h * aspect (monospace).
         let font_size = Self::FONT_SIZE;
         let cell_h = font_size * Self::LINE_HEIGHT_RATIO;
-        let cell_w = cell_h * Self::CELL_ASPECT;
+        let metrics = glyphon::Metrics::new(font_size, font_size * Self::LINE_HEIGHT_RATIO);
 
-        // Crear 24 buffers (uno por fila del grid).
-        let metrics =
-            glyphon::Metrics::new(Self::FONT_SIZE, Self::FONT_SIZE * Self::LINE_HEIGHT_RATIO);
-        let mut buffers = Vec::with_capacity(ROWS);
-        for _ in 0..ROWS {
+        // Crear buffers iniciales (uno por fila del grid por defecto).
+        let mut buffers = Vec::with_capacity(crate::grid::DEFAULT_ROWS);
+        for _ in 0..crate::grid::DEFAULT_ROWS {
             buffers.push(glyphon::Buffer::new(&mut font_system, metrics));
         }
-
-        // Crear 1 buffer para overlays (cursor, status).
         let overlay_buffer = glyphon::Buffer::new(&mut font_system, metrics);
-        // Buffer separado para cursor (no comparte con status).
         let cursor_buffer = glyphon::Buffer::new(&mut font_system, metrics);
+
+        // Medir el ancho real de un caracter con glyphon para que el cursor
+        // coincida exactamente con la posicion del texto renderizado.
+        let mut measure_buffer = glyphon::Buffer::new(&mut font_system, metrics);
+        measure_buffer.set_text(
+            &mut font_system,
+            "W",
+            &glyphon::Attrs::new().family(glyphon::Family::Monospace),
+            glyphon::Shaping::Basic,
+            None,
+        );
+        measure_buffer.shape_until_scroll(&mut font_system, false);
+        let cell_w = measure_buffer
+            .layout_runs()
+            .next()
+            .map(|run| run.line_w)
+            .unwrap_or(cell_h * 0.6);
+
+        let line_cache = vec![String::new(); crate::grid::DEFAULT_ROWS];
 
         Self {
             device,
@@ -111,16 +125,13 @@ impl Renderer {
             cell_w,
             cell_h,
             status_active: false,
+            frame_count: 0,
+            line_cache,
         }
     }
 
-    /// Actualiza el tamano de la surface, el viewport, cell_w, cell_h y
-    /// recrea los 24 buffers + 1 overlay buffer con el nuevo font size.
-    ///
-    /// ponytail: 25 buffers es barato (cada buffer es 0 costo si no se usa).
-    /// Si en Sprint 6+ medimos que esto es lento, refactorizamos a un solo
-    /// buffer con multiples TextArea o a lazy allocation.
-    pub fn resize(&mut self, width: u32, height: u32) {
+    /// Cambia el tamaño de la surface y recrea los buffers por fila.
+    pub fn resize(&mut self, width: u32, height: u32, rows_count: usize) {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
@@ -130,34 +141,46 @@ impl Renderer {
         // ponytail: tamano de fuente fijo (estandar de terminales).
         let font_size = Self::FONT_SIZE;
         self.cell_h = font_size * Self::LINE_HEIGHT_RATIO;
-        self.cell_w = self.cell_h * Self::CELL_ASPECT;
-
-        // Recrear todos los buffers con el nuevo font size.
         let metrics =
             glyphon::Metrics::new(Self::FONT_SIZE, Self::FONT_SIZE * Self::LINE_HEIGHT_RATIO);
+
+        // Medir el ancho real del caracter para posicionamiento preciso del cursor.
+        let mut measure_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+        measure_buffer.set_text(
+            &mut self.font_system,
+            "W",
+            &glyphon::Attrs::new().family(glyphon::Family::Monospace),
+            glyphon::Shaping::Basic,
+            None,
+        );
+        measure_buffer.shape_until_scroll(&mut self.font_system, false);
+        self.cell_w = measure_buffer
+            .layout_runs()
+            .next()
+            .map(|run| run.line_w)
+            .unwrap_or(self.cell_h * 0.6);
+
+        // Recrear buffers con el nuevo font size y la nueva cantidad de filas.
+        // (metrics ya calculado arriba)
         self.buffers.clear();
-        for _ in 0..ROWS {
+        for _ in 0..rows_count {
             self.buffers
                 .push(glyphon::Buffer::new(&mut self.font_system, metrics));
         }
         self.overlay_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
         self.cursor_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
-
-        // ponytail: status_active se mantiene a traves de resize.
-        // Si hay un status activo antes del resize, seguira activo.
+        // Invalidar cache completa al cambiar tamaño: se recrean los buffers,
+        // por lo que todo el contenido previo queda obsoleto.
+        self.line_cache = vec![String::new(); rows_count];
     }
 
-    /// Renderiza el grid 24x80 del terminal en la surface GPU.
-    ///
-    /// Construye 24 TextArea (uno por fila del grid activo), cada uno con
-    /// left=0, top=row*cell_h, y bounds que recortan a la celda. Si
-    /// status_active esta activo, agrega un TextArea extra para el overlay.
-    ///
-    /// # Errors
-    /// Retorna un `String` si la GPU no puede presentar el frame, preparar
-    /// el texto, o renderizar.
+    /// Renderiza el estado del `term` en la surface.
+    #[tracing::instrument(skip(self, term))]
     pub fn render(&mut self, term: &Term) -> Result<(), String> {
+        let t0 = Instant::now();
+
         // 1. Obtener frame de la surface
+        let t_frame_start = Instant::now();
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex)
             | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
@@ -172,6 +195,8 @@ impl Renderer {
                 return Err("error: validacion de surface fallo".to_string());
             }
         };
+        let get_frame_us = t_frame_start.elapsed().as_secs_f64() * 1_000_000.0;
+
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -179,39 +204,125 @@ impl Renderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-        // 2. Construir 24 TextArea, uno por fila del grid activo.
+        // 2. Construir contenido por fila (Fase A) y TextAreas (Fase B).
+        let t_phase_a = Instant::now();
         let default_attrs = glyphon::Attrs::new().family(glyphon::Family::Monospace);
         let active = term.active_grid();
-        let mut text_areas = Vec::with_capacity(ROWS + 1);
+        let cols_count = active.cols_count;
+        let rows_count = active.rows_count;
+        let show_scrollback = term.scrollback_offset > 0;
 
-        // Fase A: llenar los 24 buffers (borrow mutable). Fase B abajo (borrow inmutable).
-        for row in 0..ROWS {
-            // 2a. Construir el string de la fila (80 chars).
-            let mut line = String::with_capacity(COLS);
-            // Almacenar informacion de estilo por celda para esta fila.
-            struct CellStyle {
-                start: usize,
-                end: usize,
-                bold: bool,
-                fg: Color,
+        // Pre-computar filas del scrollback si es necesario.
+        let sb_rows: Vec<&[Cell]> = if show_scrollback {
+            let sb_offset = term.scrollback_offset as usize;
+            let sb_len = term.grid.scrollback.len();
+            let sb_start = sb_len.saturating_sub(sb_offset);
+            term.grid
+                .scrollback
+                .range(sb_start..)
+                .map(|r| r.as_slice())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        /// Estilo de un tramo de caracteres agrupados por atributos.
+        struct CellStyle {
+            start: usize,
+            end: usize,
+            bold: bool,
+            fg: Color,
+        }
+
+        // Pre-calcular filas fuente y si estan vacias (para compartir entre fases).
+        // Modelo correcto: viewport sobre buffer virtual [scrollback + grid].
+        // scrollback[0..N-1] (antiguas primero) + grid[0..M-1] (presente).
+        // viewport_start = max(0, N + M - rows_count - offset) = N - offset (offset <= N).
+        let row_sources: Vec<&[Cell]> = (0..rows_count)
+            .map(|row| {
+                if show_scrollback {
+                    let sb_len = term.grid.scrollback.len();
+                    let offset = term.scrollback_offset as usize;
+                    // viewport_start apunta al buffer virtual: N - offset
+                    let viewport_start = sb_len.saturating_sub(offset);
+                    let virtual_row = viewport_start + row; // posicion en el buffer virtual
+                    if virtual_row < sb_len {
+                        // Viene del scrollback
+                        sb_rows[virtual_row - viewport_start]
+                    } else {
+                        // Viene del grid primario (NO active.rows que podria ser alt_grid)
+                        let grid_row = virtual_row - sb_len;
+                        &term.grid.rows[grid_row]
+                    }
+                } else {
+                    &active.rows[row]
+                }
+            })
+            .collect();
+
+        let row_empty: Vec<bool> = row_sources
+            .iter()
+            .map(|r| r.is_empty() || r.iter().all(|c| *c == Cell::default()))
+            .collect();
+
+        // Fase A: llenar los buffers por fila con spans agrupados.
+        for (row, source_row) in row_sources.iter().enumerate() {
+            if row_empty[row] {
+                // Fila vacia: actualizar cache a vacio, no llamar a glyphon.
+                self.line_cache[row].clear();
+                continue;
             }
-            let mut styles: Vec<CellStyle> = Vec::with_capacity(COLS);
 
-            for col in 0..COLS {
-                let cell = &active.rows[row][col];
-                let start = line.len();
+            // Construir string de la fila con spans agrupados por atributos.
+            let mut line = String::with_capacity(cols_count);
+            let mut styles: Vec<CellStyle> = Vec::with_capacity(2); // pocos spans por fila
+
+            let mut span_start = 0usize;
+            let mut current_bold = false;
+            let mut current_fg = Color::Default;
+
+            for col in 0..cols_count {
+                let default_cell = Cell::default();
+                let cell = source_row.get(col).unwrap_or(&default_cell);
+                let pos_before = line.len();
                 line.push(cell.ch);
-                let end = line.len();
+
+                // Cerrar span anterior si cambian los atributos.
+                if pos_before > span_start
+                    && (cell.attrs.bold != current_bold || cell.attrs.fg != current_fg)
+                {
+                    styles.push(CellStyle {
+                        start: span_start,
+                        end: pos_before,
+                        bold: current_bold,
+                        fg: current_fg,
+                    });
+                    span_start = pos_before;
+                }
+                current_bold = cell.attrs.bold;
+                current_fg = cell.attrs.fg;
+            }
+
+            // Cerrar ultimo span de la fila.
+            if span_start < line.len() {
                 styles.push(CellStyle {
-                    start,
-                    end,
-                    bold: cell.attrs.bold,
-                    fg: cell.attrs.fg,
+                    start: span_start,
+                    end: line.len(),
+                    bold: current_bold,
+                    fg: current_fg,
                 });
             }
 
-            // 2b. set_rich_text en el buffer de esta fila con spans por celda.
-            // ponytail: colores SGR individuales via color_to_glyphon.
+            // Shaper cache: si el contenido de la fila no cambió, el buffer
+            // ya tiene el shaped correcto del frame anterior.
+            if line == self.line_cache[row] {
+                continue;
+            }
+
+            // Contenido cambió: actualizar cache y shapear.
+            self.line_cache[row].clone_from(&line);
+
+            // Construir spans de glyphon a partir de los CellStyle.
             let spans = styles.iter().map(|s| {
                 let fg = color_to_glyphon(s.fg);
                 let color = glyphon::Color::rgba(fg.r(), fg.g(), fg.b(), 255);
@@ -219,8 +330,6 @@ impl Renderer {
                 if s.bold {
                     attrs = attrs.weight(glyphon::Weight::BOLD);
                 }
-                // ponytail: underline no soportado nativamente por glyphon
-                // 0.11. Pendiente para Sprint 4 via wgpu::RenderPass separado.
                 attrs = attrs.color(color);
                 (&line[s.start..s.end], attrs)
             });
@@ -240,8 +349,18 @@ impl Renderer {
             self.buffers[row].shape_until_scroll(&mut self.font_system, false);
         }
 
-        // Fase B: referencias inmutables como TextArea, una por fila con top = row * cell_h.
-        for row in 0..ROWS {
+        let phase_a_us = t_phase_a.elapsed().as_secs_f64() * 1_000_000.0;
+
+        // Fase B: construir TextAreas con top = row * cell_h.
+        let t_phase_b = Instant::now();
+        let mut text_areas = Vec::with_capacity(rows_count + 2); // filas + cursor + overlay
+
+        for (row, _) in row_sources.iter().enumerate() {
+            if row_empty[row] {
+                // Fila vacia: no agregar TextArea, se ve el fondo del clear.
+                continue;
+            }
+
             let top = row as f32 * self.cell_h;
             text_areas.push(glyphon::TextArea {
                 buffer: &self.buffers[row],
@@ -259,20 +378,19 @@ impl Renderer {
             });
         }
 
-        // 2c. Cursor visible: bloque claro en la posicion del cursor.
-        if term.cursor_visible {
+        // 2b. Cursor: solo si NO estamos en scrollback.
+        if !show_scrollback && term.cursor_visible {
             let cur_row = term.cursor.row;
             let cur_col = term.cursor.col;
-            if cur_row < ROWS && cur_col < COLS {
+            if cur_row < rows_count && cur_col < cols_count {
                 let mut cursor_text = String::with_capacity(1);
-                // Usar un caracter bloque completo para el cursor (visible siempre)
                 cursor_text.push('\u{2588}'); // FULL BLOCK '█'
                 let cursor_spans = [(
                     cursor_text.as_str(),
                     glyphon::Attrs::new()
                         .family(glyphon::Family::Monospace)
                         .color(glyphon::Color::rgb(0xcd, 0xd6, 0xf4)),
-                )]; // Catppuccin Mocha Text
+                )];
                 self.cursor_buffer.set_rich_text(
                     &mut self.font_system,
                     cursor_spans,
@@ -305,7 +423,7 @@ impl Renderer {
             }
         }
 
-        // 2d. Si hay overlay activo (status), agregar TextArea extra.
+        // 2c. Si hay overlay activo (status), agregar TextArea extra.
         if self.status_active {
             text_areas.push(glyphon::TextArea {
                 buffer: &self.overlay_buffer,
@@ -318,13 +436,14 @@ impl Renderer {
                     right: self.config.width as i32,
                     bottom: self.config.height as i32,
                 },
-                // ponytail: rojo para status (Catppuccin Mocha Red).
                 default_color: glyphon::Color::rgb(0xf3, 0x8b, 0xa8),
                 custom_glyphs: &[],
             });
         }
+        let phase_b_us = t_phase_b.elapsed().as_secs_f64() * 1_000_000.0;
 
         // 3. Preparar todos los TextArea para glyphon
+        let t_prepare = Instant::now();
         self.text_renderer
             .prepare(
                 &self.device,
@@ -336,8 +455,10 @@ impl Renderer {
                 &mut self.swash_cache,
             )
             .map_err(|e| format!("error al preparar texto: {e}"))?;
+        let prepare_us = t_prepare.elapsed().as_secs_f64() * 1_000_000.0;
 
         // 4. Renderizar en el render pass
+        let t_gpu = Instant::now();
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("glyphon render pass"),
@@ -362,6 +483,19 @@ impl Renderer {
         // 5. Enviar comandos y presentar
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
+        let gpu_us = t_gpu.elapsed().as_secs_f64() * 1_000_000.0;
+
+        let total_us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+
+        self.frame_count += 1;
+        // Log each 30 frames to avoid spam
+        if self.frame_count.is_multiple_of(30) {
+            tracing::info!(
+                "[RENDER_PERF] frame={} total={:.0}us get_frame={:.0}us phase_a={:.0}us phase_b={:.0}us prepare={:.0}us gpu={:.0}us rows={} cols={}",
+                self.frame_count, total_us, get_frame_us, phase_a_us, phase_b_us, prepare_us, gpu_us,
+                rows_count, cols_count,
+            );
+        }
 
         Ok(())
     }
@@ -379,7 +513,7 @@ impl Renderer {
 
         let default_attrs = glyphon::Attrs::new().family(glyphon::Family::Monospace);
         let mut attrs = glyphon::Attrs::new().family(glyphon::Family::Monospace);
-        // ponytail: color rojo para status. Refinable en Sprint 8 con theme.
+        // ponytail: color rojo para status. Refinable con theme en el futuro.
         attrs = attrs.color(glyphon::Color::rgb(0xf3, 0x8b, 0xa8));
         let spans = [(text, attrs)];
 
@@ -403,7 +537,7 @@ impl Renderer {
 }
 
 /// Convierte un Color ANSI a `glyphon::Color` (Catppuccin Mocha hardcoded).
-// ponytail: colores hardcoded, theme configurable en Sprint 8.
+// ponytail: colores hardcoded, theme configurable en el futuro.
 fn color_to_glyphon(color: Color) -> glyphon::Color {
     match color {
         Color::Default => glyphon::Color::rgb(0xcd, 0xd6, 0xf4),

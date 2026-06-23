@@ -1,6 +1,6 @@
 /// Filtra bytes problematicos (ESC 0x1B, ETX 0x03) del texto pegado.
 /// Retorna Vec<u8> con los bytes filtrados, listos para enviar al PTY.
-// ponytail: solo filtra ESC y ETX por MVP. 0x1A y 0x04 en Sprint 6+ si se decide.
+// ponytail: solo filtra ESC y ETX por MVP. 0x1A y 0x04 por implementar si se requiere.
 pub fn paste_text(text: &str) -> Vec<u8> {
     let mut result = Vec::with_capacity(text.len());
     for &byte in text.as_bytes() {

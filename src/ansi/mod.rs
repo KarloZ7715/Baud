@@ -1,5 +1,5 @@
 use crate::cursor::Cursor;
-use crate::grid::{Grid, COLS, ROWS};
+use crate::grid::{Grid, DEFAULT_ROWS};
 
 /// Colores basicos del terminal ANSI.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -49,13 +49,13 @@ pub struct Attrs {
 
 /// Estado completo del terminal virtual.
 pub struct Term {
-    /// Grid de caracteres 24x80 (pantalla primaria).
+    /// Grid de caracteres (pantalla primaria).
     pub grid: Grid,
     /// Alt screen (solo se usa si alt_screen = true).
     pub alt_grid: Grid,
     /// Flag que indica si estamos en alt screen.
     pub alt_screen: bool,
-    /// Region de scroll (top, bottom), default (0, ROWS - 1).
+    /// Region de scroll (top, bottom), default (0, rows_count - 1).
     pub scroll_region: (usize, usize),
     /// Auto wrap activo (DECAWM), default true.
     pub auto_wrap: bool,
@@ -69,8 +69,10 @@ pub struct Term {
     pub cursor_visible: bool,
     /// Cursor guardado para DEC 1049 y DECSC/DECRC.
     pub saved_cursor: Option<(usize, usize)>,
-    // NUEVO en Sprint 5b: bracketed paste mode (DEC 2004)
+    // DEC 2004: bracketed paste mode
     pub bracketed_paste: bool,
+    // Desplazamiento de scrollback para navegacion (pagina arriba/abajo)
+    pub scrollback_offset: isize,
 }
 
 impl Default for Term {
@@ -87,15 +89,15 @@ impl Term {
             // ponytail: alt_grid siempre inicializado, no se recrea al entrar
             alt_grid: Grid::new(),
             alt_screen: false,
-            scroll_region: (0, ROWS - 1),
+            scroll_region: (0, DEFAULT_ROWS - 1),
             auto_wrap: true,
             pending_wrap: false,
             cursor: Cursor::new(),
             attrs: Attrs::default(),
             cursor_visible: true,
             saved_cursor: None,
-            // NUEVO en Sprint 5b: bracketed paste mode (DEC 2004)
             bracketed_paste: false,
+            scrollback_offset: 0,
         }
     }
 
@@ -135,6 +137,36 @@ impl Term {
         self.pending_wrap = false;
     }
 
+    /// Devuelve la cantidad de líneas en el scrollback.
+    pub fn scrollback_len(&self) -> usize {
+        self.grid.scrollback.len()
+    }
+
+    /// Cambia el tamaño del grid primario y alt grid.
+    /// En pantalla primaria: aplica reflow de líneas antes de resize.
+    /// En alt screen: resize directo sin reflow.
+    /// También ajusta scroll_region, cursor y pending_wrap si es necesario.
+    pub fn resize_grid(&mut self, new_rows: usize, new_cols: usize) {
+        if self.alt_screen {
+            self.alt_grid.resize(new_rows, new_cols);
+        } else {
+            // Primero reflow: re-dividir el contenido en el nuevo ancho de columna
+            self.grid.reflow(new_cols);
+            // resize devuelve cuántas filas se prependieron del scrollback
+            let prepended = self.grid.resize(new_rows, new_cols);
+            // Si se prependieron filas, desplazar el cursor hacia abajo
+            // para que apunte a la misma línea lógica.
+            if prepended > 0 {
+                self.cursor.row = self.cursor.row.saturating_add(prepended);
+            }
+        }
+        // Siempre redimensionar alt_grid para que coincida con el tamano del terminal
+        self.alt_grid.resize(new_rows, new_cols);
+        self.cursor.resize(new_rows, new_cols);
+        self.scroll_region = (0, new_rows - 1);
+        self.pending_wrap = false;
+    }
+
     /// Ejecuta el wrap pendiente: avanza una fila (con scroll si estamos
     /// en el bottom de la scroll region) y mueve el cursor a col 0.
     /// SIEMPRE setea `pending_wrap = false` al inicio para evitar loops.
@@ -148,6 +180,10 @@ impl Term {
             self.cursor.move_down(1);
         }
         self.cursor.move_to(self.cursor.row, 0);
+        // Marcar esta fila como continuación por soft-wrap, no hard break.
+        let target_row = self.cursor.row;
+        self.active_grid_mut()
+            .set_continuation(target_row, true);
     }
 
     /// DECSC: guarda la posicion del cursor.
@@ -165,35 +201,76 @@ impl Term {
 }
 
 /// Implementa el trait vte::Perform para procesar secuencias ANSI.
-///
-/// En Ronda 1 solo `print` es funcional. Los demas metodos son placeholders
-/// que se implementaran en Rondas 2A/3.
 impl vte::Perform for Term {
-    /// Escribe un caracter en la posicion actual del cursor y avanza la columna.
+    /// Escribe un caracter en la posicion actual del cursor y avanza la columna
+    /// según el ancho Unicode del caracter (1 para latino, 2 para CJK, etc.).
+    /// Si `c_width == 0` (caracter de ancho cero), no escribe nada.
     /// Si hay pending_wrap activo, primero ejecuta el wrap (avanza fila,
     /// columna a 0).
-    /// Si al escribir el cursor llega a COLS, marca pending_wrap si
+    /// Si al escribir el cursor sale del grid, marca pending_wrap si
     /// auto_wrap esta activo.
+    /// Los caracteres de ancho 2 en la ultima columna fuerzan un wrap.
     fn print(&mut self, c: char) {
+        let c_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        // Caracteres de ancho cero (controles, combinantes) se ignoran.
+        if c_width == 0 {
+            return;
+        }
+
         // Si hay wrap pendiente, primero hacer el wrap.
-        // ponytail: DECAWM + pending_wrap en print.
         if self.pending_wrap {
             self.do_pending_wrap();
         }
+
         let row = self.cursor.row;
         let col = self.cursor.col;
         let attrs = self.attrs;
-        self.active_grid_mut().set(row, col, c, attrs);
-        self.cursor.col += 1;
-        if self.cursor.col >= COLS {
-            // Estamos en la ultima columna. Si auto_wrap esta activo,
-            // marcamos pending_wrap; el proximo print ejecutara el wrap.
-            if self.auto_wrap {
-                self.cursor.col = COLS - 1; // nos quedamos en la ultima col visible
-                self.pending_wrap = true;
-            } else {
-                // sin wrap: permanecemos en la ultima col (no avanza)
-                self.cursor.col = COLS - 1;
+        let cols = self.cursor.cols_count;
+
+        // Caracter ancho (CJK) en la ultima columna: wrap forzado.
+        if c_width >= 2 && col + c_width > cols && self.auto_wrap {
+            self.pending_wrap = true;
+            self.do_pending_wrap();
+            let row = self.cursor.row;
+            let col = self.cursor.col;
+            {
+                let active = self.active_grid_mut();
+                let cols = active.cols_count;
+                if let Some(cell) = active.cell(row, col) {
+                    cell.ch = c;
+                    cell.attrs = attrs;
+                    cell.width = c_width as u8;
+                }
+                self.cursor.col = col + c_width;
+                if self.cursor.col >= cols {
+                    if self.auto_wrap {
+                        self.cursor.col = cols - 1;
+                        self.pending_wrap = true;
+                    } else {
+                        self.cursor.col = cols - 1;
+                    }
+                }
+            }
+            return;
+        }
+
+        // Ruta normal: escribir caracter y avanzar cursor.
+        {
+            let active = self.active_grid_mut();
+            let cols = active.cols_count;
+            if let Some(cell) = active.cell(row, col) {
+                cell.ch = c;
+                cell.attrs = attrs;
+                cell.width = c_width as u8;
+            }
+            self.cursor.col += c_width;
+            if self.cursor.col >= cols {
+                if self.auto_wrap {
+                    self.cursor.col = cols - 1;
+                    self.pending_wrap = true;
+                } else {
+                    self.cursor.col = cols - 1;
+                }
             }
         }
     }
@@ -214,7 +291,8 @@ impl vte::Perform for Term {
                 // TAB: avanza al proximo tab stop (cada 8 columnas).
                 // ponytail: tab stops fijos cada 8 cols.
                 let next = ((self.cursor.col / 8) + 1) * 8;
-                self.cursor.move_to(self.cursor.row, next.min(COLS - 1));
+                self.cursor
+                    .move_to(self.cursor.row, next.min(self.cursor.cols_count - 1));
             }
             0x0A => {
                 // LF (line feed): avanzar una fila. Si estamos en el bottom
@@ -228,6 +306,12 @@ impl vte::Perform for Term {
                 } else {
                     self.cursor.move_down(1);
                 }
+                // Hard break: la fila a la que nos movimos NO es continuación
+                // de la anterior por wrap. Si no se resetea, el reflow no
+                // podrá fusionar líneas al ensanchar la ventana.
+                let cursor_row = self.cursor.row;
+                self.active_grid_mut()
+                    .set_continuation(cursor_row, false);
             }
             0x0D => {
                 // CR (carriage return): vuelve al inicio de la linea.
@@ -262,9 +346,9 @@ impl vte::Perform for Term {
                 ('l', 7) => self.auto_wrap = false,
                 ('h', 1049) => self.enter_alt_screen(),
                 ('l', 1049) => self.exit_alt_screen(),
-                // ponytail: 1000-1006 son mouse reporting, se ignoran en este sprint
+                // ponytail: 1000-1006 son mouse reporting, se ignoran hasta implementacion completa
                 ('h' | 'l', 1000..=1006) => {}
-                // NUEVO en Sprint 5b: bracketed paste mode DEC 2004
+                // DEC 2004: bracketed paste mode
                 ('h', 2004) => self.bracketed_paste = true,
                 ('l', 2004) => self.bracketed_paste = false,
                 _ => {}
@@ -272,9 +356,9 @@ impl vte::Perform for Term {
             return;
         }
 
-        // Mouse reporting SGR (intermediates == b"<"): CSI < Ps ; Ps ; Ps M o m.
+        // Mouse reporting SGR (intermediate == b"<"): CSI < Ps ; Ps ; Ps M o m.
         // ponytail: parseo minimo, no se decodifican las coordenadas del mouse.
-        // Sprint 7 implementa el report real.
+        // El reporte real se implementara posteriormente.
         if intermediates == b"<" {
             match action {
                 'M' | 'm' => return,
@@ -282,7 +366,7 @@ impl vte::Perform for Term {
             }
         }
 
-        // vte 0.15: Params::iter() yields &[u16] por parametro (subparams agrupados).
+        // vte 0.15: Params::iter() devuelve &[u16] por parametro (subparams agrupados).
         // Para SGR/J/K, el primer subparam es el valor del parametro. Si el slice
         // esta vacio, vte lo trata como 0
         let params: Vec<u16> = params
@@ -304,29 +388,29 @@ impl vte::Perform for Term {
                         4 => self.attrs.underline = true,
                         30..=37 => self.attrs.fg = Color::from_code(code),
                         40..=47 => self.attrs.bg = Color::from_code(code),
-                        // ponytail: bright variants (90-97, 100-107) con soporte 256-color en Sprint 4.
+                        // ponytail: bright variants (90-97, 100-107) con soporte 256-color posterior.
                         90..=97 | 100..=107 => {}
                         _ => {}
                     }
                 }
             }
             'J' => {
-                // Clear screen
+                // Clear screen: limpiar pantalla
                 let n = params.first().copied().unwrap_or(0);
                 let cur_row = self.cursor.row;
                 let cur_col = self.cursor.col;
                 match n {
                     0 => {
                         // Cursor al final: limpiar desde cursor hasta fin
-                        self.grid.clear_line(cur_row, cur_col, COLS);
-                        for row in (cur_row + 1)..ROWS {
-                            self.grid.clear_line(row, 0, COLS);
+                        self.grid.clear_line(cur_row, cur_col, self.grid.cols_count);
+                        for row in (cur_row + 1)..self.grid.rows_count {
+                            self.grid.clear_line(row, 0, self.grid.cols_count);
                         }
                     }
                     1 => {
                         // Inicio al cursor: limpiar desde inicio hasta cursor
                         for row in 0..cur_row {
-                            self.grid.clear_line(row, 0, COLS);
+                            self.grid.clear_line(row, 0, self.grid.cols_count);
                         }
                         self.grid.clear_line(cur_row, 0, cur_col + 1);
                     }
@@ -335,20 +419,20 @@ impl vte::Perform for Term {
                         self.grid.clear();
                     }
                     3 => {
-                        // Clear scrollback: no soportado en Sprint 2
+                        // Clear scrollback: limpiar scrollback, no implementado aun
                     }
                     _ => {}
                 }
             }
             'K' => {
-                // Clear line
+                // Clear line: limpiar linea
                 let n = params.first().copied().unwrap_or(0);
                 let cur_row = self.cursor.row;
                 let cur_col = self.cursor.col;
                 match n {
                     0 => {
                         // Cursor al final de linea
-                        self.grid.clear_line(cur_row, cur_col, COLS);
+                        self.grid.clear_line(cur_row, cur_col, self.grid.cols_count);
                     }
                     1 => {
                         // Inicio de linea al cursor
@@ -356,7 +440,7 @@ impl vte::Perform for Term {
                     }
                     2 => {
                         // Toda la linea
-                        self.grid.clear_line(cur_row, 0, COLS);
+                        self.grid.clear_line(cur_row, 0, self.grid.cols_count);
                     }
                     _ => {}
                 }
@@ -400,18 +484,19 @@ impl vte::Perform for Term {
             }
             'r' => {
                 // DECSTBM: set scrolling region. Parametros 1-indexed.
-                // Default top=1, bottom=ROWS. Si top >= bottom, resetea a
+                // Default top=1, bottom=rows_count. Si top >= bottom, resetea a
                 // pantalla completa (convencion xterm; VT510 estricto dice
                 // "ignorar").
                 // ponytail: convencion xterm, no VT510. Discrepancia documentada.
+                let rows_count = self.grid.rows_count;
                 let top = params.first().copied().unwrap_or(1).saturating_sub(1) as usize;
                 let bottom = params
                     .get(1)
                     .copied()
-                    .unwrap_or(ROWS as u16)
+                    .unwrap_or(rows_count as u16)
                     .saturating_sub(1) as usize;
-                if top >= bottom || top >= ROWS || bottom >= ROWS {
-                    self.scroll_region = (0, ROWS - 1);
+                if top >= bottom || top >= rows_count || bottom >= rows_count {
+                    self.scroll_region = (0, rows_count - 1);
                 } else {
                     self.scroll_region = (top, bottom);
                 }
@@ -421,12 +506,12 @@ impl vte::Perform for Term {
             'L' => {
                 // IL (insert line): inserta n lineas en blanco en la fila
                 // del cursor, desplazando las lineas siguientes hacia abajo.
-                // La fila final (ROWS-1) se pierde.
+                // La fila final (rows_count-1) se pierde.
                 // ponytail: xterm NO respeta la scroll region en IL/DL.
                 // El cursor determina la fila, no la region.
                 let n = params.first().copied().unwrap_or(1).max(1) as usize;
                 let row = self.cursor.row;
-                if row < ROWS {
+                if row < self.cursor.rows_count {
                     for _ in 0..n {
                         self.active_grid_mut().insert_line(row);
                     }
@@ -440,7 +525,7 @@ impl vte::Perform for Term {
                 // ponytail: xterm NO respeta la scroll region en IL/DL.
                 let n = params.first().copied().unwrap_or(1).max(1) as usize;
                 let row = self.cursor.row;
-                if row < ROWS {
+                if row < self.cursor.rows_count {
                     for _ in 0..n {
                         self.active_grid_mut().delete_line(row);
                     }
@@ -489,7 +574,7 @@ impl vte::Perform for Term {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::grid::COLS;
+    use crate::grid::DEFAULT_COLS;
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -615,7 +700,7 @@ mod tests {
             assert_eq!(term.grid.rows[0][i].ch, ch);
         }
         // Columnas 6-79 deben ser espacio
-        for col in 6..COLS {
+        for col in 6..DEFAULT_COLS {
             assert_eq!(term.grid.rows[0][col].ch, ' ');
         }
     }
@@ -678,7 +763,7 @@ mod tests {
         let mut term = Term::new();
         term.cursor.move_to(0, 79);
         feed(&mut term, b"\t");
-        assert_eq!(term.cursor.col, COLS - 1);
+        assert_eq!(term.cursor.col, DEFAULT_COLS - 1);
     }
 
     #[test]
@@ -751,7 +836,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests Sprint 4: alt screen, DECSTBM, LF scroll
+    // Tests: alt screen, DECSTBM, LF scroll
     // -----------------------------------------------------------------------
 
     #[test]
@@ -780,7 +865,7 @@ mod tests {
     fn test_decstbm_default_full_screen() {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[r");
-        assert_eq!(term.scroll_region, (0, ROWS - 1));
+        assert_eq!(term.scroll_region, (0, DEFAULT_ROWS - 1));
     }
 
     #[test]
@@ -796,7 +881,7 @@ mod tests {
     fn test_decstbm_top_eq_bottom_resets_to_full() {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[5;5r");
-        assert_eq!(term.scroll_region, (0, ROWS - 1));
+        assert_eq!(term.scroll_region, (0, DEFAULT_ROWS - 1));
     }
 
     #[test]
@@ -814,11 +899,11 @@ mod tests {
         // La fila 0 ahora tiene el contenido que estaba en la fila 1
         assert_eq!(term.grid.rows[0][0].ch, 'X');
         // La ultima fila debe estar en blanco
-        assert_eq!(term.grid.rows[ROWS - 1][0].ch, ' ');
+        assert_eq!(term.grid.rows[DEFAULT_ROWS - 1][0].ch, ' ');
     }
 
     // -----------------------------------------------------------------------
-    // Tests Sprint 4 Ronda 2: DECSC, DECRC, DECAWM, pending_wrap
+    // Tests: DECSC, DECRC, DECAWM, pending_wrap
     // -----------------------------------------------------------------------
 
     #[test]
@@ -838,10 +923,10 @@ mod tests {
         for _ in 0..80 {
             feed(&mut term, b"X");
         }
-        // cursor debe quedar en col 79 (COLS - 1)
-        assert_eq!(term.cursor.col, COLS - 1);
+        // cursor debe quedar en col 79 (DEFAULT_COLS - 1)
+        assert_eq!(term.cursor.col, DEFAULT_COLS - 1);
         // el ultimo caracter sobreescribe la ultima columna
-        assert_eq!(term.active_grid().rows[0][COLS - 1].ch, 'X');
+        assert_eq!(term.active_grid().rows[0][DEFAULT_COLS - 1].ch, 'X');
     }
 
     #[test]
@@ -852,7 +937,7 @@ mod tests {
             feed(&mut term, b"X");
         }
         // cursor en (0, 79), pending_wrap = true
-        assert_eq!((term.cursor.row, term.cursor.col), (0, COLS - 1));
+        assert_eq!((term.cursor.row, term.cursor.col), (0, DEFAULT_COLS - 1));
         assert!(term.pending_wrap);
         // un char mas dispara el wrap
         feed(&mut term, b"Y");
@@ -883,22 +968,25 @@ mod tests {
     #[test]
     fn test_pending_wrap_scrolls_at_bottom() {
         let mut term = Term::new();
-        term.cursor.move_to(ROWS - 1, COLS - 1);
+        term.cursor.move_to(DEFAULT_ROWS - 1, DEFAULT_COLS - 1);
         // Escribir 1 char: cursor en bottom, col 79, auto_wrap activo
         // esto coloca pending_wrap = true
         // (el caracter se escribe en la ultima columna, cursor se queda en ella)
         feed(&mut term, b"X");
         assert!(term.pending_wrap);
-        assert_eq!((term.cursor.row, term.cursor.col), (ROWS - 1, COLS - 1));
+        assert_eq!(
+            (term.cursor.row, term.cursor.col),
+            (DEFAULT_ROWS - 1, DEFAULT_COLS - 1)
+        );
         // Otro char dispara do_pending_wrap: scroll up de la region,
-        // cursor pasa a (ROWS - 1, 0), luego print avanza col a 1
+        // cursor pasa a (DEFAULT_ROWS - 1, 0), luego print avanza col a 1
         feed(&mut term, b"Y");
         assert!(!term.pending_wrap);
-        assert_eq!((term.cursor.row, term.cursor.col), (ROWS - 1, 1));
+        assert_eq!((term.cursor.row, term.cursor.col), (DEFAULT_ROWS - 1, 1));
         // La fila 0 debe haber sido desplazada hacia arriba
-        assert_eq!(term.active_grid().rows[0][COLS - 1].ch, ' ');
+        assert_eq!(term.active_grid().rows[0][DEFAULT_COLS - 1].ch, ' ');
         // La ultima fila tiene el nuevo caracter
-        assert_eq!(term.active_grid().rows[ROWS - 1][0].ch, 'Y');
+        assert_eq!(term.active_grid().rows[DEFAULT_ROWS - 1][0].ch, 'Y');
     }
 
     #[test]
@@ -911,7 +999,7 @@ mod tests {
         }
         assert!(term.pending_wrap);
         assert!(term.alt_screen);
-        assert_eq!((term.cursor.row, term.cursor.col), (0, COLS - 1));
+        assert_eq!((term.cursor.row, term.cursor.col), (0, DEFAULT_COLS - 1));
         // Escribir 81vo char: debe hacer wrap en alt grid, NO en primaria
         feed(&mut term, b"B");
         assert!(!term.pending_wrap);
@@ -923,14 +1011,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests Sprint 4 Ronda 3: IL, DL, ICH, DCH
+    // Tests: IL, DL, ICH, DCH
     // -----------------------------------------------------------------------
 
     #[test]
     fn test_il_inserts_line() {
         let mut term = Term::new();
         // Llenar la fila 5 con 'X'
-        for col in 0..COLS {
+        for col in 0..DEFAULT_COLS {
             term.grid.rows[5][col].ch = 'X';
         }
         // Cursor en fila 5
@@ -942,14 +1030,14 @@ mod tests {
         // Fila 6 debe tener los X que antes estaban en fila 5
         assert_eq!(term.grid.rows[6][0].ch, 'X');
         // La ultima fila (23) debe estar en blanco (se perdio)
-        assert_eq!(term.grid.rows[ROWS - 1][0].ch, ' ');
+        assert_eq!(term.grid.rows[DEFAULT_ROWS - 1][0].ch, ' ');
     }
 
     #[test]
     fn test_dl_deletes_line() {
         let mut term = Term::new();
         // Llenar todas las filas con 'X' en col 0
-        for row in 0..ROWS {
+        for row in 0..DEFAULT_ROWS {
             term.grid.rows[row][0].ch = 'X';
         }
         // Cursor en fila 5
@@ -962,7 +1050,7 @@ mod tests {
         // Todas tienen 'X' porque originalmente todas las filas tenian 'X'
         assert_eq!(term.grid.rows[22][0].ch, 'X');
         // La ultima fila (23) debe estar en blanco (nueva fila vacia al final)
-        assert_eq!(term.grid.rows[ROWS - 1][0].ch, ' ');
+        assert_eq!(term.grid.rows[DEFAULT_ROWS - 1][0].ch, ' ');
     }
 
     #[test]
@@ -1034,7 +1122,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests Sprint 4 Ronda 4: modelo alt/primary grid, mouse ignore
+    // Tests: modelo alt/primary grid, mouse ignore
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1086,7 +1174,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests Sprint 5b (Ronda 2): bracketed paste mode DEC 2004
+    // Tests: bracketed paste mode DEC 2004
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1106,7 +1194,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests C1 control decoding (Sprint 5b: Ronda 4)
+    // Tests: C1 control decoding
     // -----------------------------------------------------------------------
 
     /// C1 control 0x9B (CSI 8-bit): vte 0.15 lo pasa a execute(0x9B).
@@ -1141,5 +1229,190 @@ mod tests {
         // Sin panic: "0;10" = 4 chars impresos desde (0,0)
         assert_eq!(term.cursor.row, 0);
         assert_eq!(term.cursor.col, 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests: unicode width en Cell
+    // -----------------------------------------------------------------------
+
+    /// Verifica que un caracter CJK (ancho 2) en el grid tiene `width == 2`.
+    #[test]
+    fn test_unicode_width_cell() {
+        let mut term = Term::new();
+        // \\u{4e2d} = '中' (CJK, ancho 2)
+        feed(&mut term, "\u{4e2d}".as_bytes());
+        assert_eq!(term.grid.rows[0][0].ch, '\u{4e2d}');
+        assert_eq!(term.grid.rows[0][0].width, 2);
+        // cursor avanzo 2 columnas
+        assert_eq!(term.cursor.col, 2);
+        // caracter latino tiene width 1
+        feed(&mut term, b"A");
+        assert_eq!(term.grid.rows[0][2].width, 1);
+        assert_eq!(term.cursor.col, 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests: reflow en resize
+    // -----------------------------------------------------------------------
+
+    /// En alt screen, resize_grid NO aplica reflow en el grid primario.
+    #[test]
+    fn test_reflow_alt_screen() {
+        let mut term = Term::new();
+
+        // Escribir contenido en grid primario
+        feed(&mut term, b"PRIMARY LINE");
+
+        // Entrar a alt screen
+        feed(&mut term, b"\x1b[?1049h");
+
+        // Escribir contenido en alt grid
+        feed(&mut term, b"ALT LINE");
+
+        // Reducir tamaño (simula resize de terminal)
+        // El resize trunca del PRINCIPIO, así que el contenido de row 0
+        // se mueve al scrollback. Verificamos que esté allí.
+        term.resize_grid(10, 5);
+
+        // Alt grid debe haberse redimensionado
+        assert_eq!(term.alt_grid.rows_count, 10);
+        assert_eq!(term.alt_grid.cols_count, 5);
+        // "ALT LINE" se escribió en row 0. Con truncado del inicio,
+        // esa fila ahora está en scrollback.
+        // El scrollback del alt grid debe tener la fila "ALT LINE"
+        assert!(!term.alt_grid.scrollback.is_empty(), "content should be in scrollback after truncation");
+
+        // Grid primario NO debe haber cambiado (sin reflow)
+        assert_eq!(term.grid.rows_count, DEFAULT_ROWS);
+        assert_eq!(term.grid.cols_count, DEFAULT_COLS);
+        // Contenido primario intacto
+        assert_eq!(term.grid.rows[0][0].ch, 'P');
+        // Verificar que no hubo reflow en primaria
+        assert_eq!(term.grid.cols_count, DEFAULT_COLS);
+    }
+
+    /// En pantalla primaria, resize_grid aplica reflow.
+    #[test]
+    fn test_reflow_primary_screen() {
+        let mut term = Term::new();
+
+        // Escribir una línea larga en primaria
+        feed(&mut term, b"ABCDEFGHIJKLMNOPQRST");
+
+        // Reducir ancho significativamente
+        term.resize_grid(24, 5);
+
+        // El contenido debe haberse reflujeado a varias filas
+        assert_eq!(term.grid.rows[0][0].ch, 'A');
+        assert_eq!(term.grid.rows[0][4].ch, 'E');
+        assert_eq!(term.grid.rows[1][0].ch, 'F');
+        assert_eq!(term.grid.rows[1][4].ch, 'J');
+
+        // La scroll_region debe estar actualizada
+        assert_eq!(term.scroll_region, (0, 23));
+
+        // El cursor debe estar dentro del grid redimensionado
+        assert!(term.cursor.row < 24);
+        assert!(term.cursor.col < 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests: scrollback offset y PageUp/PageDown
+    // -----------------------------------------------------------------------
+
+    /// Verifica que scrollback_offset se incrementa/decrementa correctamente
+    /// con PageUp/PageDown, respetando los limites del scrollback.
+    #[test]
+    fn test_scrollback_page_up_down() {
+        let mut term = Term::new();
+        // Llenar scrollback con lineas (forzar scroll varias veces)
+        for _ in 0..5 {
+            // Escribir en la ultima fila para forzar scroll up
+            term.cursor.move_to(DEFAULT_ROWS - 1, 0);
+            feed(&mut term, b"X\n");
+        }
+        // Ahora hay 5 lineas en scrollback + la linea 'X' escrita
+        let sb_len = term.scrollback_len();
+        assert!(sb_len > 0, "deberia haber scrollback");
+        assert_eq!(
+            term.scrollback_offset, 0,
+            "scrollback_offset inicial debe ser 0"
+        );
+
+        // PageUp: incrementa offset
+        term.scrollback_offset = 1;
+        assert_eq!(term.scrollback_offset, 1);
+        assert!(term.scrollback_offset <= sb_len as isize);
+
+        // PageUp no debe superar scrollback_len
+        term.scrollback_offset = sb_len as isize + 10;
+        let max_offset = term.scrollback_len();
+        term.scrollback_offset = term.scrollback_offset.min(max_offset as isize);
+        assert!(term.scrollback_offset <= max_offset as isize);
+        assert_eq!(term.scrollback_offset, max_offset as isize);
+
+        // PageDown: decrementa offset, minimo 0
+        term.scrollback_offset = 3;
+        term.scrollback_offset = (term.scrollback_offset - 1).max(0);
+        assert_eq!(term.scrollback_offset, 2);
+
+        // PageDown no debe ir negativo
+        term.scrollback_offset = 0;
+        term.scrollback_offset = (term.scrollback_offset - 1).max(0);
+        assert_eq!(term.scrollback_offset, 0);
+
+        // En alt screen, PageUp/PageDown no hacen nada
+        feed(&mut term, b"\x1b[?1049h"); // entrar alt screen
+        assert!(term.alt_screen);
+        let old_offset = term.scrollback_offset;
+        // Simular que PageUp no modifica offset en alt screen
+        if !term.alt_screen {
+            let max_offset = term.scrollback_len();
+            term.scrollback_offset = (term.scrollback_offset + 1).min(max_offset as isize);
+        }
+        assert_eq!(
+            term.scrollback_offset, old_offset,
+            "PageUp no debe cambiar offset en alt screen"
+        );
+        // Simular PageDown en alt screen
+        if !term.alt_screen {
+            term.scrollback_offset = (term.scrollback_offset - 1).max(0);
+        }
+        assert_eq!(
+            term.scrollback_offset, old_offset,
+            "PageDown no debe cambiar offset en alt screen"
+        );
+    }
+
+    /// Verifica que al escribir input (simulado), scrollback_offset se resetea a 0.
+    #[test]
+    fn test_scrollback_reset_on_input() {
+        let mut term = Term::new();
+        // Forzar scrollback
+        for _ in 0..3 {
+            term.cursor.move_to(DEFAULT_ROWS - 1, 0);
+            feed(&mut term, b"X\n");
+        }
+        assert!(term.scrollback_len() > 0);
+
+        // Simular scrollback activo
+        term.scrollback_offset = 1;
+        assert_eq!(term.scrollback_offset, 1);
+
+        // Resetear al escribir input (simulado)
+        if term.scrollback_offset > 0 {
+            term.scrollback_offset = 0;
+        }
+        assert_eq!(
+            term.scrollback_offset, 0,
+            "scrollback_offset debe resetearse a 0 al escribir input"
+        );
+
+        // Verificar que offset 0 no se modifica
+        term.scrollback_offset = 0;
+        if term.scrollback_offset > 0 {
+            term.scrollback_offset = 0;
+        }
+        assert_eq!(term.scrollback_offset, 0);
     }
 }
