@@ -182,8 +182,7 @@ impl Term {
         self.cursor.move_to(self.cursor.row, 0);
         // Marcar esta fila como continuación por soft-wrap, no hard break.
         let target_row = self.cursor.row;
-        self.active_grid_mut()
-            .set_continuation(target_row, true);
+        self.active_grid_mut().set_continuation(target_row, true);
     }
 
     /// DECSC: guarda la posicion del cursor.
@@ -310,8 +309,7 @@ impl vte::Perform for Term {
                 // de la anterior por wrap. Si no se resetea, el reflow no
                 // podrá fusionar líneas al ensanchar la ventana.
                 let cursor_row = self.cursor.row;
-                self.active_grid_mut()
-                    .set_continuation(cursor_row, false);
+                self.active_grid_mut().set_continuation(cursor_row, false);
             }
             0x0D => {
                 // CR (carriage return): vuelve al inicio de la linea.
@@ -1280,7 +1278,10 @@ mod tests {
         // "ALT LINE" se escribió en row 0. Con truncado del inicio,
         // esa fila ahora está en scrollback.
         // El scrollback del alt grid debe tener la fila "ALT LINE"
-        assert!(!term.alt_grid.scrollback.is_empty(), "content should be in scrollback after truncation");
+        assert!(
+            !term.alt_grid.scrollback.is_empty(),
+            "content should be in scrollback after truncation"
+        );
 
         // Grid primario NO debe haber cambiado (sin reflow)
         assert_eq!(term.grid.rows_count, DEFAULT_ROWS);

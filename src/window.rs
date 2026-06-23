@@ -253,9 +253,12 @@ impl ApplicationHandler<UserEvent> for App {
                     let new_cols = (new_size.width as f32 / renderer.cell_w).max(1.0) as usize;
                     tracing::info!(
                         "[RESIZE] cell_h={:.1} cell_w={:.1} win={}x{} -> grid={}x{}",
-                        renderer.cell_h, renderer.cell_w,
-                        new_size.width, new_size.height,
-                        new_rows, new_cols,
+                        renderer.cell_h,
+                        renderer.cell_w,
+                        new_size.width,
+                        new_size.height,
+                        new_rows,
+                        new_cols,
                     );
                     renderer.resize(new_size.width, new_size.height, new_rows);
                     if let Ok(mut guard) = self.term.lock() {
@@ -267,7 +270,11 @@ impl ApplicationHandler<UserEvent> for App {
                         let mut summary_top = String::new();
                         for r in 0..n {
                             let s: String = g.rows[r].iter().take(20).map(|c| c.ch).collect();
-                            let cont = if r < g.row_continuations.len() && g.row_continuations[r] { "~" } else { "|" };
+                            let cont = if r < g.row_continuations.len() && g.row_continuations[r] {
+                                "~"
+                            } else {
+                                "|"
+                            };
                             summary_top.push_str(&format!("{}{}", cont, s));
                         }
                         let mut summary_bot = String::new();
@@ -275,15 +282,27 @@ impl ApplicationHandler<UserEvent> for App {
                         let bot_start = rows_len.saturating_sub(5);
                         for r in bot_start..rows_len {
                             let s: String = g.rows[r].iter().take(20).map(|c| c.ch).collect();
-                            let cont = if r < g.row_continuations.len() && g.row_continuations[r] { "~" } else { "|" };
+                            let cont = if r < g.row_continuations.len() && g.row_continuations[r] {
+                                "~"
+                            } else {
+                                "|"
+                            };
                             summary_bot.push_str(&format!("{}{}", cont, s));
                         }
-                        let non_empty = g.rows.iter().filter(|r| r.iter().any(|c| *c != Cell::default())).count();
+                        let non_empty = g
+                            .rows
+                            .iter()
+                            .filter(|r| r.iter().any(|c| *c != Cell::default()))
+                            .count();
                         tracing::info!(
                             "[RESIZE] grid: {}x{} sb={} filled={}/{} top=[{}] bot=[{}]",
-                            g.rows_count, g.cols_count, g.scrollback.len(),
-                            non_empty, rows_len,
-                            summary_top, summary_bot,
+                            g.rows_count,
+                            g.cols_count,
+                            g.scrollback.len(),
+                            non_empty,
+                            rows_len,
+                            summary_top,
+                            summary_bot,
                         );
                     }
                     // Enviar resize al hilo PTY solo si el ancho cambio.
@@ -293,7 +312,9 @@ impl ApplicationHandler<UserEvent> for App {
                         let old_cols = old_guard.grid.cols_count;
                         if old_cols != new_cols {
                             drop(old_guard);
-                            if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
+                            if let Some(tx) =
+                                self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref()
+                            {
                                 let _ = tx.send(PtyCommand::Resize {
                                     rows: new_rows as u16,
                                     cols: new_cols as u16,

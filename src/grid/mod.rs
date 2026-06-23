@@ -251,7 +251,8 @@ impl Grid {
             if remaining > 0 {
                 let blank_row = vec![Cell::default(); new_cols];
                 self.rows.extend(std::iter::repeat_n(blank_row, remaining));
-                self.row_continuations.extend(std::iter::repeat_n(false, remaining));
+                self.row_continuations
+                    .extend(std::iter::repeat_n(false, remaining));
             }
         }
 
@@ -346,10 +347,8 @@ impl Grid {
             // Los flags de continuation los setea do_pending_wrap: continuation[N] = true
             // significa que la fila N se alcanzo por wrap desde la fila N-1.
             if idx < last_content_row {
-                let next_is_continuation = old_row_continuations
-                    .get(idx + 1)
-                    .copied()
-                    .unwrap_or(false);
+                let next_is_continuation =
+                    old_row_continuations.get(idx + 1).copied().unwrap_or(false);
                 if !next_is_continuation {
                     flat.push(Cell {
                         ch: '\n',
@@ -534,7 +533,10 @@ mod tests {
         assert_eq!(grid.rows[4][0].ch, 'Z');
         assert_eq!(grid.rows[4][5].ch, 'Y');
         // Scrollback debe tener las filas truncadas
-        assert!(!grid.scrollback.is_empty(), "rows should be in scrollback after truncation");
+        assert!(
+            !grid.scrollback.is_empty(),
+            "rows should be in scrollback after truncation"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -699,16 +701,29 @@ mod tests {
         // Simular angostamiento: reflow + resize como hace resize_grid
         grid.reflow(50);
         grid.resize(56, 50);
-        let total_x_before: usize = grid.rows.iter().flat_map(|r| r.iter()).filter(|c| c.ch == 'X').count();
+        let total_x_before: usize = grid
+            .rows
+            .iter()
+            .flat_map(|r| r.iter())
+            .filter(|c| c.ch == 'X')
+            .count();
         assert_eq!(total_x_before, 120, "todas las X tras angostar");
 
         // Simular ensanchamiento: reflow + resize
         grid.reflow(120);
         grid.resize(56, 120);
-        let total_x_after: usize = grid.rows.iter().flat_map(|r| r.iter()).filter(|c| c.ch == 'X').count();
+        let total_x_after: usize = grid
+            .rows
+            .iter()
+            .flat_map(|r| r.iter())
+            .filter(|c| c.ch == 'X')
+            .count();
         assert_eq!(total_x_after, 120, "todas las 120 X tras pipeline completo");
         let row0_x = grid.rows[0].iter().filter(|c| c.ch == 'X').count();
-        assert!(row0_x >= 100, "la fila 0 debe tener la mayoria tras pipeline completo");
+        assert!(
+            row0_x >= 100,
+            "la fila 0 debe tener la mayoria tras pipeline completo"
+        );
     }
 
     /// Verifica que resize (encoger y crecer) no corrompe el grid.
@@ -722,10 +737,12 @@ mod tests {
                 grid.rows[r][c].ch = (b'A' + r as u8) as char;
             }
         }
-        let original: Vec<String> = grid.rows.iter().map(|r| {
-            r.iter().take(5).map(|c| c.ch).collect()
-        }).collect();
-        
+        let original: Vec<String> = grid
+            .rows
+            .iter()
+            .map(|r| r.iter().take(5).map(|c| c.ch).collect())
+            .collect();
+
         // Encoger luego crecer de vuelta
         grid.resize(5, 80);
         grid.resize(10, 80);
