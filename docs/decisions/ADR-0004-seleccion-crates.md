@@ -3,8 +3,8 @@ titulo: "ADR-0004: Seleccion Final de Crates"
 tipo: decision
 autor: "Carlos Canabal Cordero"
 fecha_creacion: "2026-06-14"
-fecha_modificacion: "2026-06-20"
-version: "0.2.0"
+fecha_modificacion: "2026-06-22"
+version: "0.3.0"
 estado: aceptado
 tags: [decision, crates, dependencias, mvp, msrc, wgpu]
 ```
@@ -14,40 +14,33 @@ tags: [decision, crates, dependencias, mvp, msrc, wgpu]
 ## Contexto
 
 El proyecto necesita definir la lista completa de crates
-para la primera versión implementable. Las iteraciones
+para la primera version implementable. Las iteraciones
 previas investigaron componentes individuales pero sin
-consolidar la selección de dependencias.
+consolidar la seleccion de dependencias.
 
-La MSRV objetivo del proyecto es 1.75 (release estable  
-de hace ~6 meses) o superior. Sin embargo, la selección  
+La MSRV objetivo del proyecto es 1.75 (release estable
+de hace ~6 meses) o superior. Sin embargo, la seleccion
 de wgpu como backend de render impone una MSRV mayor.
 
 ## Decision
 
-Se seleccionan los siguientes 15 crates para `[dependencies]`
+Se seleccionan los siguientes 8 crates para `[dependencies]`
 y 1 para `[dev-dependencies]`:
 
-| Categoria        | Crate         | Version | MSRV               |
-| ---------------- | ------------- | ------- | ------------------ |
-| Parser ANSI      | vte           | 0.15    | 1.65               |
-| PTY              | nix           | 0.31    | 1.65               |
-| Ventana          | winit         | 0.30    | 1.70               |
-| Render GPU       | wgpu          | 29      | 1.87               |
-| Texto            | glyphon       | 0.11    | (heredada de wgpu) |
-| Unicode          | unicode-width | 0.2     | 1.66               |
-| Flags            | bitflags      | 2       | 1.56               |
-| Logging          | tracing       | 0.1     | 1.65               |
-| Errores entry    | anyhow        | 1       | 1.68               |
-| Errores domain   | thiserror     | 2       | 1.68               |
-| Paths            | dirs          | 6       | N/A                |
-| Serializacion    | serde         | 1       | 1.56               |
-| CLI              | clap          | 4       | 1.85               |
-| Lock             | parking_lot   | 0.12    | 1.65               |
-| Clipboard         | arboard        | 3.4     | 1.70               |
-| Benchmarks (dev) | criterion     | 0.8     | 1.86               |
+| Categoria          | Crate              | Version | MSRV               |
+| ------------------ | ------------------ | ------- | ------------------ |
+| Parser ANSI        | vte                | 0.15    | 1.65               |
+| PTY                | nix                | 0.31    | 1.65               |
+| Ventana            | winit              | 0.30    | 1.70               |
+| Render GPU         | wgpu               | 29      | 1.87               |
+| Texto              | glyphon            | 0.11    | (heredada de wgpu) |
+| Unicode            | unicode-width      | 0.2     | 1.66               |
+| Logging            | tracing            | 0.1     | 1.65               |
+| Logging subscriber | tracing-subscriber | 0.3     | 1.65               |
+| Benchmarks (dev)   | criterion          | 0.8     | 1.86               |
 
 La MSRV efectiva del proyecto queda en **1.87.0**,
-determinada por wgpu. El `rust-versión` en Cargo.toml se
+determinada por wgpu. El `rust-version` en Cargo.toml se
 fija en 1.87.0.
 
 ## Justificacion
@@ -56,7 +49,7 @@ fija en 1.87.0.
    mantenido por la comunidad GNOME (jamesnichols,
    christianpoveda) con releases frecuentes y 58M de
    downloads. wezterm-escape-parser es interno al monorepo
-   de WezTerm y no se pública a crates.io. vte cubre
+   de WezTerm y no se publica a crates.io. vte cubre
    el 100% de las secuencias necesarias para el MVP
    (verificado en iter 4).
 2. **nix 0.31 sobre portable-pty.** nix es Unix-only
@@ -66,66 +59,46 @@ fija en 1.87.0.
    no requiere. Cuando se aborde macOS/Windows en Fase
    5, se evaluara migrar a portable-pty.
 3. **winit 0.30 (la unica opcion realista).** winit es
-   el estándar de facto para GUI en Rust, mantenido por
+   el estandar de facto para GUI en Rust, mantenido por
    la organizacion `rust-windowing` con multiples
    maintainers. No hay alternativa realista.
 4. **wgpu 29 sobre glow (OpenGL).** wgpu es mas moderno,
-   cross-platform vía WebGPU, y mantenido por gfx-rs
+   cross-platform via WebGPU, y mantenido por gfx-rs
    (mismo grupo que Vulkan y WebGPU en Firefox). El
    trade-off es la MSRV alta (1.87). glow (OpenGL)
    tendria MSRV mas baja (~1.70) pero requiere escribir
-   código OpenGL tradicional, que es menos portable
+   codigo OpenGL tradicional, que es menos portable
    (especialmente a macOS donde OpenGL esta deprecado).
 5. **glyphon 0.11 sobre crossfont.** glyphon se integra
    nativamente con wgpu (es la unica opcion mantenida
    para wgpu). crossfont (Alacritty) usa glutin (OpenGL).
-   Si se hubiera elegido glow, la selección seria
+   Si se hubiera elegido glow, la seleccion seria
    crossfont. La decision esta acoplada a la de render.
-6. **anyhow en bordes + thiserror en domain.** Warp
-   documenta este patron y la comunidad Rust lo
-   recomienda: anyhow permite contexto dinamico
-   (`.context("...")`) sin definir tipos, ideal para
-   main.rs y handlers de UI. thiserror permite definir
-   tipos `Error` propios con `#[derive(Error)]`,
-   ideal para modulos de domain que necesitan propagar
-   errores tipados.
-7. **parking_lot sobre std::sync::Mutex.** parking_lot
-   es ~3x mas rápido en benchmarks, tiene FairMutex
-   (que evita starvation), y es usado por Alacritty.
-   Costo: una dependencia mas, pero es de las mas
-   descargadas de Rust (580M downloads).
+6. **unicode-width 0.2.** Estandar de facto para calcular
+   el ancho de caracteres Unicode (CJK de ancho 2,
+   emojis ZWJ, etc.). Usado por Alacritty, WezTerm y
+   Kitty. Sprint 6 lo agrega para reflow correcto de
+   lineas con caracteres de ancho variable.
+7. **tracing + tracing-subscriber.** Logging estructurado
+   con spans y filtros por env. tracing-subscriber provee
+   el subscriber con env-filter.
 8. **criterion como dev-dependency.** criterion es el
-   estándar de benchmarks en Rust. Solo se compila en
+   estandar de benchmarks en Rust. Solo se compila en
    `cargo bench`, no afecta el build de produccion.
-
-9. **arboard 3.4 sobre wl-clipboard-rs.** arboard es
-   el crate de clipboard mas usado en Rust (580M+ downloads),
-   cross-platform (X11, Wayland via XWayland, macOS, Windows),
-   mantenido por 1Password, MIT licensed. API simple
-   (`Clipboard::new()`, `set_text()`, `get_text()`).
-   La limitacion conocida es que en Wayland puro sin XWayland
-   no funciona; para el MVP en Hyprland con XWayland es
-   suficiente. wl-clipboard-rs seria nativo Wayland pero
-   menos maduro (18M downloads), sin soporte X11/macOS.
-   Se documenta con `// ponytail: arboard usa XWayland en
-   Wayland puro, no funciona sin XWayland`.
 
 ## Alternativas Consideradas
 
-| Decision | Alternativa           | Pros                         | Contras                                   | Veredicto              |
-| -------- | --------------------- | ---------------------------- | ----------------------------------------- | ---------------------- |
-| Parser   | wezterm-escape-parser | Control total                | Interno a WezTerm, no en crates.io        | **vte 0.15**           |
-| Parser   | vtparse               | Bajo nivel, WezTerm lo usa   | Requiere implementar Handler propio       | vte es mas práctico    |
-| PTY      | portable-pty          | Cross-platform               | Mas complejo que nix, dependencias extras | **nix 0.31** (MVP)     |
-| PTY      | rustix-openpty        | Bajo nivel, Alacritty lo usa | rustix tiene API compleja, peor docs      | nix es mas claro       |
-| Render   | glow (OpenGL)         | MSRV ~1.70                   | OpenGL deprecado en macOS, requiere FFI   | **wgpu 29**            |
-| Render   | wgpu 27               | Version anterior             | Algunos bugs conocidos ya fixed en 28/29  | wgpu 29 (latest)       |
-| Texto    | crossfont             | Maduro, Alacritty lo usa     | Requiere OpenGL, no compatible con wgpu   | **glyphon 0.11**       |
-| Texto    | rusttype              | Bajo nivel, no GPU           | Lento, requiere atlas manual              | glyphon es superior    |
-| Errores  | solo anyhow           | Simple                       | Pierde tipos en domain                    | **anyhow + thiserror** |
-| Errores  | solo thiserror        | Tipos en todos lados         | Verbose en main.rs                        | igual                  |
-| Logging  | log crate             | Maduro                       | Sin spans, limitado                       | **tracing 0.1**        |
-| Lock     | std::sync::Mutex      | Sin deps                     | Mas lento, no FairMutex                   | **parking_lot**        |
+| Decision | Alternativa           | Pros                         | Contras                                   | Veredicto             |
+| -------- | --------------------- | ---------------------------- | ----------------------------------------- | --------------------- |
+| Parser   | wezterm-escape-parser | Control total                | Interno a WezTerm, no en crates.io        | **vte 0.15**          |
+| Parser   | vtparse               | Bajo nivel, WezTerm lo usa   | Requiere implementar Handler propio       | vte es mas practico   |
+| PTY      | portable-pty          | Cross-platform               | Mas complejo que nix, dependencias extras | **nix 0.31** (MVP)    |
+| PTY      | rustix-openpty        | Bajo nivel, Alacritty lo usa | rustix tiene API compleja, peor docs      | nix es mas claro      |
+| Render   | glow (OpenGL)         | MSRV ~1.70                   | OpenGL deprecado en macOS, requiere FFI   | **wgpu 29**           |
+| Render   | wgpu 27               | Version anterior             | Algunos bugs conocidos ya fixed en 28/29  | wgpu 29 (latest)      |
+| Texto    | crossfont             | Maduro, Alacritty lo usa     | Requiere OpenGL, no compatible con wgpu   | **glyphon 0.11**      |
+| Texto    | rusttype              | Bajo nivel, no GPU           | Lento, requiere atlas manual              | glyphon es superior   |
+| Unicode  | calcular ancho manual | Sin deps                     | Incorrecto para CJK/emojis                | **unicode-width 0.2** |
 
 ## Consecuencias
 
@@ -152,7 +125,7 @@ fija en 1.87.0.
   (vs 632M de unicode-width). Depende de wgpu y
   cosmic-text. Si glyphon se discontinua, hay que
   migrar.
-- **14 dependencias en `[dependencies]`.** Aceptable
+- **8 dependencias en `[dependencies]`.** Aceptable
   pero requiere disciplina para mantenerlas
   actualizadas. Se usa `cargo update` y `cargo audit`
   en CI.
@@ -163,7 +136,7 @@ fija en 1.87.0.
   `README.md` y en el mensaje de error si la
   compilacion falla.
 - Si glyphon se discontinua, la alternativa es
-  cosmy-text directo con un shim propio (~200
+  cosmic-text directo con un shim propio (~200
   lineas), o migrar a OpenGL con rusttype.
 - Las dependencias se actualizan mensualmente con
   `cargo update` y se validan con CI antes de cada
@@ -181,14 +154,14 @@ fija en 1.87.0.
 - [https://crates.io/crates/winit](https://crates.io/crates/winit)
 - [https://crates.io/crates/wgpu](https://crates.io/crates/wgpu)
 - [https://crates.io/crates/glyphon](https://crates.io/crates/glyphon)
-- [https://crates.io/crates/anyhow](https://crates.io/crates/anyhow)
-- [https://crates.io/crates/thiserror](https://crates.io/crates/thiserror)
+- [https://crates.io/crates/unicode-width](https://crates.io/crates/unicode-width)
 - [https://crates.io/crates/tracing](https://crates.io/crates/tracing)
 - [https://crates.io/crates/criterion](https://crates.io/crates/criterion)
 
 ## Cambios
 
-| Version | Fecha      | Cambios                                                               |
-| ------- | ---------- | --------------------------------------------------------------------- |
-| 0.1.0   | 2026-06-14 | Primer borrador. Decision adoptada. 14 deps + 1 dev-dep, MSRV 1.87.0. |
-| 0.2.0   | 2026-06-20 | Add arboard 3.4 para clipboard (Sprint 5b). 15 deps + 1 dev-dep. |
+| Version | Fecha      | Cambios                                                                                                               |
+| ------- | ---------- | --------------------------------------------------------------------------------------------------------------------- |
+| 0.1.0   | 2026-06-14 | Primer borrador. Decision adoptada. 14 deps + 1 dev-dep, MSRV 1.87.0.                                                 |
+| 0.2.0   | 2026-06-20 | Add arboard 3.4 para clipboard (Sprint 5b). 15 deps + 1 dev-dep.                                                      |
+| 0.3.0   | 2026-06-22 | Sincronizar con stack real del proyecto: 8 deps + 1 dev-dep. Agregar unicode-width 0.2 y criterion 0.8 para Sprint 6. |
