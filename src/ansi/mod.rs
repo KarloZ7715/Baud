@@ -1,5 +1,6 @@
 use crate::cursor::Cursor;
 use crate::grid::{Grid, DEFAULT_ROWS};
+use crate::selection::Selection;
 
 /// Colores basicos del terminal ANSI.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -73,6 +74,8 @@ pub struct Term {
     pub bracketed_paste: bool,
     // Desplazamiento de scrollback para navegacion (pagina arriba/abajo)
     pub scrollback_offset: isize,
+    // Seleccion activa del terminal (mouse)
+    pub selection: Option<Selection>,
 }
 
 impl Default for Term {
@@ -98,6 +101,7 @@ impl Term {
             saved_cursor: None,
             bracketed_paste: false,
             scrollback_offset: 0,
+            selection: None,
         }
     }
 
@@ -196,6 +200,134 @@ impl Term {
             self.cursor.move_to(row, col);
         }
         self.pending_wrap = false;
+    }
+
+    /// Verifica si una celda visible (row, col) está dentro de la selección activa.
+    /// Convierte coordenadas visibles a lógicas usando scrollback_offset.
+    pub fn is_selected(&self, row: usize, col: usize) -> bool {
+        let Some(ref sel) = self.selection else {
+            return false;
+        };
+        let logical_row = self.visible_to_logical_row(row);
+        sel.contains(logical_row, col)
+    }
+
+    /// Extrae el texto del rango seleccionado como String.
+    /// Concatena las filas involucradas con '\n' entre líneas no-continuación.
+    pub fn selected_text(&self) -> String {
+        let Some(ref sel) = self.selection else {
+            return String::new();
+        };
+        let (start_row, start_col, end_row, end_col) = sel.normalize();
+        let mut result = String::new();
+
+        let active = self.active_grid();
+        let rows_count = active.rows_count;
+        // ponytail: en alt_screen no hay scrollback, aunque el primario tenga
+        let sb_len = if self.alt_screen { 0 } else { self.grid.scrollback.len() };
+        let total_rows = sb_len + rows_count;
+
+        // Convertir coordenadas visibles de la seleccion a absolutas.
+        // En scrollback_offset=0, el viewport muestra rows_count filas del grid
+        // que empiezan en sb_len. En scrollback_offset>0, empieza en sb_len-offset.
+        let viewport_start = if self.scrollback_offset > 0 {
+            sb_len.saturating_sub(self.scrollback_offset as usize)
+        } else {
+            sb_len
+        };
+        let abs_start = start_row + viewport_start;
+        let abs_end = end_row + viewport_start;
+
+        for logical_row in abs_start..=abs_end {
+            if logical_row >= total_rows {
+                break;
+            }
+            let (source_row, source_is_grid) = if logical_row < sb_len {
+                (logical_row, false)
+            } else {
+                (logical_row - sb_len, true)
+            };
+
+            let row_cells: &[crate::grid::Cell] = if source_is_grid {
+                if source_row < active.rows.len() {
+                    &active.rows[source_row]
+                } else {
+                    continue;
+                }
+            } else if let Some(row_vec) = self.grid.scrollback.get(logical_row) {
+                row_vec.as_slice()
+            } else {
+                continue;
+            };
+
+            // Determinar el final real de la fila (último carácter no espacio).
+            let actual_row_end = row_cells
+                .iter()
+                .rposition(|c| c.ch != ' ')
+                .map(|p| p + 1)
+                .unwrap_or(0);
+
+            let col_end_logical = if logical_row == abs_end {
+                end_col + 1
+            } else {
+                actual_row_end
+            };
+            let col_end = col_end_logical.min(row_cells.len());
+
+            let col_start = if logical_row == abs_start {
+                start_col
+            } else {
+                0
+            };
+
+            if col_end <= col_start {
+                // Fila vacía en el rango seleccionado
+                if logical_row < abs_end {
+                    result.push('\n');
+                }
+                continue;
+            }
+
+            for cell in row_cells[col_start..col_end].iter() {
+                if cell.ch != ' ' || cell.width > 0 {
+                    result.push(cell.ch);
+                }
+            }
+
+            // Salto de línea entre filas (excepto si la siguiente es continuación).
+            if logical_row < abs_end {
+                let next_row = logical_row + 1;
+                let is_continuation = if next_row < sb_len {
+                    false
+                } else {
+                    let grid_row = next_row - sb_len;
+                    grid_row < active.row_continuations.len() && active.row_continuations[grid_row]
+                };
+                if !is_continuation {
+                    result.push('\n');
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Limpia la selección actual.
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    /// Convierte una fila visible (índice en pantalla, 0..rows_count-1)
+    /// a una fila lógica dentro del buffer virtual [scrollback + grid].
+    fn visible_to_logical_row(&self, visible_row: usize) -> usize {
+        if self.scrollback_offset > 0 && !self.alt_screen {
+            let sb_len = self.grid.scrollback.len();
+            let offset = self.scrollback_offset as usize;
+            let viewport_start = sb_len.saturating_sub(offset);
+            viewport_start + visible_row
+        } else {
+            visible_row
+        }
     }
 }
 
@@ -572,7 +704,10 @@ impl vte::Perform for Term {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grid::Cell;
     use crate::grid::DEFAULT_COLS;
+    use crate::selection::SelectionMode;
+    use crate::selection::SelectionPoint;
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -1415,5 +1550,808 @@ mod tests {
             term.scrollback_offset = 0;
         }
         assert_eq!(term.scrollback_offset, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // TESTS ADVERSARIALES — Sprint 7 Fase 4
+    // Buscan bugs en la implementación de selección con mouse.
+    // NO son happy-path. Deben encontrar bugs si existen.
+    // -----------------------------------------------------------------------
+
+    /// ADVERSARIAL: selected_text() sin selección activa
+    /// Debe devolver String vacío, no panic.
+    #[test]
+    fn test_selected_text_empty_selection() {
+        let term = Term::new();
+        // Sin selección
+        assert!(
+            term.selection.is_none(),
+            "Term nuevo debe tener selection = None"
+        );
+        let text = term.selected_text();
+        assert_eq!(text, "", "selected_text() sin selección debe devolver ''");
+
+        // Mismo test con scrollback_offset > 0
+        let mut term2 = Term::new();
+        term2.scrollback_offset = 5;
+        let text2 = term2.selected_text();
+        assert_eq!(
+            text2, "",
+            "selected_text() sin selección + offset debe devolver ''"
+        );
+    }
+
+    /// ADVERSARIAL: selected_text() DESPUÉS de clear_selection()
+    /// No debe devolver texto residual.
+    #[test]
+    fn test_selected_text_after_clear() {
+        let mut term = Term::new();
+        feed(&mut term, b"hello world");
+
+        // Crear selección
+        let sel = Selection::new(SelectionPoint { row: 0, col: 0 });
+        term.selection = Some(sel);
+        assert!(!term.selected_text().is_empty(), "debe haber texto seleccionado");
+
+        // Limpiar
+        term.clear_selection();
+        assert!(term.selection.is_none(), "selection debe ser None tras clear");
+        let text = term.selected_text();
+        assert_eq!(
+            text, "",
+            "selected_text() tras clear_selection() debe devolver ''"
+        );
+    }
+
+    /// ADVERSARIAL: is_selected() para CUALQUIER celda cuando no hay selección
+    /// Debe devolver false siempre, incluso con coordenadas extremas.
+    #[test]
+    fn test_is_selected_when_selection_none() {
+        let term = Term::new();
+        // Sin selección: cualquier celda debe dar false
+        assert!(!term.is_selected(0, 0));
+        assert!(!term.is_selected(10, 30));
+        assert!(!term.is_selected(usize::MAX, usize::MAX));
+        assert!(!term.is_selected(0, usize::MAX));
+
+        // Con scrollback_offset pero sin selección
+        let mut term2 = Term::new();
+        term2.scrollback_offset = 3;
+        assert!(!term2.is_selected(0, 0));
+        assert!(!term2.is_selected(23, 79));
+    }
+
+    /// ADVERSARIAL: selected_text() en UNA sola celda
+    /// Verifica el texto exacto de una selección de 1 celda.
+    #[test]
+    fn test_selected_text_single_cell() {
+        let mut term = Term::new();
+        feed(&mut term, b"hello");
+
+        // Seleccionar UNA celda: (0, 2) -> 'l'
+        let sel = Selection::new(SelectionPoint { row: 0, col: 2 });
+        term.selection = Some(sel);
+        assert_eq!(
+            term.selected_text(),
+            "l",
+            "selección de 1 celda ('l') debe devolver 'l'"
+        );
+
+        // Seleccionar la primera celda: (0, 0) -> 'h'
+        let sel2 = Selection::new(SelectionPoint { row: 0, col: 0 });
+        term.selection = Some(sel2);
+        assert_eq!(
+            term.selected_text(),
+            "h",
+            "selección de 1 celda ('h') debe devolver 'h'"
+        );
+
+        // Seleccionar la última celda de texto: (0, 4) -> 'o'
+        let sel3 = Selection::new(SelectionPoint { row: 0, col: 4 });
+        term.selection = Some(sel3);
+        assert_eq!(
+            term.selected_text(),
+            "o",
+            "selección de 1 celda ('o') debe devolver 'o'"
+        );
+    }
+
+    /// ADVERSARIAL: selected_text() con selección INVERTIDA (start > end)
+    /// Debe devolver el mismo texto independientemente de la dirección.
+    #[test]
+    fn test_selected_text_reversed() {
+        let mut term = Term::new();
+        feed(&mut term, b"hello world");
+
+        // Selección forward: (0,6)-(0,10) -> "world"
+        let mut sel_fwd = Selection::new(SelectionPoint { row: 0, col: 6 });
+        sel_fwd.update_end(SelectionPoint { row: 0, col: 10 });
+        term.selection = Some(sel_fwd);
+        let text_fwd = term.selected_text();
+
+        // Misma selección reversed: start > end
+        let mut sel_rev = Selection::new(SelectionPoint { row: 0, col: 10 });
+        sel_rev.update_end(SelectionPoint { row: 0, col: 6 });
+        term.selection = Some(sel_rev);
+        let text_rev = term.selected_text();
+
+        assert_eq!(
+            text_fwd, text_rev,
+            "selección forward y reversed deben producir el mismo texto"
+        );
+        assert_eq!(text_fwd, "world", "debe seleccionar 'world'");
+
+        // Caso multilinea: forward y reversed deben coincidir
+        let mut term2 = Term::new();
+        feed(&mut term2, b"abc");
+        term2.cursor.move_to(1, 0);
+        feed(&mut term2, b"def");
+        term2.cursor.move_to(2, 0);
+        feed(&mut term2, b"ghi");
+
+        // Forward
+        let mut sf = Selection::new(SelectionPoint { row: 0, col: 0 });
+        sf.update_end(SelectionPoint { row: 2, col: 2 });
+        term2.selection = Some(sf);
+        let fwd_txt = term2.selected_text();
+
+        // Reversed
+        let mut sr = Selection::new(SelectionPoint { row: 2, col: 2 });
+        sr.update_end(SelectionPoint { row: 0, col: 0 });
+        term2.selection = Some(sr);
+        let rev_txt = term2.selected_text();
+
+        assert_eq!(
+            fwd_txt, rev_txt,
+            "multilinea forward y reversed deben coincidir"
+        );
+    }
+
+    /// ADVERSARIAL: Selección en alt_screen no debe causar panic
+    /// Crea selección estando en alt_screen, verifica que no crashee.
+    #[test]
+    fn test_selection_does_not_crash_alt_screen() {
+        let mut term = Term::new();
+
+        // Entrar a alt screen
+        feed(&mut term, b"\x1b[?1049h");
+        assert!(term.alt_screen, "debe estar en alt_screen");
+
+        // Crear selección en alt screen (el grid está vacío)
+        let sel = Selection::new(SelectionPoint { row: 0, col: 0 });
+        term.selection = Some(sel);
+
+        // is_selected debe funcionar sin panic
+        // La celda (0,0) SÍ está seleccionada (la selección la cubre),
+        // aunque el contenido sea vacío
+        let result = term.is_selected(0, 0);
+        assert!(
+            result,
+            "alt_grid: celda (0,0) debe estar seleccionada (selection la cubre)"
+        );
+
+        // is_selected para celda FUERA del rango debe ser false
+        assert!(
+            !term.is_selected(1, 0),
+            "celda (1,0) NO debe estar seleccionada (selección solo cubre (0,0))"
+        );
+
+        // selected_text debe funcionar sin panic
+        // alt_grid tiene 80 columnas de espacios (ch=' ', width=1)
+        // que sí se incluyen en selected_text() porque width>0
+        let text = term.selected_text();
+        assert!(
+            !text.is_empty(),
+            "alt_grid vacío tiene espacios con width>1, selected_text los incluye"
+        );
+
+        // Salir de alt screen, verificar que sigue funcionando
+        feed(&mut term, b"\x1b[?1049l");
+        assert!(!term.alt_screen, "debe haber salido de alt_screen");
+        // La selección apuntaba a la alt_grid, que ahora no es la activa.
+        // Pero selected_text sigue funcionando sin panic.
+        let _ = term.selected_text();
+    }
+
+    /// ADVERSARIAL: is_selected() con scrollback_offset > 0 y sin selección
+    /// Debe devolver false para todas las celdas.
+    #[test]
+    fn test_is_selected_with_scrollback_offset_no_selection() {
+        let mut term = Term::new();
+        // Crear scrollback para que offset tenga sentido
+        for _ in 0..5 {
+            term.cursor.move_to(DEFAULT_ROWS - 1, 0);
+            feed(&mut term, b"X\n");
+        }
+        assert!(
+            term.scrollback_len() > 0,
+            "debe haber scrollback para probar offset"
+        );
+
+        // Set offset pero NO selection
+        term.scrollback_offset = 2;
+        term.selection = None;
+
+        // is_selected debe ser false para TODAS las celdas visibles
+        for row in 0..DEFAULT_ROWS {
+            for col in 0..DEFAULT_COLS.min(5) {
+                assert!(
+                    !term.is_selected(row, col),
+                    "sin selección, ({},{}) no debe estar seleccionado",
+                    row,
+                    col
+                );
+            }
+        }
+
+        // Incluso con coordenadas inválidas
+        assert!(!term.is_selected(usize::MAX, usize::MAX));
+    }
+
+    /// ADVERSARIAL (BUG HUNT): selected_text() en alt_screen cuando el grid primario
+    /// tiene scrollback. El código usa `self.grid.scrollback.len()` dentro de
+    /// selected_text() para determinar si una fila es scrollback o grid,
+    /// pero SIEMPRE usa el scrollback PRIMARIO, incluso en alt_screen.
+    ///
+    /// BUG: Cuando alt_screen=true y el scrollback primario tiene contenido,
+    /// selected_text() trata logical rows < sb_len como filas del scrollback
+    /// primario en lugar de filas del alt_grid.
+    #[test]
+    fn test_selected_text_in_alt_screen_with_primary_scrollback() {
+        let mut term = Term::new();
+
+        // ---- Setup: crear scrollback en el grid PRIMARIO ----
+        // Escribir varias líneas y forzar scroll para que haya scrollback
+        for i in 0..3 {
+            term.cursor.move_to(DEFAULT_ROWS - 1, 0);
+            let line = format!("SCROLLBACK_{}", i);
+            feed(&mut term, line.as_bytes());
+            feed(&mut term, b"\n");
+        }
+        let sb_len = term.scrollback_len();
+        assert!(
+            sb_len > 0,
+            "BUG TEST: debe haber scrollback primario para exponer el bug"
+        );
+        eprintln!(
+            "BUG TEST: scrollback primario tiene {} líneas",
+            sb_len
+        );
+
+        // ---- Entrar a alt screen ----
+        feed(&mut term, b"\x1b[?1049h");
+        assert!(term.alt_screen, "BUG TEST: debe estar en alt_screen");
+
+        // ---- Escribir contenido en alt_grid ----
+        feed(&mut term, b"ALT_CONTENT");
+        assert_eq!(
+            term.alt_grid.rows[0][0].ch, 'A',
+            "BUG TEST: alt_grid row 0 col 0 debe ser 'A'"
+        );
+
+        // ---- Crear selección en alt_grid row 0 (todo "ALT_CONTENT") ----
+        let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
+        sel.update_end(SelectionPoint { row: 0, col: 10 });
+        term.selection = Some(sel);
+
+        // ---- Obtener selected_text ----
+        let text = term.selected_text();
+
+        // BUG: Si sb_len > 0 (scrollback primario tiene contenido),
+        // selected_text() trata logical row 0 como scrollback (porque
+        // 0 < sb_len) y lee de self.grid.scrollback en lugar de active.rows[0].
+        // El texto esperado es "ALT_CONTENT", NO el contenido del scrollback.
+        assert_eq!(
+            text, "ALT_CONTENT",
+            "BUG: selected_text() en alt_screen debe leer de alt_grid, \
+             no del scrollback primario. Se obtuvo: '{:?}'",
+            text
+        );
+    }
+
+    /// ADVERSARIAL: selected_text() con selección fuera del rango total de filas
+    /// Cuando start_row >= total_rows (scrollback + grid), debe devolver "".
+    #[test]
+    fn test_selected_text_out_of_bounds_range() {
+        let mut term = Term::new();
+        feed(&mut term, b"some content");
+
+        // Selección que empieza MUY lejos (mucho más allá del grid)
+        let mut sel = Selection::new(SelectionPoint { row: 9999, col: 0 });
+        sel.update_end(SelectionPoint {
+            row: 9999 + 5,
+            col: 10,
+        });
+        term.selection = Some(sel);
+
+        // start_row (9999) >= total_rows (0 scrollback + 24 grid = 24)
+        // El código debe devolver string vacío.
+        let text = term.selected_text();
+        assert_eq!(
+            text, "",
+            "selección fuera del rango debe devolver ''"
+        );
+
+        // Selección con start en scrollback inexistente
+        let mut sel2 = Selection::new(SelectionPoint { row: 0, col: 0 });
+        sel2.update_end(SelectionPoint { row: 5, col: 5 });
+        term.selection = Some(sel2);
+
+        // No hay scrollback (sb_len = 0). total_rows = 0 + 24 = 24.
+        // start_row = 0 < 24, end_row = 5 < 24. Hay grid rows 0..24.
+        // selected_text() debe procesar rows 0..5.
+        // Pero sin scrollback, logical rows 0..5 son grid rows 0..5.
+        // grid[0] tiene "some content", grid[1..5] están vacíos.
+        // El texto esperado depende del contenido exacto.
+        let text2 = term.selected_text();
+        assert!(
+            !text2.is_empty(),
+            "debe haber texto seleccionado (al menos 'some content' en row 0)"
+        );
+        assert!(
+            text2.contains("some content"),
+            "debe contener 'some content'"
+        );
+    }
+
+    /// ADVERSARIAL: selected_text() con selección que cruza scrollback y grid
+    /// y donde una fila del scrollback tiene menos columnas que end_col.
+    #[test]
+    fn test_selected_text_partial_scrollback_row() {
+        let mut term = Term::new();
+
+        // Poner datos en scrollback con menos columnas que el grid
+        let short_sb_row: Vec<Cell> = "SHORT"
+            .chars()
+            .map(|c| Cell {
+                ch: c,
+                attrs: Attrs::default(),
+                width: 1,
+            })
+            .collect();
+        term.grid.scrollback.push_back(short_sb_row);
+
+        let sb_len = term.scrollback_len();
+        assert_eq!(sb_len, 1, "debe haber 1 fila en scrollback");
+
+        // Escribir datos en grid
+        feed(&mut term, b"GRID_DATA");
+
+        // Scroll up 1 linea para ver scrollback
+        term.scrollback_offset = 1;
+
+        // Seleccion desde visible row 0 (scrollback) hasta visible row 1 (grid)
+        let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
+        sel.update_end(SelectionPoint { row: 1, col: 9 });
+        term.selection = Some(sel);
+
+        let text = term.selected_text();
+        assert!(
+            text.contains("SHORT"),
+            "debe contener 'SHORT' del scrollback"
+        );
+        assert!(
+            text.contains("GRID_DATA"),
+            "debe contener 'GRID_DATA' del grid"
+        );
+        // Debe tener un newline entre scrollback y grid
+        assert!(
+            text.contains('\n'),
+            "debe haber newline entre scrollback y grid"
+        );
+    }
+
+    /// ADVERSARIAL: is_selected() con scrollback_offset calcula mal logical_row
+    /// Verifica que is_selected mapee correctamente visible -> logical.
+    #[test]
+    fn test_is_selected_with_scrollback_offset_selection() {
+        let mut term = Term::new();
+
+        // Crear scrollback: 5 líneas
+        for i in 0..5 {
+            term.cursor.move_to(DEFAULT_ROWS - 1, 0);
+            let line = format!("SB{}", i);
+            feed(&mut term, line.as_bytes());
+            feed(&mut term, b"\n");
+        }
+        let sb_len = term.scrollback_len();
+        let grid_row_count = term.grid.rows_count;
+        let _total = sb_len + grid_row_count;
+
+        // Seleccionar la última línea del scrollback (logical row 4) y
+        // las primeras del grid (logical rows 5 a 10)
+        let mut sel = Selection::new(SelectionPoint { row: 4, col: 0 });
+        sel.update_end(SelectionPoint { row: 10, col: 3 });
+        term.selection = Some(sel);
+
+        // Sin scrollback_offset: visible row = logical row
+        // visible 0 = logical 0... visible 4 = logical 4 (scrollback last line)
+        // visible 5 = logical 5 (grid row 0)
+        // ...
+        // visible 10 = logical 10 (grid row 6)
+        assert!(term.is_selected(4, 0), "visible 4 = logical 4 (scrollback), debe estar seleccionado");
+        assert!(term.is_selected(5, 0), "visible 5 = logical 5 (grid[0]), debe estar seleccionado");
+        assert!(term.is_selected(10, 3), "visible 10 = logical 10 (grid[6]), debe estar seleccionado");
+        assert!(!term.is_selected(3, 0), "visible 3 = logical 3, fuera de rango");
+        assert!(!term.is_selected(11, 0), "visible 11 = logical 11, fuera de rango");
+
+        // Con scrollback_offset = 2:
+        // viewport_start = sb_len - 2 = 3
+        // visible 0 = logical 3, visible 1 = logical 4, ...
+        term.scrollback_offset = 2;
+        // La selección cubre logical 4-10.
+        // visible 0 = logical 3 (no seleccionado)
+        // visible 1 = logical 4 (seleccionado)
+        // visible 7 = logical 10 (seleccionado)
+        assert!(
+            !term.is_selected(0, 0),
+            "visible 0 = logical 3, fuera de selección"
+        );
+        assert!(
+            term.is_selected(1, 0),
+            "visible 1 = logical 4 (scrollback), seleccionado"
+        );
+        assert!(
+            term.is_selected(7, 3),
+            "visible 7 = logical 10 (grid[0+6]), seleccionado"
+        );
+    }
+
+    /// ADVERSARIAL: clear_selection() en alt_screen
+    /// Verifica que no haya efectos secundarios.
+    #[test]
+    fn test_clear_selection_in_alt_screen() {
+        let mut term = Term::new();
+
+        // Escribir en primaria
+        feed(&mut term, b"PRIMARY");
+
+        // Entrar alt screen
+        feed(&mut term, b"\x1b[?1049h");
+        feed(&mut term, b"ALT");
+
+        // Crear selección en alt
+        let sel = Selection::new(SelectionPoint { row: 0, col: 0 });
+        term.selection = Some(sel);
+        assert!(term.selection.is_some(), "debe haber selección activa");
+
+        // Clear en alt screen
+        term.clear_selection();
+        assert!(term.selection.is_none(), "selección debe eliminarse");
+        assert_eq!(term.selected_text(), "", "selected_text debe ser ''");
+
+        // El alt grid NO debe haberse modificado
+        assert_eq!(term.alt_grid.rows[0][0].ch, 'A', "alt_grid no debe modificarse");
+
+        // Salir de alt screen: la selección debe seguir eliminada
+        feed(&mut term, b"\x1b[?1049l");
+        assert!(term.selection.is_none(), "selección debe seguir eliminada");
+    }
+
+    /// ADVERSARIAL: selected_text() con selección que incluye SOLO espacios
+    /// Verifica que devuelve espacios (width>0), no que filtre vacío.
+    #[test]
+    fn test_selected_text_only_spaces() {
+        let mut term = Term::new();
+        // El grid empieza con espacios. Seleccionar una región de solo espacios.
+        let sel = Selection {
+            start: SelectionPoint { row: 0, col: 0 },
+            end: SelectionPoint { row: 0, col: 10 },
+            mode: SelectionMode::Normal,
+        };
+        term.selection = Some(sel);
+
+        // La fila 0 solo tiene espacios (Cell::default()) con width=1
+        // La condición `cell.ch != ' ' || cell.width > 0` incluye espacios
+        // porque width=1 > 0. Así que devuelve los espacios.
+        let text = term.selected_text();
+        assert_eq!(
+            text, "           ",
+            "selección de solo espacios con width>0 debe devolver espacios"
+        );
+        assert_eq!(text.len(), 11, "deben ser 11 espacios (col 0..10 inclusive, 11 celdas)");
+
+        // Multilinea con solo espacios
+        let sel2 = Selection {
+            start: SelectionPoint { row: 0, col: 0 },
+            end: SelectionPoint { row: 3, col: 0 },
+            mode: SelectionMode::Normal,
+        };
+        term.selection = Some(sel2);
+        let text2 = term.selected_text();
+        // Cada fila contribuye 1 espacio (col 0), con newlines entre filas
+        assert!(!text2.is_empty(), "debe tener espacios y newlines");
+        assert!(
+            text2.contains(' '),
+            "debe contener espacios"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests: seleccion (Ronda 1 Sprint 7)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_selection_between_scrollback_and_grid() {
+        let mut term = Term::new();
+
+        // Put data in scrollback directly
+        let sb_row: Vec<Cell> = "scrollback_line"
+            .chars()
+            .map(|c| Cell { ch: c, attrs: Attrs::default(), width: 1 })
+            .collect();
+        term.grid.scrollback.push_back(sb_row);
+
+        // Write data in the visible grid
+        feed(&mut term, b"visible_grid_data");
+
+        let sb_len = term.scrollback_len();
+        assert_eq!(sb_len, 1);
+
+        // Selection from scrollback row (logical 0) into grid row (logical sb_len = 1)
+        let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
+        sel.update_end(SelectionPoint {
+            row: sb_len,
+            col: 7,
+        });
+        term.selection = Some(sel);
+
+        // Without scrollback_offset, visible rows = logical rows.
+        // visible row 0 = logical row 0 = scrollback[0]
+        // visible row 1 = logical row 1 = grid row 0
+
+        // Scrollback region — the entire start row is selected from start_col onwards
+        assert!(term.is_selected(0, 0)); // 's'
+        assert!(term.is_selected(0, 14)); // 'e' (last char of "scrollback_line")
+        assert!(term.is_selected(0, 20)); // cols beyond data are still selected (start row)
+
+        // Grid region — end row only selected up to end_col (7)
+        assert!(term.is_selected(1, 0)); // 'v'
+        assert!(term.is_selected(1, 7)); // '_' (end_col = 7)
+        assert!(!term.is_selected(1, 8)); // past end_col
+
+        // Row beyond the selection range
+        assert!(!term.is_selected(2, 0));
+    }
+
+    #[test]
+    fn test_selection_single_cell() {
+        let mut term = Term::new();
+        feed(&mut term, b"abc");
+
+        // Seleccionar celda (0, 1) = 'b'
+        let sel = crate::selection::Selection::new(
+            crate::selection::SelectionPoint { row: 0, col: 1 },
+        );
+        term.selection = Some(sel);
+
+        assert!(term.is_selected(0, 1));
+        assert!(!term.is_selected(0, 0));
+        assert!(!term.is_selected(0, 2));
+        assert!(!term.is_selected(1, 0));
+    }
+
+    #[test]
+    fn test_selection_multiline() {
+        let mut term = Term::new();
+        feed(&mut term, b"abc");
+        term.cursor.move_to(1, 0);
+        feed(&mut term, b"def");
+        term.cursor.move_to(2, 0);
+        feed(&mut term, b"ghi");
+
+        // Seleccionar desde (0,1) hasta (2,1)
+        let mut sel = crate::selection::Selection::new(
+            crate::selection::SelectionPoint { row: 0, col: 1 },
+        );
+        sel.update_end(crate::selection::SelectionPoint { row: 2, col: 1 });
+        term.selection = Some(sel);
+
+        // Primera fila
+        assert!(!term.is_selected(0, 0));
+        assert!(term.is_selected(0, 1));
+        assert!(term.is_selected(0, 2));
+        // Segunda fila completa
+        assert!(term.is_selected(1, 0));
+        assert!(term.is_selected(1, 1));
+        assert!(term.is_selected(1, 2));
+        // Tercera fila, solo col 0-1
+        assert!(term.is_selected(2, 0));
+        assert!(term.is_selected(2, 1));
+        assert!(!term.is_selected(2, 2));
+    }
+
+    #[test]
+    fn test_selection_reversed() {
+        let mut term = Term::new();
+        feed(&mut term, b"abc");
+
+        // Seleccion invertida: end antes que start
+        let mut sel = crate::selection::Selection::new(
+            crate::selection::SelectionPoint { row: 0, col: 2 },
+        );
+        sel.update_end(crate::selection::SelectionPoint { row: 0, col: 0 });
+        term.selection = Some(sel);
+
+        // Debe normalizar a (0,0)-(0,2)
+        assert!(term.is_selected(0, 0));
+        assert!(term.is_selected(0, 1));
+        assert!(term.is_selected(0, 2));
+        assert!(!term.is_selected(0, 3));
+    }
+
+    #[test]
+    fn test_no_selection_returns_false() {
+        let term = Term::new();
+        assert!(!term.is_selected(0, 0));
+        assert_eq!(term.selected_text(), "");
+    }
+
+    #[test]
+    fn test_clear_selection() {
+        let mut term = Term::new();
+        feed(&mut term, b"abc");
+
+        // Create a selection and verify it is active
+        let sel = crate::selection::Selection::new(
+            crate::selection::SelectionPoint { row: 0, col: 0 },
+        );
+        term.selection = Some(sel);
+        assert!(term.selection.is_some());
+        assert!(term.is_selected(0, 0));
+        assert!(!term.selected_text().is_empty());
+
+        // Clear selection and verify everything is reset
+        term.clear_selection();
+        assert!(term.selection.is_none());
+        assert!(!term.is_selected(0, 0));
+        assert!(!term.is_selected(5, 0));
+        assert_eq!(term.selected_text(), "");
+    }
+
+    #[test]
+    fn test_selected_text_single_line() {
+        let mut term = Term::new();
+        feed(&mut term, b"hello");
+
+        let mut sel = crate::selection::Selection::new(
+            crate::selection::SelectionPoint { row: 0, col: 1 },
+        );
+        sel.update_end(crate::selection::SelectionPoint { row: 0, col: 3 });
+        term.selection = Some(sel);
+
+        assert_eq!(term.selected_text(), "ell");
+    }
+
+    #[test]
+    fn test_selected_text_multiline() {
+        let mut term = Term::new();
+        feed(&mut term, b"abc");
+        term.cursor.move_to(1, 0);
+        feed(&mut term, b"def");
+        term.cursor.move_to(2, 0);
+        feed(&mut term, b"ghi");
+        term.cursor.move_to(3, 0);
+        feed(&mut term, b"jkl");
+
+        // Partial selection across 3 lines: (0,1) to (2,1)
+        let mut sel = crate::selection::Selection::new(
+            crate::selection::SelectionPoint { row: 0, col: 1 },
+        );
+        sel.update_end(crate::selection::SelectionPoint { row: 2, col: 1 });
+        term.selection = Some(sel);
+
+        // (0,1)-(0,2)='bc' + newline + (1,0)-(1,2)='def' + newline + (2,0)-(2,1)='gh'
+        assert_eq!(term.selected_text(), "bc\ndef\ngh");
+
+        // Full lines selection across 4 lines: (0,0) to (3,2)
+        let mut sel2 = crate::selection::Selection::new(
+            crate::selection::SelectionPoint { row: 0, col: 0 },
+        );
+        sel2.update_end(crate::selection::SelectionPoint { row: 3, col: 2 });
+        term.selection = Some(sel2);
+
+        assert_eq!(term.selected_text(), "abc\ndef\nghi\njkl");
+    }
+
+    #[test]
+    fn test_selection_in_scrollback() {
+        let mut term = Term::new();
+
+        // Forzar scrollback: llenar varias filas y hacer scroll.
+        for i in 0..5 {
+            term.cursor.move_to(DEFAULT_ROWS - 1, 0);
+            term.cursor.col = 0;
+            feed(&mut term, &[b'L', b'i', b'n', b'e', b'0' + i as u8, b'\n']);
+        }
+
+        // scrollback ahora tiene ~5 filas.
+        let sb_len = term.scrollback_len();
+        assert!(sb_len > 0, "deberia haber scrollback");
+
+        // La primera fila del scrollback tiene 'Line0'
+        let sel = crate::selection::Selection::new(
+            crate::selection::SelectionPoint { row: 0, col: 0 },
+        );
+        term.selection = Some(sel);
+
+        // Sin scrollback_offset, visible row 0 = logica row 0 (scrollback).
+        // Pero el grid tiene 24 filas, visible row 0 es grid row 0.
+        // Logica: el scrollback empieza en 0. visible_to_logical_row(0) sin offset = 0.
+        // La seleccion esta en logical (0,0), que es la primera fila del scrollback.
+        // Pero cuando se renderiza sin scrollback_offset, no se ve scrollback.
+        // is_selected usa visible_to_logical_row, que sin offset devuelve visible_row.
+        // Entonces is_selected(0,0) verifica logical_row=0, que contiene (0,0) -> true.
+        assert!(term.is_selected(0, 0));
+
+        // Verificar que la fila 5 del grid NO esta seleccionada.
+        assert!(!term.is_selected(5, 0));
+
+        // Seleccionar la fila grid row 0 (logica = sb_len + 0).
+        let sel2 = crate::selection::Selection::new(
+            crate::selection::SelectionPoint { row: sb_len, col: 0 },
+        );
+        term.selection = Some(sel2);
+        // is_selected(0, 0) con offset=0 -> logical=0 -> no coincide con sb_len -> false
+        assert!(!term.is_selected(0, 0));
+        // is_selected(0, 0) -> logical=0 que != sb_len.
+        // En realidad debería ser: visible=0, logical=0. Selection contiene (sb_len,0) pero logical=0 no es sb_len. Entonces false.
+        // grid row 0 visible = logica sb_len + 0... pero activo es grid, logical_row=0 = grid row 0.
+        // Para llegar a sb_len, logical_row debe ser sb_len. visible_row = 0 -> logical = 0. No match.
+        // is_selected(5, 0) con offset=0 -> logical=5. Selection.start.row = sb_len (~5).
+        // Si sb_len = 5, logical=5 == sb_len -> contains(5, 0) -> true.
+        if sb_len < term.grid.rows_count {
+            // grid row (sb_len - sb_len) = grid row 0 = visible row 0
+            // Pero logical = sb_len + 0 = sb_len, entonces visible row tiene que ser sb_len.
+            // En pantalla normal (sin offset), visible row = logical row.
+            // grid row 0 = visible row 0 = logical row 0. NO es sb_len.
+            // grid row sb_len - sb_len = grid row 0... ok entonces no estamos seleccionando grid row 0.
+            // La seleccion esta en logical sb_len, que corresponde al grid row (sb_len - sb_len) = 0 solo si logical >= sb_len.
+            // visible row = logical_row - sb_len = 0. Entonces is_selected(0, 0) -> logical=0 != sb_len -> false. Correcto.
+            // is_selected(sb_len, 0) -> logical = sb_len -> contains -> true.
+            assert!(term.is_selected(sb_len, 0), "logical row {} should be selected", sb_len);
+        }
+    }
+
+    #[test]
+    fn test_selected_text_in_scrollback() {
+        let mut term = Term::new();
+
+        // Put data in scrollback directly
+        let sb_row: Vec<Cell> = "scrollback_"
+            .chars()
+            .map(|c| Cell { ch: c, attrs: Attrs::default(), width: 1 })
+            .collect();
+        term.grid.scrollback.push_back(sb_row);
+
+        // Write data in visible grid
+        feed(&mut term, b"visible");
+
+        let sb_len = term.scrollback_len();
+        assert_eq!(sb_len, 1);
+
+        // Scroll up para que la fila del scrollback sea visible
+        term.scrollback_offset = 1;
+
+        // Seleccion desde scrollback (visible row 0) hasta grid (visible row sb_len=1)
+        let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
+        sel.update_end(SelectionPoint {
+            row: 1,
+            col: 6,
+        });
+        term.selection = Some(sel);
+
+        let text = term.selected_text();
+        assert!(!text.is_empty(), "should contain text from scrollback and grid");
+        assert!(
+            text.contains("scrollback_"),
+            "should include scrollback text"
+        );
+        assert!(text.contains("visible"), "should include grid text");
+        // Verify newline separates scrollback from grid (no continuation flag)
+        assert!(
+            text.contains('\n'),
+            "should contain newline between scrollback and grid rows"
+        );
     }
 }
