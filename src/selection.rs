@@ -194,7 +194,14 @@ mod tests {
     fn test_expand_to_word() {
         use crate::grid::Cell;
 
-        let cells: Vec<Cell> = "hello world foo".chars().map(|c| Cell { ch: c, attrs: Default::default(), width: 1 }).collect();
+        let cells: Vec<Cell> = "hello world foo"
+            .chars()
+            .map(|c| Cell {
+                ch: c,
+                attrs: Default::default(),
+                width: 1,
+            })
+            .collect();
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
 
         // Click en 'e' de "hello"
@@ -222,7 +229,14 @@ mod tests {
     fn test_expand_to_word_underscore() {
         use crate::grid::Cell;
 
-        let cells: Vec<Cell> = "my_var_name".chars().map(|c| Cell { ch: c, attrs: Default::default(), width: 1 }).collect();
+        let cells: Vec<Cell> = "my_var_name"
+            .chars()
+            .map(|c| Cell {
+                ch: c,
+                attrs: Default::default(),
+                width: 1,
+            })
+            .collect();
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
 
         sel.expand_to_word(&cells, 3); // click on '_' after 'my_'
@@ -267,18 +281,27 @@ mod tests {
         // Selección con row=usize::MAX — cubre todo el espacio lógico
         let sel = Selection {
             start: SelectionPoint { row: 0, col: 0 },
-            end: SelectionPoint { row: usize::MAX, col: usize::MAX },
+            end: SelectionPoint {
+                row: usize::MAX,
+                col: usize::MAX,
+            },
             mode: SelectionMode::Normal,
         };
         // Borde inferior
         assert!(sel.contains(0, 0), "debe contener (0,0)");
         // Mitad del rango (overflow si normalize suma mal)
-        assert!(sel.contains(usize::MAX / 2, 0), "debe contener fila intermedia");
+        assert!(
+            sel.contains(usize::MAX / 2, 0),
+            "debe contener fila intermedia"
+        );
         // Borde superior — usize::MAX == end_row después de normalize
         assert!(sel.contains(usize::MAX, 0), "debe contener (MAX, 0)");
         // Columna extrema
         assert!(sel.contains(0, usize::MAX), "debe contener (0, MAX)");
-        assert!(sel.contains(usize::MAX, usize::MAX), "debe contener (MAX, MAX)");
+        assert!(
+            sel.contains(usize::MAX, usize::MAX),
+            "debe contener (MAX, MAX)"
+        );
 
         // Sin selección con start == end en fila normal
         let sel2 = Selection {
@@ -312,7 +335,10 @@ mod tests {
         assert!(sel.contains(100, 50), "end normalizado (100,50)");
         assert!(sel.contains(50, 30), "mitad del rango");
         assert!(!sel.contains(4, 0), "una fila antes del start normalizado");
-        assert!(!sel.contains(101, 0), "una fila después del end normalizado");
+        assert!(
+            !sel.contains(101, 0),
+            "una fila después del end normalizado"
+        );
         assert!(!sel.contains(5, 9), "una col antes del start normalizado");
 
         // Caso 2: misma fila, end.col << start.col (invertido en misma fila)
@@ -343,10 +369,16 @@ mod tests {
         assert!(sel4.contains(5, 0), "end normalizado (5,0)");
         // Row 4 solo selecciona desde col 79 en adelante (no hay límite superior
         // porque start_row solo tiene cota inferior en contains())
-        assert!(!sel4.contains(4, 0), "row 4, col 0 está ANTES del start_col normalizado (79)");
+        assert!(
+            !sel4.contains(4, 0),
+            "row 4, col 0 está ANTES del start_col normalizado (79)"
+        );
         // En la start_row, contiene cualquier col >= start_col
         // (geometrico, sin límite de columnas del grid)
-        assert!(sel4.contains(4, 80), "col 80 >= start_col 79, geometricamente contenida");
+        assert!(
+            sel4.contains(4, 80),
+            "col 80 >= start_col 79, geometricamente contenida"
+        );
         // Row 5 (end_row): solo col <= end_col (0)
         assert!(!sel4.contains(5, 1), "col 1 > end_col 0 en end_row");
     }
@@ -409,10 +441,7 @@ mod tests {
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 10 });
         sel.expand_to_word(&cells, 10);
         // 'd' en col 10 (última) debe expandir a "world"
-        assert_eq!(
-            sel.start.col, 6,
-            "start debe ser 6 (inicio de 'world')"
-        );
+        assert_eq!(sel.start.col, 6, "start debe ser 6 (inicio de 'world')");
         assert_eq!(sel.end.col, 10, "end debe ser 10 (última col)");
     }
 
@@ -445,10 +474,7 @@ mod tests {
         assert_eq!(sel.start.row, 2, "row debe ser 2");
         assert_eq!(sel.start.col, 0, "start.col debe ser 0");
         assert_eq!(sel.end.row, 2, "end.row debe ser 2");
-        assert_eq!(
-            sel.end.col, 0,
-            "end.col = saturating_sub(1, 0) = 0"
-        );
+        assert_eq!(sel.end.col, 0, "end.col = saturating_sub(1, 0) = 0");
     }
 
     /// ADVERSARIAL: expand_to_word en fila SIN caracteres de palabra
@@ -466,10 +492,7 @@ mod tests {
         // Punto inicial en col 0 (.) -> no es word char -> no expande
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
         sel.expand_to_word(&cells, 0);
-        assert_eq!(
-            sel.start.col, 0,
-            "'.' no es word char, start no cambia"
-        );
+        assert_eq!(sel.start.col, 0, "'.' no es word char, start no cambia");
         assert_eq!(sel.end.col, 0, "end no cambia");
 
         // Click en '!' (col 5) -> no es word char
@@ -494,10 +517,7 @@ mod tests {
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
         // col=usize::MAX > len
         sel.expand_to_word(&cells, usize::MAX);
-        assert_eq!(
-            sel.start.col, 0,
-            "col out of bounds, no debe cambiar nada"
-        );
+        assert_eq!(sel.start.col, 0, "col out of bounds, no debe cambiar nada");
         assert_eq!(sel.end.col, 0, "end no debe cambiar");
 
         // col = len (exactamente la longitud)
@@ -560,18 +580,30 @@ mod tests {
         assert!(sel.contains(0, 3), "debe estar en rango");
         assert!(!sel.contains(1, 0), "fila 1 fuera de rango");
         // Misma fila, col = start_col (0) debe estar contenida
-        assert!(sel.contains(0, 0), "col 0 es start_col, debe estar contenida");
+        assert!(
+            sel.contains(0, 0),
+            "col 0 es start_col, debe estar contenida"
+        );
         // Misma fila, col después de end_col (5) no debe estar contenida
         assert!(!sel.contains(0, 6), "col 6 fuera de end_col");
 
         // Otra selección con rango muy grande
         let sel2 = Selection {
-            start: SelectionPoint { row: 0, col: usize::MAX },
-            end: SelectionPoint { row: 0, col: usize::MAX },
+            start: SelectionPoint {
+                row: 0,
+                col: usize::MAX,
+            },
+            end: SelectionPoint {
+                row: 0,
+                col: usize::MAX,
+            },
             mode: SelectionMode::Normal,
         };
         assert!(sel2.contains(0, usize::MAX), "debe contener (0,MAX)");
         assert!(!sel2.contains(0, 0), "col 0 fuera de rango");
-        assert!(!sel2.contains(0, usize::MAX - 1), "col MAX-1 fuera de rango");
+        assert!(
+            !sel2.contains(0, usize::MAX - 1),
+            "col MAX-1 fuera de rango"
+        );
     }
 }
