@@ -460,12 +460,15 @@ impl vte::Perform for Term {
                     .move_to(self.cursor.row, next.min(self.cursor.cols_count - 1));
             }
             0x0A => {
-                // LF (line feed): avanzar una fila. Si estamos en el bottom
-                // de la scroll region, hacer scroll_up de la region.
-                // CANCELA pending_wrap.
-                // ponytail: scroll al final de la scroll region.
+                // LF (line feed): CR+LF implícito. En terminales reales, el
+                // driver del PTY convierte \\n a \\r\\n vía ONLCR, pero en
+                // llamadas directas a feed()/advance() sin PTY, LF debe
+                // resetear la columna para que el texto siguiente empiece
+                // al inicio de la línea (comportamiento intuitivo esperado).
+                // ponytail: CR+LF en 1 sola línea.
                 self.pending_wrap = false;
                 let (top, bottom) = self.scroll_region;
+                self.cursor.move_to(self.cursor.row, 0);
                 if self.cursor.row == bottom {
                     self.active_grid_mut().scroll_up_region(1, top, bottom);
                 } else {
@@ -931,6 +934,10 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"a\n");
         assert_eq!(term.cursor.row, 1);
+        assert_eq!(
+            term.cursor.col, 0,
+            "LF debe hacer CR+FL: col debe resetearse a 0"
+        );
         assert_eq!(term.grid.rows[0][0].ch, 'a');
     }
 
@@ -1004,9 +1011,10 @@ mod tests {
         assert_eq!(term.grid.rows[0][1].ch, 'O');
         assert_eq!(term.grid.rows[0][2].ch, 'J');
         assert_eq!(term.grid.rows[0][3].ch, 'O');
-        // LF avanzo a fila 1, col se queda en 4 (LF no resetea columna)
+        // LF avanzo a fila 1 y resetea col a 0 (CR+LF implícito)
         assert_eq!(term.cursor.row, 1);
-        assert_eq!(term.cursor.col, 4);
+        assert_eq!(term.cursor.col, 0);
+        assert_eq!(term.grid.rows[1][0].ch, ' ');
     }
 
     // -----------------------------------------------------------------------
