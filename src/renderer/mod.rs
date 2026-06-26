@@ -39,6 +39,8 @@ pub struct Renderer {
     // ponytail: flag del overlay. Se activa con set_status(), se desactiva
     // cuando se llama con texto vacio o cuando se hace render() sin status.
     status_active: bool,
+    /// Instant en que se activó el status overlay, para auto-desaparición.
+    status_start: Option<Instant>,
     frame_count: u64,
     // Shaper cache por fila: evita set_rich_text/set_size/shape_until_scroll
     // cuando el contenido de una fila no cambió entre frames.
@@ -125,6 +127,7 @@ impl Renderer {
             cell_w,
             cell_h,
             status_active: false,
+            status_start: None,
             frame_count: 0,
             line_cache,
         }
@@ -232,6 +235,7 @@ impl Renderer {
             end: usize,
             bold: bool,
             fg: Color,
+            selected: bool, // ponytail: flag para marcador visible de seleccion
         }
 
         // Pre-calcular filas fuente y si estan vacias (para compartir entre fases).
@@ -266,6 +270,11 @@ impl Renderer {
             .collect();
 
         // Fase A: llenar los buffers por fila con spans agrupados.
+        // ponytail: si hay seleccion activa, invalidar cache porque
+        // el texto es el mismo pero el color visual cambio.
+        if term.selection.is_some() {
+            self.line_cache.iter_mut().for_each(|c| c.clear());
+        }
         for (row, source_row) in row_sources.iter().enumerate() {
             if row_empty[row] {
                 // Fila vacia: actualizar cache a vacio, no llamar a glyphon.
@@ -280,6 +289,7 @@ impl Renderer {
             let mut span_start = 0usize;
             let mut current_bold = false;
             let mut current_fg = Color::Default;
+            let mut current_selected = false; // ponytail: seguimiento de selección para invertir colores
 
             for col in 0..cols_count {
                 let default_cell = Cell::default();
@@ -287,20 +297,28 @@ impl Renderer {
                 let pos_before = line.len();
                 line.push(cell.ch);
 
-                // Cerrar span anterior si cambian los atributos.
+                // Ronda 2 Sprint 7: Invertir fg ↔ bg para celdas seleccionadas.
+                let is_sel = term.is_selected(row, col);
+                let effective_fg = if is_sel { cell.attrs.bg } else { cell.attrs.fg };
+
+                // Cerrar span anterior si cambian los atributos o el estado de selección.
                 if pos_before > span_start
-                    && (cell.attrs.bold != current_bold || cell.attrs.fg != current_fg)
+                    && (cell.attrs.bold != current_bold
+                        || effective_fg != current_fg
+                        || is_sel != current_selected)
                 {
                     styles.push(CellStyle {
                         start: span_start,
                         end: pos_before,
                         bold: current_bold,
                         fg: current_fg,
+                        selected: current_selected,
                     });
                     span_start = pos_before;
                 }
                 current_bold = cell.attrs.bold;
-                current_fg = cell.attrs.fg;
+                current_fg = effective_fg;
+                current_selected = is_sel;
             }
 
             // Cerrar ultimo span de la fila.
@@ -310,6 +328,7 @@ impl Renderer {
                     end: line.len(),
                     bold: current_bold,
                     fg: current_fg,
+                    selected: current_selected,
                 });
             }
 
@@ -324,8 +343,18 @@ impl Renderer {
 
             // Construir spans de glyphon a partir de los CellStyle.
             let spans = styles.iter().map(|s| {
-                let fg = color_to_glyphon(s.fg);
-                let color = glyphon::Color::rgba(fg.r(), fg.g(), fg.b(), 255);
+                let fg_color = if s.selected {
+                    match s.fg {
+                        // ponytail: glyphon no soporta bg color. Cuando bg=Default
+                        // la inversion fg↔bg seria invisible (gris claro sobre negro).
+                        // Usamos blanco puro como marcador visible de seleccion.
+                        Color::Default | Color::White => glyphon::Color::rgb(0xff, 0xff, 0xff),
+                        other => color_to_glyphon(other),
+                    }
+                } else {
+                    color_to_glyphon(s.fg)
+                };
+                let color = glyphon::Color::rgba(fg_color.r(), fg_color.g(), fg_color.b(), 255);
                 let mut attrs = glyphon::Attrs::new().family(glyphon::Family::Monospace);
                 if s.bold {
                     attrs = attrs.weight(glyphon::Weight::BOLD);
@@ -424,10 +453,12 @@ impl Renderer {
         }
 
         // 2c. Si hay overlay activo (status), agregar TextArea extra.
+        // Posicionado a la derecha, con margen de 10px.
         if self.status_active {
+            let overlay_left = self.config.width as f32 - (23.0 * self.cell_w) - 10.0;
             text_areas.push(glyphon::TextArea {
                 buffer: &self.overlay_buffer,
-                left: 0.0,
+                left: overlay_left.max(0.0),
                 top: 0.0,
                 scale: 1.0,
                 bounds: glyphon::TextBounds {
@@ -439,6 +470,14 @@ impl Renderer {
                 default_color: glyphon::Color::rgb(0xf3, 0x8b, 0xa8),
                 custom_glyphs: &[],
             });
+
+            // Auto-desactivar el status después de 2 segundos.
+            if let Some(start) = self.status_start {
+                if start.elapsed() > std::time::Duration::from_secs(2) {
+                    self.status_active = false;
+                    self.status_start = None;
+                }
+            }
         }
         let phase_b_us = t_phase_b.elapsed().as_secs_f64() * 1_000_000.0;
 
@@ -508,6 +547,7 @@ impl Renderer {
     pub fn set_status(&mut self, text: &str) {
         if text.is_empty() {
             self.status_active = false;
+            self.status_start = None;
             return;
         }
 
@@ -532,6 +572,7 @@ impl Renderer {
         self.overlay_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
+        self.status_start = Some(Instant::now());
         self.status_active = true;
     }
 }
@@ -624,5 +665,178 @@ mod tests {
         assert_eq!(cell.ch, 'B', "caracter en (0,0)");
         assert!(cell.attrs.bold, "bold activo");
         assert_eq!(cell.attrs.fg, Color::Red, "fg = Red");
+    }
+
+    // =====================================================================
+    // TESTS ADVERSARIALES — Sprint 7 Fase 4: Color inversion en selección
+    // Asumen que TODO está ROTO y buscan bugs, no happy-path.
+    // =====================================================================
+
+    /// ADVERSARIAL: Color::Default y Color::White producen EXACTAMENTE el
+    /// mismo glyphon::Color (0xcd, 0xd6, 0xf4). Si se usan indistintamente
+    /// en la lógica de inversión de selección, celdas con fg=Default y bg=White
+    /// (o viceversa) se verían IGUAL que sin selección.
+    ///
+    /// En el renderer actual, `s.fg` para celdas seleccionadas es `cell.attrs.bg`.
+    /// Si ambos mapean al mismo color, la selección es INVISIBLE.
+    #[test]
+    fn test_color_to_glyphon_default_same_as_white() {
+        let c_default = color_to_glyphon(Color::Default);
+        let c_white = color_to_glyphon(Color::White);
+        assert_eq!(
+            c_default.r(),
+            c_white.r(),
+            "BUG: Color::Default y Color::White tienen el mismo R"
+        );
+        assert_eq!(
+            c_default.g(),
+            c_white.g(),
+            "BUG: Color::Default y Color::White tienen el mismo G"
+        );
+        assert_eq!(
+            c_default.b(),
+            c_white.b(),
+            "BUG: Color::Default y Color::White tienen el mismo B"
+        );
+    }
+
+    /// ADVERSARIAL: Verificar que TODOS los colores sean VISIBLES sobre fondo
+    /// negro. El renderer usa `Clear(BLACK)` como fondo. Si algún color mapea
+    /// a valores muy oscuros (R,G,B todos <= 50), es INVISIBLE para el usuario.
+    ///
+    /// BUG CONOCIDO: `Color::Black` mapea a (0,0,0) que es INVISIBLE sobre
+    /// fondo negro. Un usuario no puede ver texto con fg=Black en Baud.
+    #[test]
+    fn test_color_to_glyphon_all_visible_on_black() {
+        let cases = [
+            (Color::Default, "Default"),
+            (Color::Black, "Black"),
+            (Color::Red, "Red"),
+            (Color::Green, "Green"),
+            (Color::Yellow, "Yellow"),
+            (Color::Blue, "Blue"),
+            (Color::Magenta, "Magenta"),
+            (Color::Cyan, "Cyan"),
+            (Color::White, "White"),
+        ];
+        let mut all_visible = true;
+        for (color, name) in cases {
+            let c = color_to_glyphon(color);
+            let is_visible = c.r() > 50 || c.g() > 50 || c.b() > 50;
+            if !is_visible {
+                all_visible = false;
+                eprintln!(
+                    "BUG: {name} -> RGB({},{},{}) INVISIBLE sobre fondo negro",
+                    c.r(),
+                    c.g(),
+                    c.b()
+                );
+            }
+        }
+        assert!(
+            all_visible,
+            "Al menos un color mapea a valores RGB invisibles sobre fondo negro"
+        );
+    }
+
+    /// ADVERSARIAL: La inversión fg↔bg en selección debe producir un color
+    /// DIFERENTE al original. Si fg == bg (mismo color en ambas capas),
+    /// la selección es invisible porque el color invertido es el mismo.
+    ///
+    /// Replica exactamente la lógica de `render()` para spans seleccionados:
+    ///   let effective = if is_sel { cell.attrs.bg } else { cell.attrs.fg };
+    ///   match effective {
+    ///       Color::Default | Color::White => glyphon::Color::rgb(0xff, 0xff, 0xff),
+    ///       other => color_to_glyphon(other),
+    ///   }
+    #[test]
+    fn test_inversion_produces_different_color() {
+        // Helper que replica la lógica del renderer
+        fn inverted_fg(cell_fg: Color, cell_bg: Color, selected: bool) -> (u8, u8, u8) {
+            let effective = if selected { cell_bg } else { cell_fg };
+            let c = match effective {
+                Color::Default | Color::White => glyphon::Color::rgb(0xff, 0xff, 0xff),
+                other => color_to_glyphon(other),
+            };
+            (c.r(), c.g(), c.b())
+        }
+
+        // Caso normal: fg=Red, bg=Blue -> invertido debe ser DIFERENTE
+        let normal = inverted_fg(Color::Red, Color::Blue, false);
+        let selected = inverted_fg(Color::Red, Color::Blue, true);
+        assert_ne!(
+            normal, selected,
+            "BUG: fg=Red, bg=Blue deberia cambiar al invertir pero dio igual"
+        );
+
+        // Caso bug: fg=Default, bg=Default -> ambos producen (0xff,0xff,0xff)
+        // porque Default cae en el match -> white. El color invertido es IGUAL.
+        let normal = inverted_fg(Color::Default, Color::Default, false);
+        let selected = inverted_fg(Color::Default, Color::Default, true);
+        assert_ne!(
+            normal, selected,
+            "BUG: fg=Default, bg=Default produce mismo color -> seleccion INVISIBLE"
+        );
+
+        // Caso bug: fg=White, bg=White -> mismo que Default
+        let normal = inverted_fg(Color::White, Color::White, false);
+        let selected = inverted_fg(Color::White, Color::White, true);
+        assert_ne!(
+            normal, selected,
+            "BUG: fg=White, bg=White -> seleccion INVISIBLE"
+        );
+
+        // Caso bug: fg=Black, bg=Black -> ambos producen (0,0,0)
+        let normal = inverted_fg(Color::Black, Color::Black, false);
+        let selected = inverted_fg(Color::Black, Color::Black, true);
+        assert_ne!(
+            normal, selected,
+            "BUG: fg=Black, bg=Black -> seleccion INVISIBLE (ademas de invisible contra fondo negro)"
+        );
+
+        // Caso bug adicional: fg=Default, bg=White -> mapean a lo mismo en el match
+        let normal = inverted_fg(Color::Default, Color::White, false);
+        let selected = inverted_fg(Color::Default, Color::White, true);
+        assert_ne!(
+            normal, selected,
+            "BUG: fg=Default, bg=White -> Default y White se mapean igual en el match -> seleccion INVISIBLE"
+        );
+    }
+
+    /// ADVERSARIAL: Verificar que un `CellStyle` con `selected=true` produce
+    /// un color DIFERENTE que con `selected=false` para cualquier par fg/bg
+    /// donde fg != bg. Si el renderer produce el mismo color visual, la
+    /// selección es indistinguible.
+    #[test]
+    fn test_selected_cell_style_changes_color() {
+        // Helper que replica la lógica de construcción de spans del renderer
+        fn span_color(fg: Color, bg: Color, selected: bool) -> (u8, u8, u8) {
+            let effective = if selected { bg } else { fg };
+            let c = match effective {
+                Color::Default | Color::White => glyphon::Color::rgb(0xff, 0xff, 0xff),
+                other => color_to_glyphon(other),
+            };
+            (c.r(), c.g(), c.b())
+        }
+
+        // Pares donde fg != bg -> deberian producir colores diferentes
+        let test_pairs = [
+            (Color::Red, Color::Blue),
+            (Color::Green, Color::Magenta),
+            (Color::Yellow, Color::Cyan),
+            (Color::White, Color::Black),
+            (Color::Default, Color::Red),
+            (Color::Black, Color::Green),
+            (Color::Blue, Color::Yellow),
+            (Color::Cyan, Color::Magenta),
+        ];
+        for (fg, bg) in test_pairs {
+            let normal = span_color(fg, bg, false);
+            let sel = span_color(fg, bg, true);
+            assert_ne!(
+                normal, sel,
+                "BUG: fg={fg:?}, bg={bg:?} produce mismo color con y sin seleccion"
+            );
+        }
     }
 }
