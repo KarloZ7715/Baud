@@ -25,14 +25,14 @@ semana a semana.
 ## 2. Convenciones de Estimacion
 
 - **S (Small):** 1-2 dias. Tarea con diseno claro,
-sin investigacion previa necesaria.
+  sin investigacion previa necesaria.
 - **M (Medium):** 3-5 dias. Tarea que requiere
-investigacion de API o integracion, pero sin
-ambiguedad arquitectonica.
+  investigacion de API o integracion, pero sin
+  ambiguedad arquitectonica.
 - **L (Large):** 1-2 semanas. Tarea con multiples
-sub-componentes, requiere diseno cuidadoso.
+  sub-componentes, requiere diseno cuidadoso.
 - **XL (Extra Large):** 3+ semanas. Dividir en
-sub-tareas antes de empezar.
+  sub-tareas antes de empezar.
 
 ## 3. Fase 0: Esqueleto + PTY
 
@@ -43,7 +43,6 @@ bash arranca, output basico se ve (puede ser texto
 sin render elaborado).
 
 ### Sprint 1 (Semanas 1-2)
-
 
 | Tarea                                                            | Estimacion | Dependencias  | Criterio de aceptacion                         |
 | ---------------------------------------------------------------- | ---------- | ------------- | ---------------------------------------------- |
@@ -59,7 +58,6 @@ sin render elaborado).
 | Comunicacion GUI <-> PTY vía mpsc                                | M          | Hilo PTY      | Input se envia al shell                        |
 | Logging basico con tracing                                       | S          | Setup         | tracing::info!() funciona                      |
 | Documento iter-06-investigacion-X.md limpio                      | S          | Investigacion | Subagentes entregan archivos                   |
-
 
 **Demo al final del Sprint 1:**
 
@@ -81,7 +79,6 @@ cursor movement, clear screen/line, y escribe al grid.
 
 ### Sprint 2 (Semanas 3-4)
 
-
 | Tarea                                                  | Estimacion | Dependencias   | Criterio de aceptacion          |
 | ------------------------------------------------------ | ---------- | -------------- | ------------------------------- |
 | Integrar crate `vte` 0.15                              | S          | Fase 0         | `use vte;` funciona             |
@@ -94,7 +91,6 @@ cursor movement, clear screen/line, y escribe al grid.
 | Manejar ESC[?25h/l (cursor visible)                    | S          | Handler        | Cursor aparece/desaparece       |
 | Unit tests para cada secuencia                         | M          | Implementacion | `cargo test` pasa               |
 | Render placeholder: dibujar grid como bloques de color | L          | Grid, parser   | Colores son visibles en ventana |
-
 
 **Demo al final del Sprint 2:**
 
@@ -120,7 +116,6 @@ basico (bold, italic, underline, reverse).
 
 ### Sprint 3 (Semanas 5-6)
 
-
 | Tarea                                                | Estimacion | Dependencias        | Criterio de aceptacion               |
 | ---------------------------------------------------- | ---------- | ------------------- | ------------------------------------ |
 | Integrar crate `winit` 0.30 (ya en Fase 0)           | S          | -                   | -                                    |
@@ -137,7 +132,6 @@ basico (bold, italic, underline, reverse).
 | Integrar con event loop (redraw en UserEvent)        | M          | Event loop          | Render se actualiza al recibir bytes |
 | Unit tests para grid, atlas, cache                   | M          | Implementacion      | Pasan                                |
 | Benchmarks con criterion                             | M          | Implementacion      | criterion compila                    |
-
 
 **Demo al final del Sprint 3:**
 
@@ -165,7 +159,6 @@ htop).
 
 ### Sprint 4 (Semanas 7-8): TUI apps
 
-
 | Tarea                                       | Estimacion | Dependencias     | Criterio de aceptacion      |
 | ------------------------------------------- | ---------- | ---------------- | --------------------------- |
 | Soporte de alternate screen (DEC 1049)      | L          | Fase 1           | vim/htop usan alt screen    |
@@ -179,9 +172,7 @@ htop).
 | Unit tests para cada feature nueva          | M          | Implementacion   | Pasan                       |
 | Integration test: vim abre y edita          | M          | Alt screen       | Test pasa                   |
 
-
 ### Sprint 5 (Semanas 9-10): Resize, copy/paste, polish
-
 
 | Tarea                                   | Estimacion | Dependencias    | Criterio de aceptacion    |
 | --------------------------------------- | ---------- | --------------- | ------------------------- |
@@ -197,7 +188,6 @@ htop).
 | Shutdown graceful con SIGHUP            | M          | Pty::Drop       | Child recibe SIGHUP       |
 | 10-min smoke test (sesión manual)       | L          | Todo            | 0 panics en 10 min        |
 | Documentacion de usuario basica         | M          | Todo            | README explica uso basico |
-
 
 **Demo al final del Sprint 5 (MVP completo):**
 
@@ -224,7 +214,6 @@ lineas.
 
 ### Sprint 6 (Semanas 11-12): Reflow y scrollback
 
-
 | Tarea                                     | Estimacion | Dependencias | Criterio de aceptacion |
 | ----------------------------------------- | ---------- | ------------ | ---------------------- |
 | Reflow de lineas al resize                | L          | Grid         | Lineas se re-dividen   |
@@ -234,9 +223,7 @@ lineas.
 | Benchmarks de scroll latency              | S          | Scrollback   | criterion compila      |
 | Integration test: comando con 1000 lineas | M          | Scrollback   | Test pasa              |
 
-
 ### Sprint 7 (Semanas 13-14): Mouse y selection
-
 
 | Tarea                                              | Estimacion | Dependencias     | Criterio de aceptacion |
 | -------------------------------------------------- | ---------- | ---------------- | ---------------------- |
@@ -251,7 +238,6 @@ lineas.
 | 4 modos de selección (Simple/Block/Semantic/Lines) | L          | Selection        | Todos funcionan        |
 | 10-min smoke test con mouse                        | M          | Mouse            | Sin panics             |
 
-
 **Demo al final del Sprint 7:**
 
 ```bash
@@ -265,33 +251,113 @@ $ cargo run
 # Mouse reporting: tmux responde a clicks
 ```
 
-## 8. Fase 5: Produccion
+## 8. Fase 4.5: Extensiones y Personalizacion
+
+**Duracion total:** 2 sprints (~4 semanas)
+
+**Objetivo:** agregar archivo de configuracion TOML, expandir el modelo de color a
+True Color (24-bit) y 256 colores, permitir personalizacion de tema, fuente y
+transparencia de ventana. Sin alterar la funcionalidad existente.
+
+### Sprint 8A1 (Semanas 19-20): Config TOML, color y SGR
+
+| Tarea                                           | Estimacion | Dependencias        | Criterio de aceptacion          |
+| ----------------------------------------------- | ---------- | ------------------- | ------------------------------- |
+| Config TOML con serde (carga ~/.config/baud/)   | M          | serde + toml + dirs | Archivo se lee al inicio        |
+| Tema configurable en TOML (16 ANSI + 8 brights) | M          | Config TOML         | Tema se aplica al renderer      |
+| Expansion Color enum (Bright, Indexed, Rgb)     | L          | -                   | Compila con 19 variantes        |
+| SGR handler 90-97, 100-107, 38;5, 38;2, 48;5    | L          | Color enum          | Programas usan true color       |
+| Paleta 256 colores (6x6x6 cube + 24 grises)     | M          | Color enum          | color_to_glyphon mapea correcto |
+| Integracion de Config en App                    | S          | Config TOML         | App carga config al iniciar     |
+| Tests de color, SGR y config                    | M          | Implementacion      | Pasan                           |
+
+### Sprint 8A2 (Semanas 21-22): Fuente y transparencia
+
+| Tarea                                          | Estimacion | Dependencias          | Criterio de aceptacion      |
+| ---------------------------------------------- | ---------- | --------------------- | --------------------------- |
+| Fuente configurable (family + size) en TOML    | M          | Config TOML           | Font cambia segun config    |
+| Transparencia de ventana (opacity)             | L          | winit + wgpu + Config | Fondo translucido funcional |
+| Integracion fina del tema (selection_bg, etc.) | S          | Sprint A1             | Tema se aplica a seleccion  |
+| Tests de fuente y transparencia                | M          | Implementacion        | Pasan                       |
+
+**Demo al final de Sprint A2:**
+
+```bash
+$ cargo run --release
+# Ventana con fondo semitransparente
+# ~/.config/baud/config.toml cambia colores, fuente, opacidad
+# vim con syntax highlighting en true color
+# ls --color usa 256 colores
+# Temas Catppuccin, Tokyo Night, etc. desde el TOML
+```
+
+## 9. Fase 5: Produccion
 
 **Duracion total:** 2 sprints (~4 semanas)
 
 **Objetivo:** testing exhaustivo, performance 60fps en
 200x50, benchmarks, packaging, portabilidad.
 
-### Sprint 8 (Semanas 15-16): Testing exhaustivo
+### Sprint 9 (Semanas 23-24): Testing exhaustivo
 
+**Objetivo:** alcanzar cobertura >50%, property-based testing con proptest, integracion de vttest/esctest, benchmarks en CI, y documentacion de API con rustdoc.
 
-| Tarea                             | Estimacion | Dependencias | Criterio de aceptacion        |
-| --------------------------------- | ---------- | ------------ | ----------------------------- |
-| vttest categoría 1-4 pasan        | L          | Parser, grid | Ejecucion manual              |
-| esctest subset critico            | M          | Parser       | CI corre sin fallos           |
-| Property-based tests con proptest | L          | Grid, parser | `cargo test` incluye proptest |
-| Cobertura >50% global             | M          | Tests        | `cargo tarpaulin` reporta     |
-| CI en GitHub Actions              | M          | Tests        | PRs ejecutan CI               |
-| Benchmarks con cargo-criterion    | M          | Bench        | CI mide regresiones           |
-| Documentacion de API con rustdoc  | M          | Codigo       | `cargo doc` genera docs       |
+| Tarea                                               | Estimacion | Dependencias             | Criterio de aceptacion                        |
+| --------------------------------------------------- | ---------- | ------------------------ | --------------------------------------------- |
+| proptest como dev-dep                               | S          | -                        | `cargo test` incluye tests property-based     |
+| Property tests: grid (reflow, resize, scrollback)   | L          | proptest                 | 1000 casos aleatorios, invariantes se cumplen |
+| Property tests: parser ANSI (SGR, secuencias)       | L          | proptest                 | Cualquier secuencia valida no causa panic     |
+| Property tests: selection (coordenadas, normalize)  | M          | proptest                 | normalize() siempre produce start <= end      |
+| Property tests: color mapping (Indexed, Rgb)        | M          | proptest + Sprint 8A1    | 256 colores mapean a RGB sin panic            |
+| vttest categorias 1-4: guia de ejecucion            | M          | Build release            | Documento con pasos + resultado esperado      |
+| esctest subset critico (~30 tests)                  | M          | Build release            | Todos los tests del subset pasan              |
+| Cobertura cargo-tarpaulin >50%                      | L          | Tests + proptest         | `cargo tarpaulin --out Html` reporta >50%     |
+| Benchmarks en CI (cargo bench)                      | M          | criterion (ya existe)    | CI ejecuta benchmarks sin regresiones         |
+| rustdoc API publica (config, ansi, selection, grid) | M          | Codigo con `///`         | `cargo doc --no-deps` genera HTML navegable   |
+| CI: coverage + benchmarks + proptest                | M          | tarpaulin + CI existente | Jobs nuevos en GitHub Actions                 |
 
+**Stack:**
 
-### Sprint 9 (Semanas 17-18): Performance y packaging
+```toml
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+proptest = "1"
+```
 
+**Herramientas externas (no son deps Rust):**
+
+- `cargo-tarpaulin` — cobertura (`cargo install cargo-tarpaulin`)
+- `vttest` — suite VT100/VT520 (`sudo pacman -S vttest`)
+- `esctest` — suite escapes ANSI (`git clone https://github.com/esctest/esctest`)
+
+**Demo al final:**
+
+```bash
+cd /home/carloscc/Documentos/Dev/baud
+cargo test 2>&1 | tail -5          # 200+ tests pasan
+cargo tarpaulin --out Html          # >50% cobertura
+cargo bench 2>&1 | head -10        # benchmarks corren
+cargo doc --no-deps                # docs generadas
+vttest ./target/release/baud       # categorias 1-4 pasan
+```
+
+**Criterios de exito:**
+
+- [ ] `cargo test` pasa con 200+ tests
+- [ ] `cargo tarpaulin` reporta >50%
+- [ ] `cargo bench` corre en CI sin errores
+- [ ] `cargo doc --no-deps` genera documentacion
+- [ ] vttest categorias 1-4 pasan (verificacion manual)
+- [ ] esctest subset critico pasa
+- [ ] CI verde (fmt + clippy + test + bench + coverage)
+- [ ] Sin dependencias nuevas fuera de proptest
+
+---
+
+### Sprint 10 (Semanas 25-26): Performance y packaging
 
 | Tarea                                       | Estimacion | Dependencias | Criterio de aceptacion     |
 | ------------------------------------------- | ---------- | ------------ | -------------------------- |
-| Optimizar render path (60fps en 200x50)     | L          | Renderer     | Benchmark cumple           |
 | Optimizar parser (>500 MB/s)                | M          | Parser       | Benchmark cumple           |
 | Optimizar scroll (<1ms)                     | M          | Grid         | Benchmark cumple           |
 | Panic hook custom (Fase 5 segun ADR-0007)   | M          | Logging      | Panic muestra notificacion |
@@ -300,8 +366,7 @@ $ cargo run
 | Documentacion de usuario completa           | M          | Todo         | README + manpage           |
 | Portabilidad macOS (opcional)               | L          | Refactor     | Compila en macOS           |
 
-
-**Demo al final del Sprint 9 (Produccion):**
+**Demo al final del Sprint 10 (Produccion):**
 
 ```bash
 $ cargo build --release
@@ -315,46 +380,18 @@ $ ./target/release/baud
 # Panic hook: muestra notificacion si ocurre
 ```
 
-## 9. Timeline Visual
-
-```mermaid
-gantt
-    title Rust Terminal , Roadmap de Implementacion
-    dateFormat YYYY-MM-DD
-    section Fase 0
-    Sprint 1 Esqueleto+PTY           :a1, 2026-07-01, 14d
-    section Fase 1
-    Sprint 2 Parser ANSI            :a2, after a1, 14d
-    section Fase 2
-    Sprint 3 Grid+Render            :a3, after a2, 14d
-    section Fase 3
-    Sprint 4 TUI apps               :a4, after a3, 14d
-    Sprint 5 Resize+CopyPaste+Polish:crit, a5, after a4, 14d
-    section Fase 4
-    Sprint 6 Reflow+Scrollback      :a6, after a5, 14d
-    Sprint 7 Mouse+Selection        :a7, after a6, 14d
-    section Fase 5
-    Sprint 8 Testing exhaustivo     :a8, after a7, 14d
-    Sprint 9 Performance+Packaging  :crit, a9, after a8, 14d
-```
-
-
-
 ## 10. Milestones
 
-
-| Milestone         | Sprint       | Entregable visible  |
-| ----------------- | ------------ | ------------------- |
-| M0: Hello PTY     | Fin Sprint 1 | bash en ventana     |
-| M1: ANSI basico   | Fin Sprint 2 | Colores en pantalla |
-| M2: Render GPU    | Fin Sprint 3 | Grid 80x24 visible  |
-| M3: MVP funcional | Fin Sprint 5 | vim/htop funcionan  |
-| M4: Refinamiento  | Fin Sprint 7 | Mouse y reflow      |
-| M5: Produccion    | Fin Sprint 9 | Release 0.0.1       |
-
+| Milestone         | Sprint        | Entregable visible  |
+| ----------------- | ------------- | ------------------- |
+| M0: Hello PTY     | Fin Sprint 1  | bash en ventana     |
+| M1: ANSI basico   | Fin Sprint 2  | Colores en pantalla |
+| M2: Render GPU    | Fin Sprint 3  | Grid 80x24 visible  |
+| M3: MVP funcional | Fin Sprint 5  | vim/htop funcionan  |
+| M4: Refinamiento  | Fin Sprint 7  | Mouse y reflow      |
+| M5: Produccion    | Fin Sprint 10 | Release 0.0.1       |
 
 ## 11. Riesgos y Mitigaciones por Fase
-
 
 | Fase | Riesgo                          | Mitigacion                               |
 | ---- | ------------------------------- | ---------------------------------------- |
@@ -365,37 +402,33 @@ gantt
 | 4    | Reflow complejo                 | Copiar implementación de Alacritty       |
 | 5    | CI ruidoso                      | Threshold del 15% en benchmarks          |
 
-
 ## 12. Limitaciones
 
 1. **El timeline asume desarrollador solo.** Con 2+
-  desarrolladores, se puede paralelizar Fase 2 y 3.
+   desarrolladores, se puede paralelizar Fase 2 y 3.
 2. **Las estimaciones son optimistas.** Agregar 30%
-  de buffer para imprevistos.
+   de buffer para imprevistos.
 3. **Fase 5 incluye portabilidad macOS opcional.** Si
-  se requiere Windows, agregar 2-3 sprints mas.
+   se requiere Windows, agregar 2-3 sprints mas.
 4. **Los benchmarks en CI son ruidosos.** Se acepta
-  varianza del 15%.
+   varianza del 15%.
 5. **No incluye plan de contribucion externa.** Si
-  llegan PRs, agregar 1 sprint de code review.
+   llegan PRs, agregar 1 sprint de code review.
 
 ## 13. Referencias
 
-- docs/decisions/ADR-0008-roadmap-mvp.md (decision
-de alto nivel).
-- docs/prompts/iter-06-investigacion-F.md
-(investigacion base).
+- docs/decisions/ADR-0008-roadmap-mvp.md (decision  
+  de alto nivel).
 - docs/specs/requisitos.md (RF y RNF detallados).
 - Mitchell Hashimoto. Ghostty development blog.
-[https://mitchellh.com/ghostty](https://mitchellh.com/ghostty)
+  [https://mitchellh.com/ghostty](https://mitchellh.com/ghostty)
 - Joe Wilm. "Life of a Terminal Emulator".
-[https://jwilm.io/blog/](https://jwilm.io/blog/)
+  [https://jwilm.io/blog/](https://jwilm.io/blog/)
 
 ## Cambios
 
-
-| Version | Fecha      | Cambios                                                         |
-| ------- | ---------- | --------------------------------------------------------------- |
-| 0.1.0   | 2026-06-14 | Primer borrador. 9 sprints detallados, dependencias, criterios. |
-
-
+| Version | Fecha      | Cambios                                                                                                  |
+| ------- | ---------- | -------------------------------------------------------------------------------------------------------- |
+| 0.1.0   | 2026-06-14 | Primer borrador. 9 sprints detallados, dependencias, criterios.                                          |
+| 0.2.0   | 2026-06-24 | Agregada Fase 4.5 con Sprint A1 (Config+Color) y A2 (Fuente+Transparencia). Roadmap renumerado.          |
+| 0.3.0   | 2026-06-24 | Sprint 9 actualizado con detalle completo: proptest, vttest, esctest, tarpaulin, benchmarks CI, rustdoc. |
