@@ -12,6 +12,7 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
 
 use crate::ansi::Term;
+use crate::config::Config;
 use crate::event_loop::PtyCommand;
 use crate::grid::Cell;
 use crate::renderer::Renderer;
@@ -41,6 +42,7 @@ pub struct App {
     renderer: Option<Renderer>,
     term: Arc<Mutex<Term>>,
     pty_tx: Arc<Mutex<Option<mpsc::Sender<PtyCommand>>>>,
+    config: Config,
     /// Estado de teclas modificadoras (Ctrl, Shift, Alt, etc.).
     modifiers: winit::event::Modifiers,
     /// Indica si el botón izquierdo del mouse está presionado.
@@ -69,6 +71,7 @@ impl App {
             renderer: None,
             term,
             pty_tx,
+            config: Config::load(),
             modifiers: winit::event::Modifiers::default(),
             mouse_down: Arc::new(AtomicBool::new(false)),
             mouse_start: None,
@@ -127,14 +130,20 @@ impl App {
             if let Some(ref sel) = term_guard.selection {
                 tracing::info!(
                     "handle_copy: seleccion DETECTADA: start=({},{}), end=({},{})",
-                    sel.start.row, sel.start.col, sel.end.row, sel.end.col
+                    sel.start.row,
+                    sel.start.col,
+                    sel.end.row,
+                    sel.end.col
                 );
                 let t = term_guard.selected_text();
                 tracing::info!("handle_copy: selected_text() devolvio {} bytes", t.len());
                 if t.is_empty() {
                     tracing::warn!("handle_copy: selected_text() devolvio VACIO");
                 } else {
-                    tracing::info!("handle_copy: texto a copiar (primeros 80 chars): {:?}", &t[..t.len().min(80)]);
+                    tracing::info!(
+                        "handle_copy: texto a copiar (primeros 80 chars): {:?}",
+                        &t[..t.len().min(80)]
+                    );
                 }
                 t
             } else {
@@ -142,7 +151,10 @@ impl App {
                 return;
             }
         };
-        tracing::info!("handle_copy: llamando set_clipboard con {} bytes", text.len());
+        tracing::info!(
+            "handle_copy: llamando set_clipboard con {} bytes",
+            text.len()
+        );
         self.set_clipboard(&text);
 
         // Mostrar feedback visual.
@@ -170,7 +182,11 @@ impl App {
             }
         };
         let text = String::from_utf8_lossy(&output.stdout).to_string();
-        tracing::info!("handle_paste: wl-paste devolvio {} bytes: {:?}", text.len(), &text[..text.len().min(60)]);
+        tracing::info!(
+            "handle_paste: wl-paste devolvio {} bytes: {:?}",
+            text.len(),
+            &text[..text.len().min(60)]
+        );
         // Eliminar newline final que wl-paste suele incluir.
         // ponytail: trim_end_matches('\n') es mas compatible que --trim-newline.
         let text = text.trim_end_matches('\n').to_string();
@@ -225,14 +241,19 @@ impl App {
                 let cur_row = guard.cursor.row;
                 let cur_col = guard.cursor.col;
                 if cur_row < rows_count {
-                    guard.selection = Some(Selection::new(SelectionPoint { row: cur_row, col: cur_col }));
+                    guard.selection = Some(Selection::new(SelectionPoint {
+                        row: cur_row,
+                        col: cur_col,
+                    }));
                 } else {
                     return;
                 }
             }
 
             // Calcular nuevo end point (sin mantener el borrow a sel)
-            let (old_row, old_col) = guard.selection.as_ref()
+            let (old_row, old_col) = guard
+                .selection
+                .as_ref()
                 .map(|s| (s.end.row, s.end.col))
                 .unwrap_or((0, 0));
 
@@ -288,6 +309,7 @@ impl ApplicationHandler<UserEvent> for App {
         // 1. Crear ventana.
         let attrs = Window::default_attributes()
             .with_title("baud")
+            .with_transparent(true) // NUEVO: transparencia para alpha blending
             .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0));
         let window = Arc::new(
             event_loop
@@ -341,6 +363,8 @@ impl ApplicationHandler<UserEvent> for App {
             queue,
             surface,
             config,
+            &self.config.font,
+            &self.config.window,
         ));
         tracing::info!("renderer inicializado");
 
@@ -456,7 +480,7 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                 };
-                if let Err(e) = renderer.render(&term_guard) {
+                if let Err(e) = renderer.render(&term_guard, &self.config.theme) {
                     tracing::warn!("error al renderizar: {e}");
                 }
             }
@@ -512,8 +536,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 guard.scrollback_offset =
                                     (guard.scrollback_offset + 1).min(max_offset as isize);
                             } else if needs_scroll_down {
-                                guard.scrollback_offset =
-                                    (guard.scrollback_offset - 1).max(0);
+                                guard.scrollback_offset = (guard.scrollback_offset - 1).max(0);
                             }
                         }
                         if let Some(ref mut sel) = guard.selection {
@@ -521,7 +544,9 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         tracing::info!(
                             "CursorMoved: mouse_drag row={} col={} scrollback_offset={}",
-                            row, col, guard.scrollback_offset
+                            row,
+                            col,
+                            guard.scrollback_offset
                         );
                     }
                     if let Some(window) = &self.window {
@@ -546,10 +571,12 @@ impl ApplicationHandler<UserEvent> for App {
                                     break;
                                 }
                                 if let Ok(mut guard) = term_clone.lock() {
-                                    if guard.alt_screen { break; }
+                                    if guard.alt_screen {
+                                        break;
+                                    }
                                     let max_offset = guard.scrollback_len();
                                     if guard.scrollback_offset >= max_offset as isize {
-                                        break;  // ya no hay más scrollback
+                                        break; // ya no hay más scrollback
                                     }
                                     guard.scrollback_offset =
                                         (guard.scrollback_offset + 1).min(max_offset as isize);
@@ -661,24 +688,35 @@ impl ApplicationHandler<UserEvent> for App {
                 let alt = self.modifiers.state().alt_key();
                 tracing::info!(
                     "KEYBOARD: key={:?} text={:?} ctrl={} shift={} alt={}",
-                    event.logical_key, event.text, ctrl, shift, alt
+                    event.logical_key,
+                    event.text,
+                    ctrl,
+                    shift,
+                    alt
                 );
 
                 // 1. Ctrl+Shift+C/V (copy/paste).
                 if ctrl && shift {
                     match &event.logical_key {
                         Key::Character(c) if c.eq_ignore_ascii_case("c") => {
-                            tracing::info!("KEYBOARD: Ctrl+Shift+C detectado, llamando handle_copy()");
+                            tracing::info!(
+                                "KEYBOARD: Ctrl+Shift+C detectado, llamando handle_copy()"
+                            );
                             self.handle_copy();
                             return;
                         }
                         Key::Character(c) if c.eq_ignore_ascii_case("v") => {
-                            tracing::info!("KEYBOARD: Ctrl+Shift+V detectado, llamando handle_paste()");
+                            tracing::info!(
+                                "KEYBOARD: Ctrl+Shift+V detectado, llamando handle_paste()"
+                            );
                             self.handle_paste();
                             return;
                         }
                         _ => {
-                            tracing::debug!("KEYBOARD: ctrl+shift+{:?} (no es C ni V)", event.logical_key);
+                            tracing::debug!(
+                                "KEYBOARD: ctrl+shift+{:?} (no es C ni V)",
+                                event.logical_key
+                            );
                         }
                     }
                 }
@@ -720,19 +758,15 @@ impl ApplicationHandler<UserEvent> for App {
                     // Shift+arrow: extender seleccion si shift activo (Alacritty style)
                     Key::Named(NamedKey::ArrowLeft) if shift && !ctrl && !alt => {
                         self.extend_selection(0, -1);
-                        
                     }
                     Key::Named(NamedKey::ArrowRight) if shift && !ctrl && !alt => {
                         self.extend_selection(0, 1);
-                        
                     }
                     Key::Named(NamedKey::ArrowUp) if shift && !ctrl && !alt => {
                         self.extend_selection(-1, 0);
-                        
                     }
                     Key::Named(NamedKey::ArrowDown) if shift && !ctrl && !alt => {
                         self.extend_selection(1, 0);
-                        
                     }
                     Key::Named(NamedKey::Enter) => {
                         self.send_input(b"\r".to_vec());
