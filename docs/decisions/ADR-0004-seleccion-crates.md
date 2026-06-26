@@ -3,10 +3,10 @@ titulo: "ADR-0004: Seleccion Final de Crates"
 tipo: decision
 autor: "Carlos Canabal Cordero"
 fecha_creacion: "2026-06-14"
-fecha_modificacion: "2026-06-22"
-version: "0.3.0"
+fecha_modificacion: "2026-06-25"
+version: "0.4.0"
 estado: aceptado
-tags: [decision, crates, dependencias, mvp, msrc, wgpu]
+tags: [decision, crates, dependencias, mvp, msrc, wgpu, config, serde, toml]
 ```
 
 # ADR-0004: Seleccion Final de Crates
@@ -24,7 +24,7 @@ de wgpu como backend de render impone una MSRV mayor.
 
 ## Decision
 
-Se seleccionan los siguientes 8 crates para `[dependencies]`
+Se seleccionan los siguientes 11 crates para `[dependencies]`
 y 1 para `[dev-dependencies]`:
 
 | Categoria          | Crate              | Version | MSRV               |
@@ -37,6 +37,9 @@ y 1 para `[dev-dependencies]`:
 | Unicode            | unicode-width      | 0.2     | 1.66               |
 | Logging            | tracing            | 0.1     | 1.65               |
 | Logging subscriber | tracing-subscriber | 0.3     | 1.65               |
+| Serializacion      | serde              | 1       | 1.65               |
+| Config TOML        | toml               | 1       | 1.70               |
+| Directorios        | dirs               | 6       | 1.65               |
 | Benchmarks (dev)   | criterion          | 0.8     | 1.86               |
 
 La MSRV efectiva del proyecto queda en **1.87.0**,
@@ -85,6 +88,17 @@ fija en 1.87.0.
 8. **criterion como dev-dependency.** criterion es el
    estandar de benchmarks en Rust. Solo se compila en
    `cargo bench`, no afecta el build de produccion.
+9. **serde 1 con feature derive.** Estandar de facto para
+   serializacion/deserializacion en Rust. Se usa exclusivamente
+   para deserializar el archivo de configuracion TOML via
+   `#[derive(Deserialize)]`. La feature `derive` habilita
+   las macros de derivacion en tiempo de compilacion.
+10. **toml 1.** Parseo de archivos TOML con la API
+    `toml::from_str()`. Sigue el estándar TOML v1.0.
+11. **dirs 6.** Provee `dirs::config_dir()` para resolver
+    rutas estandar del sistema (`~/.config` en Linux,
+    `~/Library/Application Support` en macOS,
+    `%APPDATA%` en Windows).
 
 ## Alternativas Consideradas
 
@@ -125,7 +139,7 @@ fija en 1.87.0.
   (vs 632M de unicode-width). Depende de wgpu y
   cosmic-text. Si glyphon se discontinua, hay que
   migrar.
-- **8 dependencias en `[dependencies]`.** Aceptable
+- **11 dependencias en `[dependencies]`.** Aceptable
   pero requiere disciplina para mantenerlas
   actualizadas. Se usa `cargo update` y `cargo audit`
   en CI.
@@ -157,6 +171,9 @@ fija en 1.87.0.
 - [https://crates.io/crates/unicode-width](https://crates.io/crates/unicode-width)
 - [https://crates.io/crates/tracing](https://crates.io/crates/tracing)
 - [https://crates.io/crates/criterion](https://crates.io/crates/criterion)
+- [https://crates.io/crates/serde](https://crates.io/crates/serde)
+- [https://crates.io/crates/toml](https://crates.io/crates/toml)
+- [https://crates.io/crates/dirs](https://crates.io/crates/dirs)
 
 ## Cambios
 
@@ -165,3 +182,4 @@ fija en 1.87.0.
 | 0.1.0   | 2026-06-14 | Primer borrador. Decision adoptada. 14 deps + 1 dev-dep, MSRV 1.87.0.                                                 |
 | 0.2.0   | 2026-06-20 | Add arboard 3.4 para clipboard (Sprint 5b). 15 deps + 1 dev-dep.                                                      |
 | 0.3.0   | 2026-06-22 | Sincronizar con stack real del proyecto: 8 deps + 1 dev-dep. Agregar unicode-width 0.2 y criterion 0.8 para Sprint 6. |
+| 0.4.0   | 2026-06-25 | Agregar serde 1, toml 1, dirs 6 para Sprint A1. 11 deps total.       |
