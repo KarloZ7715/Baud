@@ -2,11 +2,12 @@ use crate::cursor::Cursor;
 use crate::grid::{Grid, DEFAULT_ROWS};
 use crate::selection::Selection;
 
-/// Colores basicos del terminal ANSI.
+/// Colores basicos del terminal ANSI + variantes bright + 256 / true color.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Color {
     #[default]
     Default,
+    // 8 colores ANSI estandar
     Black,
     Red,
     Green,
@@ -15,6 +16,19 @@ pub enum Color {
     Magenta,
     Cyan,
     White,
+    // 8 variantes bright (ANSI 90-97 / 100-107)
+    BrightBlack,
+    BrightRed,
+    BrightGreen,
+    BrightYellow,
+    BrightBlue,
+    BrightMagenta,
+    BrightCyan,
+    BrightWhite,
+    /// Color indexado 0-255 (ISO-8613-3). 0-15=ANSI, 16-231=cubo 6x6x6, 232-255=24 grises.
+    Indexed(u8),
+    /// Color true color RGB 24-bit.
+    Rgb(u8, u8, u8),
 }
 
 impl Color {
@@ -30,6 +44,22 @@ impl Color {
             35 | 45 => Color::Magenta,
             36 | 46 => Color::Cyan,
             37 | 47 => Color::White,
+            _ => Color::Default,
+        }
+    }
+
+    /// Convierte un codigo SGR bright (90-97 fg, 100-107 bg) a Color.
+    /// ponytail: un match, 8 brazos, sin abstraccion.
+    pub fn from_bright_code(code: u16) -> Self {
+        match code {
+            90 | 100 => Color::BrightBlack,
+            91 | 101 => Color::BrightRed,
+            92 | 102 => Color::BrightGreen,
+            93 | 103 => Color::BrightYellow,
+            94 | 104 => Color::BrightBlue,
+            95 | 105 => Color::BrightMagenta,
+            96 | 106 => Color::BrightCyan,
+            97 | 107 => Color::BrightWhite,
             _ => Color::Default,
         }
     }
@@ -224,7 +254,11 @@ impl Term {
         let active = self.active_grid();
         let rows_count = active.rows_count;
         // ponytail: en alt_screen no hay scrollback, aunque el primario tenga
-        let sb_len = if self.alt_screen { 0 } else { self.grid.scrollback.len() };
+        let sb_len = if self.alt_screen {
+            0
+        } else {
+            self.grid.scrollback.len()
+        };
         let total_rows = sb_len + rows_count;
 
         // Convertir coordenadas visibles de la seleccion a absolutas.
@@ -511,17 +545,48 @@ impl vte::Perform for Term {
                 if params.is_empty() {
                     self.attrs = Attrs::default();
                 }
-                for &code in &params {
-                    match code {
+                // ponytail: indice i para saltar params consumidos por 38;5;N y 38;2;R;G;B.
+                let mut i = 0;
+                while i < params.len() {
+                    match params[i] {
                         0 => self.attrs = Attrs::default(),
                         1 => self.attrs.bold = true,
                         4 => self.attrs.underline = true,
-                        30..=37 => self.attrs.fg = Color::from_code(code),
-                        40..=47 => self.attrs.bg = Color::from_code(code),
-                        // ponytail: bright variants (90-97, 100-107) con soporte 256-color posterior.
-                        90..=97 | 100..=107 => {}
+                        30..=37 => self.attrs.fg = Color::from_code(params[i]),
+                        40..=47 => self.attrs.bg = Color::from_code(params[i]),
+                        90..=97 => self.attrs.fg = Color::from_bright_code(params[i]),
+                        100..=107 => self.attrs.bg = Color::from_bright_code(params[i]),
+                        38 => {
+                            if i + 2 < params.len() && params[i + 1] == 5 {
+                                self.attrs.fg = Color::Indexed(params[i + 2] as u8);
+                                i += 2;
+                            } else if i + 4 < params.len() && params[i + 1] == 2 {
+                                self.attrs.fg = Color::Rgb(
+                                    params[i + 2] as u8,
+                                    params[i + 3] as u8,
+                                    params[i + 4] as u8,
+                                );
+                                i += 4;
+                            }
+                        }
+                        48 => {
+                            if i + 2 < params.len() && params[i + 1] == 5 {
+                                self.attrs.bg = Color::Indexed(params[i + 2] as u8);
+                                i += 2;
+                            } else if i + 4 < params.len() && params[i + 1] == 2 {
+                                self.attrs.bg = Color::Rgb(
+                                    params[i + 2] as u8,
+                                    params[i + 3] as u8,
+                                    params[i + 4] as u8,
+                                );
+                                i += 4;
+                            }
+                        }
+                        39 => self.attrs.fg = Color::Default,
+                        49 => self.attrs.bg = Color::Default,
                         _ => {}
                     }
+                    i += 1;
                 }
             }
             'J' => {
@@ -1591,11 +1656,17 @@ mod tests {
         // Crear selección
         let sel = Selection::new(SelectionPoint { row: 0, col: 0 });
         term.selection = Some(sel);
-        assert!(!term.selected_text().is_empty(), "debe haber texto seleccionado");
+        assert!(
+            !term.selected_text().is_empty(),
+            "debe haber texto seleccionado"
+        );
 
         // Limpiar
         term.clear_selection();
-        assert!(term.selection.is_none(), "selection debe ser None tras clear");
+        assert!(
+            term.selection.is_none(),
+            "selection debe ser None tras clear"
+        );
         let text = term.selected_text();
         assert_eq!(
             text, "",
@@ -1813,10 +1884,7 @@ mod tests {
             sb_len > 0,
             "BUG TEST: debe haber scrollback primario para exponer el bug"
         );
-        eprintln!(
-            "BUG TEST: scrollback primario tiene {} líneas",
-            sb_len
-        );
+        eprintln!("BUG TEST: scrollback primario tiene {} líneas", sb_len);
 
         // ---- Entrar a alt screen ----
         feed(&mut term, b"\x1b[?1049h");
@@ -1867,10 +1935,7 @@ mod tests {
         // start_row (9999) >= total_rows (0 scrollback + 24 grid = 24)
         // El código debe devolver string vacío.
         let text = term.selected_text();
-        assert_eq!(
-            text, "",
-            "selección fuera del rango debe devolver ''"
-        );
+        assert_eq!(text, "", "selección fuera del rango debe devolver ''");
 
         // Selección con start en scrollback inexistente
         let mut sel2 = Selection::new(SelectionPoint { row: 0, col: 0 });
@@ -1969,11 +2034,26 @@ mod tests {
         // visible 5 = logical 5 (grid row 0)
         // ...
         // visible 10 = logical 10 (grid row 6)
-        assert!(term.is_selected(4, 0), "visible 4 = logical 4 (scrollback), debe estar seleccionado");
-        assert!(term.is_selected(5, 0), "visible 5 = logical 5 (grid[0]), debe estar seleccionado");
-        assert!(term.is_selected(10, 3), "visible 10 = logical 10 (grid[6]), debe estar seleccionado");
-        assert!(!term.is_selected(3, 0), "visible 3 = logical 3, fuera de rango");
-        assert!(!term.is_selected(11, 0), "visible 11 = logical 11, fuera de rango");
+        assert!(
+            term.is_selected(4, 0),
+            "visible 4 = logical 4 (scrollback), debe estar seleccionado"
+        );
+        assert!(
+            term.is_selected(5, 0),
+            "visible 5 = logical 5 (grid[0]), debe estar seleccionado"
+        );
+        assert!(
+            term.is_selected(10, 3),
+            "visible 10 = logical 10 (grid[6]), debe estar seleccionado"
+        );
+        assert!(
+            !term.is_selected(3, 0),
+            "visible 3 = logical 3, fuera de rango"
+        );
+        assert!(
+            !term.is_selected(11, 0),
+            "visible 11 = logical 11, fuera de rango"
+        );
 
         // Con scrollback_offset = 2:
         // viewport_start = sb_len - 2 = 3
@@ -2021,7 +2101,10 @@ mod tests {
         assert_eq!(term.selected_text(), "", "selected_text debe ser ''");
 
         // El alt grid NO debe haberse modificado
-        assert_eq!(term.alt_grid.rows[0][0].ch, 'A', "alt_grid no debe modificarse");
+        assert_eq!(
+            term.alt_grid.rows[0][0].ch, 'A',
+            "alt_grid no debe modificarse"
+        );
 
         // Salir de alt screen: la selección debe seguir eliminada
         feed(&mut term, b"\x1b[?1049l");
@@ -2049,7 +2132,11 @@ mod tests {
             text, "           ",
             "selección de solo espacios con width>0 debe devolver espacios"
         );
-        assert_eq!(text.len(), 11, "deben ser 11 espacios (col 0..10 inclusive, 11 celdas)");
+        assert_eq!(
+            text.len(),
+            11,
+            "deben ser 11 espacios (col 0..10 inclusive, 11 celdas)"
+        );
 
         // Multilinea con solo espacios
         let sel2 = Selection {
@@ -2061,10 +2148,7 @@ mod tests {
         let text2 = term.selected_text();
         // Cada fila contribuye 1 espacio (col 0), con newlines entre filas
         assert!(!text2.is_empty(), "debe tener espacios y newlines");
-        assert!(
-            text2.contains(' '),
-            "debe contener espacios"
-        );
+        assert!(text2.contains(' '), "debe contener espacios");
     }
 
     // -----------------------------------------------------------------------
@@ -2078,7 +2162,11 @@ mod tests {
         // Put data in scrollback directly
         let sb_row: Vec<Cell> = "scrollback_line"
             .chars()
-            .map(|c| Cell { ch: c, attrs: Attrs::default(), width: 1 })
+            .map(|c| Cell {
+                ch: c,
+                attrs: Attrs::default(),
+                width: 1,
+            })
             .collect();
         term.grid.scrollback.push_back(sb_row);
 
@@ -2120,9 +2208,8 @@ mod tests {
         feed(&mut term, b"abc");
 
         // Seleccionar celda (0, 1) = 'b'
-        let sel = crate::selection::Selection::new(
-            crate::selection::SelectionPoint { row: 0, col: 1 },
-        );
+        let sel =
+            crate::selection::Selection::new(crate::selection::SelectionPoint { row: 0, col: 1 });
         term.selection = Some(sel);
 
         assert!(term.is_selected(0, 1));
@@ -2141,9 +2228,8 @@ mod tests {
         feed(&mut term, b"ghi");
 
         // Seleccionar desde (0,1) hasta (2,1)
-        let mut sel = crate::selection::Selection::new(
-            crate::selection::SelectionPoint { row: 0, col: 1 },
-        );
+        let mut sel =
+            crate::selection::Selection::new(crate::selection::SelectionPoint { row: 0, col: 1 });
         sel.update_end(crate::selection::SelectionPoint { row: 2, col: 1 });
         term.selection = Some(sel);
 
@@ -2167,9 +2253,8 @@ mod tests {
         feed(&mut term, b"abc");
 
         // Seleccion invertida: end antes que start
-        let mut sel = crate::selection::Selection::new(
-            crate::selection::SelectionPoint { row: 0, col: 2 },
-        );
+        let mut sel =
+            crate::selection::Selection::new(crate::selection::SelectionPoint { row: 0, col: 2 });
         sel.update_end(crate::selection::SelectionPoint { row: 0, col: 0 });
         term.selection = Some(sel);
 
@@ -2193,9 +2278,8 @@ mod tests {
         feed(&mut term, b"abc");
 
         // Create a selection and verify it is active
-        let sel = crate::selection::Selection::new(
-            crate::selection::SelectionPoint { row: 0, col: 0 },
-        );
+        let sel =
+            crate::selection::Selection::new(crate::selection::SelectionPoint { row: 0, col: 0 });
         term.selection = Some(sel);
         assert!(term.selection.is_some());
         assert!(term.is_selected(0, 0));
@@ -2214,9 +2298,8 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"hello");
 
-        let mut sel = crate::selection::Selection::new(
-            crate::selection::SelectionPoint { row: 0, col: 1 },
-        );
+        let mut sel =
+            crate::selection::Selection::new(crate::selection::SelectionPoint { row: 0, col: 1 });
         sel.update_end(crate::selection::SelectionPoint { row: 0, col: 3 });
         term.selection = Some(sel);
 
@@ -2235,9 +2318,8 @@ mod tests {
         feed(&mut term, b"jkl");
 
         // Partial selection across 3 lines: (0,1) to (2,1)
-        let mut sel = crate::selection::Selection::new(
-            crate::selection::SelectionPoint { row: 0, col: 1 },
-        );
+        let mut sel =
+            crate::selection::Selection::new(crate::selection::SelectionPoint { row: 0, col: 1 });
         sel.update_end(crate::selection::SelectionPoint { row: 2, col: 1 });
         term.selection = Some(sel);
 
@@ -2245,9 +2327,8 @@ mod tests {
         assert_eq!(term.selected_text(), "bc\ndef\ngh");
 
         // Full lines selection across 4 lines: (0,0) to (3,2)
-        let mut sel2 = crate::selection::Selection::new(
-            crate::selection::SelectionPoint { row: 0, col: 0 },
-        );
+        let mut sel2 =
+            crate::selection::Selection::new(crate::selection::SelectionPoint { row: 0, col: 0 });
         sel2.update_end(crate::selection::SelectionPoint { row: 3, col: 2 });
         term.selection = Some(sel2);
 
@@ -2270,9 +2351,8 @@ mod tests {
         assert!(sb_len > 0, "deberia haber scrollback");
 
         // La primera fila del scrollback tiene 'Line0'
-        let sel = crate::selection::Selection::new(
-            crate::selection::SelectionPoint { row: 0, col: 0 },
-        );
+        let sel =
+            crate::selection::Selection::new(crate::selection::SelectionPoint { row: 0, col: 0 });
         term.selection = Some(sel);
 
         // Sin scrollback_offset, visible row 0 = logica row 0 (scrollback).
@@ -2288,9 +2368,10 @@ mod tests {
         assert!(!term.is_selected(5, 0));
 
         // Seleccionar la fila grid row 0 (logica = sb_len + 0).
-        let sel2 = crate::selection::Selection::new(
-            crate::selection::SelectionPoint { row: sb_len, col: 0 },
-        );
+        let sel2 = crate::selection::Selection::new(crate::selection::SelectionPoint {
+            row: sb_len,
+            col: 0,
+        });
         term.selection = Some(sel2);
         // is_selected(0, 0) con offset=0 -> logical=0 -> no coincide con sb_len -> false
         assert!(!term.is_selected(0, 0));
@@ -2309,7 +2390,11 @@ mod tests {
             // La seleccion esta en logical sb_len, que corresponde al grid row (sb_len - sb_len) = 0 solo si logical >= sb_len.
             // visible row = logical_row - sb_len = 0. Entonces is_selected(0, 0) -> logical=0 != sb_len -> false. Correcto.
             // is_selected(sb_len, 0) -> logical = sb_len -> contains -> true.
-            assert!(term.is_selected(sb_len, 0), "logical row {} should be selected", sb_len);
+            assert!(
+                term.is_selected(sb_len, 0),
+                "logical row {} should be selected",
+                sb_len
+            );
         }
     }
 
@@ -2320,7 +2405,11 @@ mod tests {
         // Put data in scrollback directly
         let sb_row: Vec<Cell> = "scrollback_"
             .chars()
-            .map(|c| Cell { ch: c, attrs: Attrs::default(), width: 1 })
+            .map(|c| Cell {
+                ch: c,
+                attrs: Attrs::default(),
+                width: 1,
+            })
             .collect();
         term.grid.scrollback.push_back(sb_row);
 
@@ -2335,14 +2424,14 @@ mod tests {
 
         // Seleccion desde scrollback (visible row 0) hasta grid (visible row sb_len=1)
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
-        sel.update_end(SelectionPoint {
-            row: 1,
-            col: 6,
-        });
+        sel.update_end(SelectionPoint { row: 1, col: 6 });
         term.selection = Some(sel);
 
         let text = term.selected_text();
-        assert!(!text.is_empty(), "should contain text from scrollback and grid");
+        assert!(
+            !text.is_empty(),
+            "should contain text from scrollback and grid"
+        );
         assert!(
             text.contains("scrollback_"),
             "should include scrollback text"
@@ -2353,5 +2442,161 @@ mod tests {
             text.contains('\n'),
             "should contain newline between scrollback and grid rows"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests Ronda 1B: bright, 256, true color + reset
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_color_bright_codes() {
+        // from_bright_code: 90-97 foreground, 100-107 background
+        assert_eq!(Color::from_bright_code(90), Color::BrightBlack);
+        assert_eq!(Color::from_bright_code(91), Color::BrightRed);
+        assert_eq!(Color::from_bright_code(92), Color::BrightGreen);
+        assert_eq!(Color::from_bright_code(93), Color::BrightYellow);
+        assert_eq!(Color::from_bright_code(94), Color::BrightBlue);
+        assert_eq!(Color::from_bright_code(95), Color::BrightMagenta);
+        assert_eq!(Color::from_bright_code(96), Color::BrightCyan);
+        assert_eq!(Color::from_bright_code(97), Color::BrightWhite);
+        assert_eq!(Color::from_bright_code(100), Color::BrightBlack);
+        assert_eq!(Color::from_bright_code(101), Color::BrightRed);
+        assert_eq!(Color::from_bright_code(102), Color::BrightGreen);
+        assert_eq!(Color::from_bright_code(103), Color::BrightYellow);
+        assert_eq!(Color::from_bright_code(104), Color::BrightBlue);
+        assert_eq!(Color::from_bright_code(105), Color::BrightMagenta);
+        assert_eq!(Color::from_bright_code(106), Color::BrightCyan);
+        assert_eq!(Color::from_bright_code(107), Color::BrightWhite);
+        assert_eq!(Color::from_bright_code(0), Color::Default);
+        assert_eq!(Color::from_bright_code(50), Color::Default);
+    }
+
+    #[test]
+    fn test_sgr_bright_foreground() {
+        let mut term = Term::new();
+        feed(&mut term, b"[91mX");
+        assert_eq!(term.grid.rows[0][0].attrs.fg, Color::BrightRed);
+    }
+
+    #[test]
+    fn test_sgr_bright_background() {
+        let mut term = Term::new();
+        feed(&mut term, b"[101mX");
+        assert_eq!(term.grid.rows[0][0].attrs.bg, Color::BrightRed);
+    }
+
+    #[test]
+    fn test_sgr_256_foreground() {
+        let mut term = Term::new();
+        feed(&mut term, b"[38;5;100mX");
+        assert_eq!(term.grid.rows[0][0].attrs.fg, Color::Indexed(100));
+    }
+
+    #[test]
+    fn test_sgr_true_color_foreground() {
+        let mut term = Term::new();
+        feed(&mut term, b"[38;2;100;150;200mX");
+        assert_eq!(term.grid.rows[0][0].attrs.fg, Color::Rgb(100, 150, 200));
+    }
+
+    #[test]
+    fn test_sgr_256_background() {
+        let mut term = Term::new();
+        feed(&mut term, b"[48;5;200mX");
+        assert_eq!(term.grid.rows[0][0].attrs.bg, Color::Indexed(200));
+    }
+
+    #[test]
+    fn test_sgr_true_color_background() {
+        let mut term = Term::new();
+        feed(&mut term, b"[48;2;10;20;30mX");
+        assert_eq!(term.grid.rows[0][0].attrs.bg, Color::Rgb(10, 20, 30));
+    }
+
+    #[test]
+    fn test_sgr_reset_color() {
+        let mut term = Term::new();
+        feed(&mut term, b"[31m[39m[41m[49m");
+        assert_eq!(term.attrs.fg, Color::Default);
+        assert_eq!(term.attrs.bg, Color::Default);
+    }
+
+    #[test]
+    fn test_color_match_exhaustive() {
+        // Verifica que todas las variantes de Color se cubren (compila = pasa).
+        let colors = [
+            Color::Default,
+            Color::Black,
+            Color::Red,
+            Color::Green,
+            Color::Yellow,
+            Color::Blue,
+            Color::Magenta,
+            Color::Cyan,
+            Color::White,
+            Color::BrightBlack,
+            Color::BrightRed,
+            Color::BrightGreen,
+            Color::BrightYellow,
+            Color::BrightBlue,
+            Color::BrightMagenta,
+            Color::BrightCyan,
+            Color::BrightWhite,
+            Color::Indexed(42),
+            Color::Rgb(1, 2, 3),
+        ];
+        for c in &colors {
+            match c {
+                Color::Default
+                | Color::Black
+                | Color::Red
+                | Color::Green
+                | Color::Yellow
+                | Color::Blue
+                | Color::Magenta
+                | Color::Cyan
+                | Color::White
+                | Color::BrightBlack
+                | Color::BrightRed
+                | Color::BrightGreen
+                | Color::BrightYellow
+                | Color::BrightBlue
+                | Color::BrightMagenta
+                | Color::BrightCyan
+                | Color::BrightWhite
+                | Color::Indexed(_)
+                | Color::Rgb(..) => {}
+            }
+        }
+    }
+
+    #[test]
+    fn test_sgr_ansi_16_still_works() {
+        // Test existente: 30-37 foreground
+        {
+            let mut term = Term::new();
+            feed(&mut term, b"[31mR");
+            assert_eq!(term.grid.rows[0][0].ch, 'R');
+            assert_eq!(term.grid.rows[0][0].attrs.fg, Color::Red);
+        }
+        // 40-47 background
+        {
+            let mut term = Term::new();
+            feed(&mut term, b"[41mR");
+            assert_eq!(term.grid.rows[0][0].attrs.bg, Color::Red);
+        }
+        // Reset
+        {
+            let mut term = Term::new();
+            feed(&mut term, b"[31m[0m");
+            assert_eq!(term.attrs, Attrs::default());
+        }
+        // Multi-param: bold + red
+        {
+            let mut term = Term::new();
+            feed(&mut term, b"[1;31mY");
+            assert!(term.grid.rows[0][0].attrs.bold);
+            assert_eq!(term.grid.rows[0][0].attrs.fg, Color::Red);
+        }
     }
 }
