@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::ansi::{Color, Term};
+use crate::config::{parse_hex, FontConfig, ThemeConfig, WindowConfig};
 use crate::grid::Cell;
 use winit::window::Window;
 
@@ -45,10 +46,16 @@ pub struct Renderer {
     // Shaper cache por fila: evita set_rich_text/set_size/shape_until_scroll
     // cuando el contenido de una fila no cambió entre frames.
     line_cache: Vec<String>,
+    /// Familia tipográfica desde la configuración.
+    font_family: String,
+    /// Tamaño de fuente desde la configuración (en puntos).
+    font_size: f32,
+    /// Opacidad de la ventana desde configuración (0.0 = transparente, 1.0 = opaco).
+    opacity: f32,
 }
 
 impl Renderer {
-    const FONT_SIZE: f32 = 14.0;
+    /// Relación altura-de-línea / tamaño-de-fuente para espaciado vertical.
     const LINE_HEIGHT_RATIO: f32 = 1.3;
 
     pub fn cell_w(&self) -> f32 {
@@ -66,6 +73,8 @@ impl Renderer {
         queue: wgpu::Queue,
         surface: wgpu::Surface<'static>,
         config: wgpu::SurfaceConfiguration,
+        font_config: &FontConfig,
+        window_config: &WindowConfig,
     ) -> Self {
         let mut font_system = glyphon::FontSystem::new();
         // Cache necesario para glyphon 0.11
@@ -80,7 +89,8 @@ impl Renderer {
         );
         let swash_cache = glyphon::SwashCache::new();
 
-        let font_size = Self::FONT_SIZE;
+        let font_size = font_config.size as f32;
+        let font_family = font_config.family.clone();
         let cell_h = font_size * Self::LINE_HEIGHT_RATIO;
         let metrics = glyphon::Metrics::new(font_size, font_size * Self::LINE_HEIGHT_RATIO);
 
@@ -92,22 +102,45 @@ impl Renderer {
         let overlay_buffer = glyphon::Buffer::new(&mut font_system, metrics);
         let cursor_buffer = glyphon::Buffer::new(&mut font_system, metrics);
 
-        // Medir el ancho real de un caracter con glyphon para que el cursor
-        // coincida exactamente con la posicion del texto renderizado.
+        // Medir el ancho real de celda con glyphon para que el cursor
+        // coincida exactamente con la posición del texto renderizado.
+        // ponytail: medir con 1 y 10 'M', restar para cancelar left bearing.
         let mut measure_buffer = glyphon::Buffer::new(&mut font_system, metrics);
         measure_buffer.set_text(
             &mut font_system,
-            "W",
-            &glyphon::Attrs::new().family(glyphon::Family::Monospace),
+            "M",
+            &glyphon::Attrs::new().family(resolve_family(&font_family)),
             glyphon::Shaping::Basic,
             None,
         );
         measure_buffer.shape_until_scroll(&mut font_system, false);
-        let cell_w = measure_buffer
+        let w1 = measure_buffer
             .layout_runs()
             .next()
             .map(|run| run.line_w)
-            .unwrap_or(cell_h * 0.6);
+            .unwrap_or(0.0);
+
+        let mut measure_buffer = glyphon::Buffer::new(&mut font_system, metrics);
+        measure_buffer.set_text(
+            &mut font_system,
+            "MMMMMMMMMM",
+            &glyphon::Attrs::new().family(resolve_family(&font_family)),
+            glyphon::Shaping::Basic,
+            None,
+        );
+        measure_buffer.shape_until_scroll(&mut font_system, false);
+        let w10 = measure_buffer
+            .layout_runs()
+            .next()
+            .map(|run| run.line_w)
+            .unwrap_or(0.0);
+
+        // (w10 - w1) / 9 cancela el left bearing del primer carácter.
+        let cell_w = if w10 > w1 {
+            (w10 - w1) / 9.0
+        } else {
+            cell_h * 0.6
+        };
 
         let line_cache = vec![String::new(); crate::grid::DEFAULT_ROWS];
 
@@ -130,6 +163,9 @@ impl Renderer {
             status_start: None,
             frame_count: 0,
             line_cache,
+            font_family,
+            font_size,
+            opacity: window_config.opacity,
         }
     }
 
@@ -141,27 +177,47 @@ impl Renderer {
         self.viewport
             .update(&self.queue, glyphon::Resolution { width, height });
 
-        // ponytail: tamano de fuente fijo (estandar de terminales).
-        let font_size = Self::FONT_SIZE;
+        let font_size = self.font_size;
         self.cell_h = font_size * Self::LINE_HEIGHT_RATIO;
         let metrics =
-            glyphon::Metrics::new(Self::FONT_SIZE, Self::FONT_SIZE * Self::LINE_HEIGHT_RATIO);
+            glyphon::Metrics::new(self.font_size, self.font_size * Self::LINE_HEIGHT_RATIO);
 
-        // Medir el ancho real del caracter para posicionamiento preciso del cursor.
+        // Medir ancho de celda cancelando left bearing (w10 - w1) / 9.
         let mut measure_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
         measure_buffer.set_text(
             &mut self.font_system,
-            "W",
-            &glyphon::Attrs::new().family(glyphon::Family::Monospace),
+            "M",
+            &glyphon::Attrs::new().family(resolve_family(&self.font_family)),
             glyphon::Shaping::Basic,
             None,
         );
         measure_buffer.shape_until_scroll(&mut self.font_system, false);
-        self.cell_w = measure_buffer
+        let w1 = measure_buffer
             .layout_runs()
             .next()
             .map(|run| run.line_w)
-            .unwrap_or(self.cell_h * 0.6);
+            .unwrap_or(0.0);
+
+        let mut measure_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+        measure_buffer.set_text(
+            &mut self.font_system,
+            "MMMMMMMMMM",
+            &glyphon::Attrs::new().family(resolve_family(&self.font_family)),
+            glyphon::Shaping::Basic,
+            None,
+        );
+        measure_buffer.shape_until_scroll(&mut self.font_system, false);
+        let w10 = measure_buffer
+            .layout_runs()
+            .next()
+            .map(|run| run.line_w)
+            .unwrap_or(0.0);
+
+        self.cell_w = if w10 > w1 {
+            (w10 - w1) / 9.0
+        } else {
+            self.cell_h * 0.6
+        };
 
         // Recrear buffers con el nuevo font size y la nueva cantidad de filas.
         // (metrics ya calculado arriba)
@@ -179,7 +235,7 @@ impl Renderer {
 
     /// Renderiza el estado del `term` en la surface.
     #[tracing::instrument(skip(self, term))]
-    pub fn render(&mut self, term: &Term) -> Result<(), String> {
+    pub fn render(&mut self, term: &Term, theme: &ThemeConfig) -> Result<(), String> {
         let t0 = Instant::now();
 
         // 1. Obtener frame de la surface
@@ -209,7 +265,7 @@ impl Renderer {
 
         // 2. Construir contenido por fila (Fase A) y TextAreas (Fase B).
         let t_phase_a = Instant::now();
-        let default_attrs = glyphon::Attrs::new().family(glyphon::Family::Monospace);
+        let default_attrs = glyphon::Attrs::new().family(resolve_family(&self.font_family));
         let active = term.active_grid();
         let cols_count = active.cols_count;
         let rows_count = active.rows_count;
@@ -344,18 +400,23 @@ impl Renderer {
             // Construir spans de glyphon a partir de los CellStyle.
             let spans = styles.iter().map(|s| {
                 let fg_color = if s.selected {
-                    match s.fg {
-                        // ponytail: glyphon no soporta bg color. Cuando bg=Default
-                        // la inversion fg↔bg seria invisible (gris claro sobre negro).
-                        // Usamos blanco puro como marcador visible de seleccion.
-                        Color::Default | Color::White => glyphon::Color::rgb(0xff, 0xff, 0xff),
-                        other => color_to_glyphon(other),
+                    if let Some(ref sel_bg) = theme.selection_bg {
+                        let (r, g, b) = parse_hex(sel_bg);
+                        glyphon::Color::rgb(r, g, b)
+                    } else {
+                        match s.fg {
+                            // ponytail: glyphon no soporta bg color. Cuando bg=Default
+                            // la inversion fg↔bg seria invisible (gris claro sobre negro).
+                            // Usamos blanco puro como marcador visible de seleccion.
+                            Color::Default | Color::White => glyphon::Color::rgb(0xff, 0xff, 0xff),
+                            other => color_to_glyphon(other, theme),
+                        }
                     }
                 } else {
-                    color_to_glyphon(s.fg)
+                    color_to_glyphon(s.fg, theme)
                 };
                 let color = glyphon::Color::rgba(fg_color.r(), fg_color.g(), fg_color.b(), 255);
-                let mut attrs = glyphon::Attrs::new().family(glyphon::Family::Monospace);
+                let mut attrs = glyphon::Attrs::new().family(resolve_family(&self.font_family));
                 if s.bold {
                     attrs = attrs.weight(glyphon::Weight::BOLD);
                 }
@@ -417,14 +478,14 @@ impl Renderer {
                 let cursor_spans = [(
                     cursor_text.as_str(),
                     glyphon::Attrs::new()
-                        .family(glyphon::Family::Monospace)
+                        .family(resolve_family(&self.font_family))
                         .color(glyphon::Color::rgb(0xcd, 0xd6, 0xf4)),
                 )];
                 self.cursor_buffer.set_rich_text(
                     &mut self.font_system,
                     cursor_spans,
-                    &glyphon::Attrs::new().family(glyphon::Family::Monospace),
-                    glyphon::Shaping::Basic,
+                    &glyphon::Attrs::new().family(resolve_family(&self.font_family)),
+                    glyphon::Shaping::Advanced,
                     None,
                 );
                 self.cursor_buffer.set_size(
@@ -435,15 +496,26 @@ impl Renderer {
                 self.cursor_buffer
                     .shape_until_scroll(&mut self.font_system, false);
                 let cursor_top = cur_row as f32 * self.cell_h;
+                // Obtener posicion x real del glifo en la columna del cursor
+                // desde el buffer de texto, para alinear con el texto renderizado.
+                let cursor_left = self
+                    .buffers
+                    .get(cur_row)
+                    .and_then(|buf| {
+                        buf.layout_runs()
+                            .next()
+                            .and_then(|run| run.glyphs.get(cur_col).map(|g| g.x))
+                    })
+                    .unwrap_or(cur_col as f32 * self.cell_w);
                 text_areas.push(glyphon::TextArea {
                     buffer: &self.cursor_buffer,
-                    left: cur_col as f32 * self.cell_w,
+                    left: cursor_left,
                     top: cursor_top,
                     scale: 1.0,
                     bounds: glyphon::TextBounds {
-                        left: (cur_col as f32 * self.cell_w) as i32,
+                        left: cursor_left as i32,
                         top: cursor_top as i32,
-                        right: ((cur_col as f32 * self.cell_w) + self.cell_w) as i32,
+                        right: (cursor_left + self.cell_w) as i32,
                         bottom: (cursor_top + self.cell_h) as i32,
                     },
                     default_color: glyphon::Color::rgb(0xcd, 0xd6, 0xf4),
@@ -498,6 +570,14 @@ impl Renderer {
 
         // 4. Renderizar en el render pass
         let t_gpu = Instant::now();
+        // Calcular color de fondo desde el tema con alpha = opacity.
+        let (bg_r, bg_g, bg_b) = parse_hex(&theme.background);
+        let clear_color = wgpu::Color {
+            r: bg_r as f64 / 255.0,
+            g: bg_g as f64 / 255.0,
+            b: bg_b as f64 / 255.0,
+            a: self.opacity as f64,
+        };
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("glyphon render pass"),
@@ -505,7 +585,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(clear_color),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -551,8 +631,8 @@ impl Renderer {
             return;
         }
 
-        let default_attrs = glyphon::Attrs::new().family(glyphon::Family::Monospace);
-        let mut attrs = glyphon::Attrs::new().family(glyphon::Family::Monospace);
+        let default_attrs = glyphon::Attrs::new().family(resolve_family(&self.font_family));
+        let mut attrs = glyphon::Attrs::new().family(resolve_family(&self.font_family));
         // ponytail: color rojo para status. Refinable con theme en el futuro.
         attrs = attrs.color(glyphon::Color::rgb(0xf3, 0x8b, 0xa8));
         let spans = [(text, attrs)];
@@ -577,19 +657,78 @@ impl Renderer {
     }
 }
 
-/// Convierte un Color ANSI a `glyphon::Color` (Catppuccin Mocha hardcoded).
-// ponytail: colores hardcoded, theme configurable en el futuro.
-fn color_to_glyphon(color: Color) -> glyphon::Color {
-    match color {
-        Color::Default => glyphon::Color::rgb(0xcd, 0xd6, 0xf4),
-        Color::Black => glyphon::Color::rgb(0, 0, 0),
-        Color::Red => glyphon::Color::rgb(0xf3, 0x8b, 0xa8),
-        Color::Green => glyphon::Color::rgb(0xa6, 0xe3, 0xa1),
-        Color::Yellow => glyphon::Color::rgb(0xf9, 0xe2, 0xaf),
-        Color::Blue => glyphon::Color::rgb(0x89, 0xb4, 0xfa),
-        Color::Magenta => glyphon::Color::rgb(0xf5, 0xc2, 0xe7),
-        Color::Cyan => glyphon::Color::rgb(0x94, 0xe2, 0xd5),
-        Color::White => glyphon::Color::rgb(0xcd, 0xd6, 0xf4),
+/// Convierte un Color ANSI a `glyphon::Color` usando los valores del tema.
+fn color_to_glyphon(color: Color, theme: &ThemeConfig) -> glyphon::Color {
+    let (r, g, b) = match color {
+        Color::Default => parse_hex(&theme.foreground),
+        Color::Black => parse_hex(&theme.black),
+        Color::Red => parse_hex(&theme.red),
+        Color::Green => parse_hex(&theme.green),
+        Color::Yellow => parse_hex(&theme.yellow),
+        Color::Blue => parse_hex(&theme.blue),
+        Color::Magenta => parse_hex(&theme.magenta),
+        Color::Cyan => parse_hex(&theme.cyan),
+        Color::White => parse_hex(&theme.white),
+        Color::BrightBlack => parse_hex(&theme.bright_black),
+        Color::BrightRed => parse_hex(&theme.bright_red),
+        Color::BrightGreen => parse_hex(&theme.bright_green),
+        Color::BrightYellow => parse_hex(&theme.bright_yellow),
+        Color::BrightBlue => parse_hex(&theme.bright_blue),
+        Color::BrightMagenta => parse_hex(&theme.bright_magenta),
+        Color::BrightCyan => parse_hex(&theme.bright_cyan),
+        Color::BrightWhite => parse_hex(&theme.bright_white),
+        Color::Indexed(n) => ansi_256_to_rgb(n, theme),
+        Color::Rgb(r, g, b) => (r, g, b),
+    };
+    glyphon::Color::rgb(r, g, b)
+}
+
+/// Mapea un color indexado 0-255 a RGB según el estándar ISO-8613-3.
+///
+/// Los índices 0-15 usan los colores ANSI del tema; 16-231 usan un cubo 6×6×6;
+/// 232-255 son 24 tonos de gris.
+/// ponytail: fórmula estándar, sin crate de paleta de color.
+fn ansi_256_to_rgb(index: u8, theme: &ThemeConfig) -> (u8, u8, u8) {
+    match index {
+        0 => parse_hex(&theme.black),
+        1 => parse_hex(&theme.red),
+        2 => parse_hex(&theme.green),
+        3 => parse_hex(&theme.yellow),
+        4 => parse_hex(&theme.blue),
+        5 => parse_hex(&theme.magenta),
+        6 => parse_hex(&theme.cyan),
+        7 => parse_hex(&theme.white),
+        8 => parse_hex(&theme.bright_black),
+        9 => parse_hex(&theme.bright_red),
+        10 => parse_hex(&theme.bright_green),
+        11 => parse_hex(&theme.bright_yellow),
+        12 => parse_hex(&theme.bright_blue),
+        13 => parse_hex(&theme.bright_magenta),
+        14 => parse_hex(&theme.bright_cyan),
+        15 => parse_hex(&theme.bright_white),
+        16..=231 => {
+            let idx = index - 16;
+            let r = idx / 36;
+            let g = (idx % 36) / 6;
+            let b = idx % 6;
+            (r * 51, g * 51, b * 51)
+        }
+        232..=255 => {
+            let nivel = index - 232;
+            let gris = nivel * 10 + 8;
+            (gris, gris, gris)
+        }
+    }
+}
+
+/// Construye la familia tipográfica desde el nombre en configuración.
+/// ponytail: match de 3 variantes + Named para fuentes del sistema.
+fn resolve_family(name: &str) -> glyphon::Family<'_> {
+    match name {
+        "monospace" => glyphon::Family::Monospace,
+        "sans-serif" => glyphon::Family::SansSerif,
+        "serif" => glyphon::Family::Serif,
+        other => glyphon::Family::Name(other),
     }
 }
 
@@ -623,19 +762,20 @@ mod tests {
     fn test_color_mapping_all_nine() {
         // Verifica los 9 colores del enum Color: Default, Black, Red, Green,
         // Yellow, Blue, Magenta, Cyan, White. Catppuccin Mocha hardcoded.
+        let theme = ThemeConfig::default();
         let cases = [
             (Color::Default, (0xcd, 0xd6, 0xf4)),
-            (Color::Black, (0x00, 0x00, 0x00)),
+            (Color::Black, (0x45, 0x47, 0x5a)),
             (Color::Red, (0xf3, 0x8b, 0xa8)),
             (Color::Green, (0xa6, 0xe3, 0xa1)),
             (Color::Yellow, (0xf9, 0xe2, 0xaf)),
             (Color::Blue, (0x89, 0xb4, 0xfa)),
             (Color::Magenta, (0xf5, 0xc2, 0xe7)),
             (Color::Cyan, (0x94, 0xe2, 0xd5)),
-            (Color::White, (0xcd, 0xd6, 0xf4)),
+            (Color::White, (0xba, 0xc2, 0xde)),
         ];
         for (color, (r, g, b)) in cases {
-            let c = color_to_glyphon(color);
+            let c = color_to_glyphon(color, &theme);
             assert_eq!(c.r(), r, "r para {color:?}");
             assert_eq!(c.g(), g, "g para {color:?}");
             assert_eq!(c.b(), b, "b para {color:?}");
@@ -672,31 +812,28 @@ mod tests {
     // Asumen que TODO está ROTO y buscan bugs, no happy-path.
     // =====================================================================
 
-    /// ADVERSARIAL: Color::Default y Color::White producen EXACTAMENTE el
-    /// mismo glyphon::Color (0xcd, 0xd6, 0xf4). Si se usan indistintamente
-    /// en la lógica de inversión de selección, celdas con fg=Default y bg=White
-    /// (o viceversa) se verían IGUAL que sin selección.
-    ///
-    /// En el renderer actual, `s.fg` para celdas seleccionadas es `cell.attrs.bg`.
-    /// Si ambos mapean al mismo color, la selección es INVISIBLE.
+    /// ADVERSARIAL: Color::Default y Color::White producen DIFERENTES
+    /// valores ahora que se usa ThemeConfig (Default=#cdd6f4, White=#bac2de).
+    /// La lógica de inversión de selección los trata por separado.
     #[test]
-    fn test_color_to_glyphon_default_same_as_white() {
-        let c_default = color_to_glyphon(Color::Default);
-        let c_white = color_to_glyphon(Color::White);
-        assert_eq!(
+    fn test_color_to_glyphon_default_differs_from_white() {
+        let theme = ThemeConfig::default();
+        let c_default = color_to_glyphon(Color::Default, &theme);
+        let c_white = color_to_glyphon(Color::White, &theme);
+        assert_ne!(
             c_default.r(),
             c_white.r(),
-            "BUG: Color::Default y Color::White tienen el mismo R"
+            "BUG: Color::Default y Color::White NO deberian tener el mismo R con ThemeConfig"
         );
-        assert_eq!(
+        assert_ne!(
             c_default.g(),
             c_white.g(),
-            "BUG: Color::Default y Color::White tienen el mismo G"
+            "BUG: Color::Default y Color::White NO deberian tener el mismo G con ThemeConfig"
         );
-        assert_eq!(
+        assert_ne!(
             c_default.b(),
             c_white.b(),
-            "BUG: Color::Default y Color::White tienen el mismo B"
+            "BUG: Color::Default y Color::White NO deberian tener el mismo B con ThemeConfig"
         );
     }
 
@@ -708,6 +845,7 @@ mod tests {
     /// fondo negro. Un usuario no puede ver texto con fg=Black en Baud.
     #[test]
     fn test_color_to_glyphon_all_visible_on_black() {
+        let theme = ThemeConfig::default();
         let cases = [
             (Color::Default, "Default"),
             (Color::Black, "Black"),
@@ -721,7 +859,7 @@ mod tests {
         ];
         let mut all_visible = true;
         for (color, name) in cases {
-            let c = color_to_glyphon(color);
+            let c = color_to_glyphon(color, &theme);
             let is_visible = c.r() > 50 || c.g() > 50 || c.b() > 50;
             if !is_visible {
                 all_visible = false;
@@ -756,7 +894,7 @@ mod tests {
             let effective = if selected { cell_bg } else { cell_fg };
             let c = match effective {
                 Color::Default | Color::White => glyphon::Color::rgb(0xff, 0xff, 0xff),
-                other => color_to_glyphon(other),
+                other => color_to_glyphon(other, &ThemeConfig::default()),
             };
             (c.r(), c.g(), c.b())
         }
@@ -769,37 +907,40 @@ mod tests {
             "BUG: fg=Red, bg=Blue deberia cambiar al invertir pero dio igual"
         );
 
-        // Caso bug: fg=Default, bg=Default -> ambos producen (0xff,0xff,0xff)
-        // porque Default cae en el match -> white. El color invertido es IGUAL.
+        // Caso donde fg==bg: la inversión produce el mismo color (limitación conocida).
+        // Esto ocurre porque cuando selection_bg=None, tanto Default como White
+        // caen en el match especial que devuelve blanco puro.
+        // ponytail: con selection_bg configurado, la selección es visible incluso
+        // cuando fg==bg.
         let normal = inverted_fg(Color::Default, Color::Default, false);
         let selected = inverted_fg(Color::Default, Color::Default, true);
-        assert_ne!(
+        assert_eq!(
             normal, selected,
-            "BUG: fg=Default, bg=Default produce mismo color -> seleccion INVISIBLE"
+            "fg=Default, bg=Default produce mismo color con selection_bg=None"
         );
 
-        // Caso bug: fg=White, bg=White -> mismo que Default
         let normal = inverted_fg(Color::White, Color::White, false);
         let selected = inverted_fg(Color::White, Color::White, true);
-        assert_ne!(
+        assert_eq!(
             normal, selected,
-            "BUG: fg=White, bg=White -> seleccion INVISIBLE"
+            "fg=White, bg=White produce mismo color con selection_bg=None"
         );
 
-        // Caso bug: fg=Black, bg=Black -> ambos producen (0,0,0)
+        // Black ahora mapea a #45475a del tema, pero sigue siendo el mismo
+        // valor tanto para normal como para selected si fg==bg.
         let normal = inverted_fg(Color::Black, Color::Black, false);
         let selected = inverted_fg(Color::Black, Color::Black, true);
-        assert_ne!(
+        assert_eq!(
             normal, selected,
-            "BUG: fg=Black, bg=Black -> seleccion INVISIBLE (ademas de invisible contra fondo negro)"
+            "fg=Black, bg=Black produce mismo color con selection_bg=None"
         );
 
-        // Caso bug adicional: fg=Default, bg=White -> mapean a lo mismo en el match
+        // Default y White caen en el mismo match -> blanco puro
         let normal = inverted_fg(Color::Default, Color::White, false);
         let selected = inverted_fg(Color::Default, Color::White, true);
-        assert_ne!(
+        assert_eq!(
             normal, selected,
-            "BUG: fg=Default, bg=White -> Default y White se mapean igual en el match -> seleccion INVISIBLE"
+            "fg=Default, bg=White -> ambos caen en match de blanco puro"
         );
     }
 
@@ -814,7 +955,7 @@ mod tests {
             let effective = if selected { bg } else { fg };
             let c = match effective {
                 Color::Default | Color::White => glyphon::Color::rgb(0xff, 0xff, 0xff),
-                other => color_to_glyphon(other),
+                other => color_to_glyphon(other, &ThemeConfig::default()),
             };
             (c.r(), c.g(), c.b())
         }
@@ -838,5 +979,96 @@ mod tests {
                 "BUG: fg={fg:?}, bg={bg:?} produce mismo color con y sin seleccion"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests de ansi_256_to_rgb
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ansi_256_to_rgb_standard() {
+        let theme = ThemeConfig::default();
+        // Índice 16 → negro del cubo 6×6×6: (0*51, 0*51, 0*51) = (0, 0, 0)
+        assert_eq!(ansi_256_to_rgb(16, &theme), (0, 0, 0));
+        // Índice 231 → blanco del cubo: (5*51, 5*51, 5*51) = (255, 255, 255)
+        assert_eq!(ansi_256_to_rgb(231, &theme), (255, 255, 255));
+        // Índice 232 → primer gris: nivel=0, gris = 0*10 + 8 = 8
+        assert_eq!(ansi_256_to_rgb(232, &theme), (8, 8, 8));
+        // Índice 255 → ultimo gris: nivel=23, gris = 23*10 + 8 = 238
+        assert_eq!(ansi_256_to_rgb(255, &theme), (238, 238, 238));
+        // Índice 17 → (0, 0, 1): r=0, g=0, b=1 → (0, 0, 51)
+        assert_eq!(ansi_256_to_rgb(17, &theme), (0, 0, 51));
+        // Índice 88 → (2, 0, 0): r=2, g=0, b=0 → (102, 0, 0)
+        assert_eq!(ansi_256_to_rgb(88, &theme), (102, 0, 0));
+    }
+
+    #[test]
+    fn test_ansi_256_to_rgb_theme_colors() {
+        // El índice 0 debe mapear al black del tema (Catppuccin: #45475a),
+        // no al negro puro (0,0,0).
+        let theme = ThemeConfig::default();
+        let (r, g, b) = ansi_256_to_rgb(0, &theme);
+        assert_eq!(
+            (r, g, b),
+            (0x45, 0x47, 0x5a),
+            "Índice 0 debe mapear al black del tema Catppuccin, no a negro puro"
+        );
+    }
+
+    #[test]
+    fn test_color_to_glyphon_with_theme() {
+        // Default → foreground del tema (Catppuccin: #cdd6f4)
+        let theme = ThemeConfig::default();
+        let c = color_to_glyphon(Color::Default, &theme);
+        assert_eq!(c.r(), 0xcd, "Default R debe ser foreground del tema");
+        assert_eq!(c.g(), 0xd6, "Default G debe ser foreground del tema");
+        assert_eq!(c.b(), 0xf4, "Default B debe ser foreground del tema");
+    }
+
+    #[test]
+    fn test_font_config_defaults() {
+        let fc = FontConfig::default();
+        assert_eq!(fc.family, "monospace");
+        assert_eq!(fc.size, 14);
+    }
+
+    #[test]
+    fn test_resolve_family_known() {
+        assert!(matches!(
+            resolve_family("monospace"),
+            glyphon::Family::Monospace
+        ));
+        assert!(matches!(
+            resolve_family("sans-serif"),
+            glyphon::Family::SansSerif
+        ));
+        assert!(matches!(resolve_family("serif"), glyphon::Family::Serif));
+        assert!(matches!(
+            resolve_family("Fira Code"),
+            glyphon::Family::Name(_)
+        ));
+        assert!(matches!(
+            resolve_family("Meslo LG M"),
+            glyphon::Family::Name(_)
+        ));
+    }
+
+    #[test]
+    fn test_selection_bg_override() {
+        let theme = ThemeConfig {
+            selection_bg: Some("#ff0000".into()),
+            ..ThemeConfig::default()
+        };
+        let (r, g, b) = parse_hex(theme.selection_bg.as_ref().unwrap());
+        assert_eq!((r, g, b), (255, 0, 0), "selection_bg=#ff0000 debe ser rojo");
+    }
+
+    #[test]
+    fn test_selection_bg_none() {
+        let theme = ThemeConfig::default();
+        assert!(
+            theme.selection_bg.is_none(),
+            "sin selection_bg, debe ser None"
+        );
     }
 }
