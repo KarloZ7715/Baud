@@ -6,4 +6,5 @@ pub mod grid;
 pub mod input;
 pub mod pty;
 pub mod renderer;
+pub mod selection;
 pub mod window;
