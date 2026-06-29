@@ -86,6 +86,7 @@ fn current_key_modes(term: &Arc<Mutex<Term>>) -> KeyModes {
             app_cursor_keys: g.app_cursor_keys,
             app_keypad: g.keypad_application_mode,
             newline_mode: g.newline_mode,
+            ..Default::default()
         }
     } else {
         KeyModes::default()

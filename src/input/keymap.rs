@@ -70,6 +70,84 @@ pub struct KeyModes {
     pub app_keypad: bool,
     /// LNM: newline mode (Enter envia CR+LF).
     pub newline_mode: bool,
+    /// Flags del protocolo de teclado extendido (CSI u).
+    pub keyboard_flags: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyEventKind {
+    Press,
+    Repeat,
+    Release,
+}
+
+impl KeyEventKind {
+    fn code(self) -> u8 {
+        match self {
+            Self::Press => 1,
+            Self::Repeat => 2,
+            Self::Release => 3,
+        }
+    }
+}
+
+const KB_FLAG_DISAMBIGUATE: u8 = 1;
+const KB_FLAG_REPORT_EVENTS: u8 = 2;
+const KB_FLAG_REPORT_ALL: u8 = 8;
+
+/// Codepoint para teclas con representacion en la forma CSI ... u.
+fn u_form_codepoint(key: Key) -> Option<u32> {
+    Some(match key {
+        Key::Char(c) => c.to_ascii_lowercase() as u32,
+        Key::Enter => 13,
+        Key::Tab => 9,
+        Key::Backspace => 127,
+        Key::Escape => 27,
+        _ => return None,
+    })
+}
+
+/// Parametro de modificador xterm con subparametro de evento opcional.
+fn u_form_mod_field(mods: Mods, event: KeyEventKind, report_events: bool) -> String {
+    let m = mods.xterm_param();
+    if report_events && event != KeyEventKind::Press {
+        format!("{}:{}", m, event.code())
+    } else {
+        format!("{}", m)
+    }
+}
+
+/// Encoding CSI <codepoint> ; <mods> u. None => usar encode_key clasico.
+pub fn encode_key_extended(
+    key: Key,
+    mods: Mods,
+    modes: KeyModes,
+    event: KeyEventKind,
+) -> Option<Vec<u8>> {
+    let flags = modes.keyboard_flags;
+    if flags == 0 {
+        return None;
+    }
+    let report_events = flags & KB_FLAG_REPORT_EVENTS != 0;
+    if event == KeyEventKind::Release && !report_events {
+        return None;
+    }
+
+    let cp = u_form_codepoint(key)?;
+    let report_all = flags & KB_FLAG_REPORT_ALL != 0;
+    let disambiguate = flags & KB_FLAG_DISAMBIGUATE != 0;
+
+    let plain_text =
+        matches!(key, Key::Char(_)) && !mods.any() && event == KeyEventKind::Press && !report_all;
+    if plain_text {
+        return None;
+    }
+    if !disambiguate && !report_events && !report_all {
+        return None;
+    }
+
+    let field = u_form_mod_field(mods, event, report_events);
+    Some(format!("\x1b[{};{}u", cp, field).into_bytes())
 }
 
 /// Codifica una tecla a bytes para el PTY. None = no se envia nada.
@@ -219,6 +297,86 @@ fn encode_fkey(n: u8, mods: Mods) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_extended_text_con_ctrl_usa_forma_u() {
+        let modes = KeyModes {
+            keyboard_flags: 1,
+            ..KeyModes::default()
+        };
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            encode_key_extended(Key::Char('a'), ctrl, modes, KeyEventKind::Press),
+            Some(b"\x1b[97;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_extended_text_plano_sin_mods_es_none() {
+        let modes = KeyModes {
+            keyboard_flags: 1,
+            ..KeyModes::default()
+        };
+        assert_eq!(
+            encode_key_extended(Key::Char('a'), Mods::NONE, modes, KeyEventKind::Press),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extended_enter_disambiguate() {
+        let modes = KeyModes {
+            keyboard_flags: 1,
+            ..KeyModes::default()
+        };
+        let shift = Mods {
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            encode_key_extended(Key::Enter, shift, modes, KeyEventKind::Press),
+            Some(b"\x1b[13;2u".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_extended_release_requiere_report_events() {
+        let only_disambig = KeyModes {
+            keyboard_flags: 1,
+            ..KeyModes::default()
+        };
+        assert_eq!(
+            encode_key_extended(
+                Key::Char('a'),
+                Mods {
+                    ctrl: true,
+                    ..Mods::NONE
+                },
+                only_disambig,
+                KeyEventKind::Release
+            ),
+            None
+        );
+        let with_events = KeyModes {
+            keyboard_flags: 3,
+            ..KeyModes::default()
+        };
+        assert_eq!(
+            encode_key_extended(
+                Key::Char('a'),
+                Mods {
+                    ctrl: true,
+                    ..Mods::NONE
+                },
+                with_events,
+                KeyEventKind::Release
+            ),
+            Some(b"\x1b[97;5:3u".to_vec())
+        );
+    }
 
     #[test]
     fn test_mods_xterm_param() {
