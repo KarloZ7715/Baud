@@ -51,6 +51,7 @@ fn winit_to_key(k: &Key) -> Option<KKey> {
         Key::Named(NamedKey::Tab) => KKey::Tab,
         Key::Named(NamedKey::Backspace) => KKey::Backspace,
         Key::Named(NamedKey::Escape) => KKey::Escape,
+        Key::Named(NamedKey::Space) => KKey::Char(' '),
         Key::Named(NamedKey::ArrowUp) => KKey::Up,
         Key::Named(NamedKey::ArrowDown) => KKey::Down,
         Key::Named(NamedKey::ArrowLeft) => KKey::Left,
@@ -1217,6 +1218,12 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(window) = &self.window {
                             window.request_redraw();
                         }
+                    }
+                } else if let Some(text) = event.text.filter(|t| !t.is_empty()) {
+                    // ponytail: fallback para teclas que winit expone solo en text (IME, etc.)
+                    self.send_input(text.as_bytes().to_vec());
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
                     }
                 }
             }
