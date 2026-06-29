@@ -1,3 +1,5 @@
+pub mod keymap;
+
 /// Filtra bytes problematicos (ESC 0x1B, ETX 0x03) del texto pegado.
 /// Retorna Vec<u8> con los bytes filtrados, listos para enviar al PTY.
 // ponytail: solo filtra ESC y ETX por MVP. 0x1A y 0x04 por implementar si se requiere.
