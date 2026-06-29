@@ -229,4 +229,17 @@ mod tests {
         assert_eq!(parse_action("font_zoom_in"), Some(Action::FontZoomIn));
         assert_eq!(parse_action("desconocida"), None);
     }
+
+    #[test]
+    fn test_keybindings_from_overrides() {
+        let overrides = vec![("ctrl+shift+v".to_string(), "paste_primary".to_string())];
+        let kb = Keybindings::from_overrides(&overrides);
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(kb.lookup(Key::Char('v'), cs), Some(Action::PastePrimary));
+        assert_eq!(kb.lookup(Key::Char('c'), cs), Some(Action::Copy));
+    }
 }
