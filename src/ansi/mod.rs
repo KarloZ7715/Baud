@@ -163,7 +163,7 @@ pub struct Term {
     /// Tab stops por columna (true = parada activa).
     tab_stops: Vec<bool>,
     /// Keypad en modo aplicacion (DECKPAM/DECKPNM).
-    keypad_application_mode: bool,
+    pub keypad_application_mode: bool,
     /// DECCKM: application cursor keys (?1).
     pub app_cursor_keys: bool,
     /// DECOM: origin mode (?6), cursor relativo a scroll region.
@@ -178,6 +178,16 @@ fn default_tab_stops(cols: usize) -> Vec<bool> {
     let mut stops = vec![false; cols];
     for col in (8..cols).step_by(8) {
         stops[col] = true;
+    }
+    stops
+}
+
+fn resize_tab_stops(old: &[bool], new_cols: usize) -> Vec<bool> {
+    let mut stops = default_tab_stops(new_cols);
+    for (col, &set) in old.iter().enumerate().take(new_cols) {
+        if set {
+            stops[col] = true;
+        }
     }
     stops
 }
@@ -380,6 +390,26 @@ impl Term {
         }
     }
 
+    fn sm_decrqm_state(&self, mode: u16) -> u16 {
+        match mode {
+            4 => {
+                if self.insert_mode {
+                    1
+                } else {
+                    2
+                }
+            }
+            20 => {
+                if self.newline_mode {
+                    1
+                } else {
+                    2
+                }
+            }
+            _ => 0,
+        }
+    }
+
     /// Encola bytes de respuesta hacia el PTY.
     pub fn respond(&mut self, bytes: &[u8]) {
         self.pty_response.extend_from_slice(bytes);
@@ -501,7 +531,7 @@ impl Term {
         self.alt_grid.resize(new_rows, new_cols);
         self.scroll_region = (0, new_rows - 1);
         self.pending_wrap = false;
-        self.tab_stops = default_tab_stops(new_cols);
+        self.tab_stops = resize_tab_stops(&self.tab_stops, new_cols);
         self.mark_dirty();
     }
     fn adjust_cursor_after_resize(
@@ -748,6 +778,10 @@ impl vte::Perform for Term {
             let row = self.cursor.row;
             let col = self.cursor.col;
             {
+                if self.insert_mode {
+                    self.active_grid_mut()
+                        .insert_chars(row, col, c_width.max(1));
+                }
                 let active = self.active_grid_mut();
                 let cols = active.cols_count;
                 let wrote = active.cell(row, col).is_some();
@@ -858,6 +892,18 @@ impl vte::Perform for Term {
         _ignore: bool,
         action: char,
     ) {
+        if action == 'p' && intermediates == b"$" {
+            let mode = params
+                .iter()
+                .next()
+                .and_then(|p| p.first().copied())
+                .unwrap_or(0);
+            let state = self.sm_decrqm_state(mode);
+            let resp = format!("\x1b[{mode};{state}$y");
+            self.respond(resp.as_bytes());
+            return;
+        }
+
         if action == 'p' && intermediates == b"?$" {
             let mode = params
                 .iter()
@@ -908,14 +954,23 @@ impl vte::Perform for Term {
 
         if intermediates.is_empty() && (action == 'h' || action == 'l') {
             let set = action == 'h';
+            let mut handled = false;
             for p in params.iter() {
                 match p.first().copied().unwrap_or(0) {
-                    4 => self.insert_mode = set,
-                    20 => self.newline_mode = set,
+                    4 => {
+                        self.insert_mode = set;
+                        handled = true;
+                    }
+                    20 => {
+                        self.newline_mode = set;
+                        handled = true;
+                    }
                     _ => {}
                 }
             }
-            return;
+            if handled {
+                return;
+            }
         }
 
         // Mouse reporting SGR (intermediate == b"<"): CSI < Ps ; Ps ; Ps M o m.
@@ -1115,7 +1170,7 @@ impl vte::Perform for Term {
             'X' => {
                 let n = flat_params.first().copied().unwrap_or(1).max(1) as usize;
                 let (row, col) = (self.cursor.row, self.cursor.col);
-                let end = (col + n).min(self.grid.cols_count);
+                let end = (col + n).min(self.active_grid().cols_count);
                 self.active_grid_mut().clear_line(row, col, end);
                 self.pending_wrap = false;
             }
@@ -1360,6 +1415,50 @@ mod tests {
         feed(&mut term, b"ABC\x1b[1G\x1b[4hX");
         let fila: String = term.grid.rows[0].iter().take(4).map(|c| c.ch).collect();
         assert_eq!(fila, "XABC");
+    }
+
+    #[test]
+    fn test_irm_inserta_en_ruta_wide_char() {
+        let mut term = Term::new();
+        term.resize_grid(term.grid.rows_count, 10);
+        feed(&mut term, b"\x1b[2;1HZZZZ");
+        feed(&mut term, b"\x1b[1;10H\x1b[4h");
+        feed(&mut term, "\u{4e2d}".as_bytes());
+        assert_eq!(term.grid.rows[1][0].ch, '\u{4e2d}');
+        assert_eq!(term.grid.rows[1][2].ch, 'Z');
+    }
+
+    #[test]
+    fn test_decom_desplaza_fila_en_region() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[3;10r");
+        feed(&mut term, b"\x1b[?6h");
+        feed(&mut term, b"\x1b[1;1H");
+        assert_eq!(term.cursor.row, 2);
+    }
+
+    #[test]
+    fn test_dsr_responde_ok() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[5n");
+        assert_eq!(term.take_pty_response(), b"\x1b[0n");
+    }
+
+    #[test]
+    fn test_decrqm_modo_estandar_irm() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[4h");
+        feed(&mut term, b"\x1b[4$p");
+        assert_eq!(term.take_pty_response(), b"\x1b[4;1$y");
+    }
+
+    #[test]
+    fn test_tab_stops_preservados_en_resize() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[3G\x1bH");
+        term.resize_grid(term.grid.rows_count, term.grid.cols_count + 8);
+        feed(&mut term, b"\r\t");
+        assert_eq!(term.cursor.col, 2);
     }
 
     #[test]

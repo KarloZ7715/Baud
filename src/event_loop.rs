@@ -74,7 +74,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         term_guard.take_pty_response()
                     };
                     if !response.is_empty() {
-                        let _ = tx_response.send(PtyCommand::Input(response));
+                        if let Err(e) = tx_response.send(PtyCommand::Input(response)) {
+                            tracing::warn!(
+                                "drain: no se pudo reenviar respuesta PTY ({e}); query descartada"
+                            );
+                        }
                     }
                     tracing::trace!(
                         "drain: processed {} bytes: {:02x?}, sending RedrawNeeded",
