@@ -18,7 +18,7 @@ use crate::copy_mode::CopyModeState;
 use crate::event_loop::PtyCommand;
 use crate::grid::Cell;
 use crate::input::actions::{normalize_binding_key, Action, Keybindings};
-use crate::input::keymap::{self, Key as KKey, KeyModes, Mods};
+use crate::input::keymap::{self, Key as KKey, KeyEventKind, KeyModes, Mods};
 use crate::renderer::Renderer;
 use crate::selection::{Selection, SelectionMode, SelectionPoint};
 use crate::smart_select;
@@ -86,7 +86,7 @@ fn current_key_modes(term: &Arc<Mutex<Term>>) -> KeyModes {
             app_cursor_keys: g.app_cursor_keys,
             app_keypad: g.keypad_application_mode,
             newline_mode: g.newline_mode,
-            ..Default::default()
+            keyboard_flags: g.keyboard_flags,
         }
     } else {
         KeyModes::default()
@@ -1144,7 +1144,30 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             // Input de teclado completo: letras, Enter, Backspace, Tab, Ctrl+letter, etc.
-            // ponytail: input basico sin manejo de teclas especiales (menu, print screen).
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Released => {
+                let report_events = self
+                    .term
+                    .lock()
+                    .ok()
+                    .map(|g| g.keyboard_flags & 2 != 0)
+                    .unwrap_or(false);
+                if report_events {
+                    let mods = Mods {
+                        shift: self.modifiers.state().shift_key(),
+                        alt: self.modifiers.state().alt_key(),
+                        ctrl: self.modifiers.state().control_key(),
+                        sup: self.modifiers.state().super_key(),
+                    };
+                    if let Some(k) = winit_to_key(&event.logical_key) {
+                        let modes = current_key_modes(&self.term);
+                        if let Some(bytes) =
+                            keymap::encode_key_extended(k, mods, modes, KeyEventKind::Release)
+                        {
+                            self.send_input(bytes);
+                        }
+                    }
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let ctrl = self.modifiers.state().control_key();
                 let shift = self.modifiers.state().shift_key();
@@ -1210,9 +1233,21 @@ impl ApplicationHandler<UserEvent> for App {
                     _ => {}
                 }
 
-                // Fallback: keymap::encode_key (Alt/Meta, mods xterm, DECCKM).
+                // Fallback: encode_key_extended (CSI u) o encode_key clasico.
                 if let Some(k) = winit_to_key(&event.logical_key) {
                     let modes = current_key_modes(&self.term);
+                    let kind = if event.repeat {
+                        KeyEventKind::Repeat
+                    } else {
+                        KeyEventKind::Press
+                    };
+                    if let Some(bytes) = keymap::encode_key_extended(k, mods, modes, kind) {
+                        self.send_input(bytes);
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                        return;
+                    }
                     if let Some(bytes) = keymap::encode_key(k, mods, modes) {
                         self.send_input(bytes);
                         if let Some(window) = &self.window {
