@@ -1,0 +1,457 @@
+//! Renderer celda-determinista via `CustomGlyph` + `prepare_with_custom`.
+
+use glyphon::{
+    ContentType, CustomGlyph, RasterizeCustomGlyphRequest, RasterizedCustomGlyph, TextArea,
+    TextBounds, TextRenderer,
+};
+
+use crate::config::{parse_hex, ThemeConfig};
+
+fn parse_hex_color(hex: &str) -> glyphon::Color {
+    let (r, g, b) = parse_hex(hex);
+    glyphon::Color::rgb(r, g, b)
+}
+
+use super::decorations::{cursor_anchor_offset, underline_quad};
+use super::display_list::{resolve_fg_glyphon, CursorGlyph, DisplayList, TextGlyph, UnderlineQuad};
+use super::glyph_cache::GlyphCache;
+use super::limits::{self, MAX_CUSTOM_GLYPH_PIXELS};
+use super::metrics::CellMetrics;
+use super::selection_fg_glyphon;
+
+/// Id reservado para quads de fondo solido (mascara llena + color en CustomGlyph).
+pub const BG_SOLID_GLYPH_ID: u16 = 0;
+
+/// Convierte una display list en `CustomGlyph` y prepara el frame.
+pub struct CellRenderer;
+
+impl CellRenderer {
+    /// Rellena `out` con los CustomGlyph del grid (fondos + texto).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "GPU glyph build needs font + cache handles"
+    )]
+    pub fn build_custom_glyphs(
+        display_list: &DisplayList,
+        metrics: &CellMetrics,
+        theme: &ThemeConfig,
+        font_family: &str,
+        glyph_cache: &mut GlyphCache,
+        font_system: &mut glyphon::FontSystem,
+        swash_cache: &mut glyphon::SwashCache,
+        out: &mut Vec<CustomGlyph>,
+    ) -> Result<(), String> {
+        out.clear();
+        out.reserve(
+            display_list.bg_quads.len()
+                + display_list.underline_quads.len()
+                + display_list.text_glyphs.len()
+                + usize::from(display_list.cursor.is_some()),
+        );
+
+        for bg in &display_list.bg_quads {
+            let cg = bg_quad_to_custom(bg, metrics);
+            if limits::custom_pixels(cg.width, cg.height) <= MAX_CUSTOM_GLYPH_PIXELS {
+                out.push(cg);
+            }
+        }
+
+        for underline in &display_list.underline_quads {
+            out.push(underline_quad_to_custom(underline, metrics));
+        }
+
+        for &(row, col) in &display_list.cursor_bars {
+            out.push(super::decorations::bar_quad(
+                row,
+                col,
+                metrics,
+                parse_hex_color(&theme.cursor),
+            ));
+        }
+
+        for text in &display_list.text_glyphs {
+            if let Some(glyph) = text_glyph_to_custom(
+                text,
+                metrics,
+                theme,
+                font_family,
+                glyph_cache,
+                font_system,
+                swash_cache,
+            )? {
+                if limits::custom_pixels(glyph.width, glyph.height) <= MAX_CUSTOM_GLYPH_PIXELS {
+                    out.push(glyph);
+                }
+            }
+        }
+
+        if let Some(cursor) = &display_list.cursor {
+            if let Some(glyph) = cursor_glyph_to_custom(
+                cursor,
+                metrics,
+                theme,
+                font_family,
+                glyph_cache,
+                font_system,
+                swash_cache,
+            )? {
+                out.push(glyph);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Prepara text areas (grid custom glyphs + overlays) para GPU.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "glyphon prepare mirrors wgpu resource bundle"
+    )]
+    pub fn prepare(
+        custom_glyphs: &[CustomGlyph],
+        font_system: &mut glyphon::FontSystem,
+        swash_cache: &mut glyphon::SwashCache,
+        glyph_cache: &GlyphCache,
+        text_renderer: &mut TextRenderer,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas: &mut glyphon::TextAtlas,
+        viewport: &glyphon::Viewport,
+        empty_buffer: &glyphon::Buffer,
+        surface_width: u32,
+        surface_height: u32,
+        default_fg: glyphon::Color,
+        extra_areas: &[TextArea<'_>],
+    ) -> Result<(), String> {
+        let grid_area = TextArea {
+            buffer: empty_buffer,
+            left: 0.0,
+            top: 0.0,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: 0,
+                top: 0,
+                right: surface_width as i32,
+                bottom: surface_height as i32,
+            },
+            default_color: default_fg,
+            custom_glyphs,
+        };
+
+        let mut areas: Vec<TextArea<'_>> = Vec::with_capacity(1 + extra_areas.len());
+        areas.push(grid_area);
+        areas.extend_from_slice(extra_areas);
+
+        text_renderer
+            .prepare_with_custom(
+                device,
+                queue,
+                font_system,
+                atlas,
+                viewport,
+                areas,
+                swash_cache,
+                |request| rasterize_custom_glyph(request, glyph_cache),
+            )
+            .map_err(|e| format!("error al preparar cell renderer: {e}"))?;
+
+        Ok(())
+    }
+}
+
+fn bg_quad_to_custom(bg: &super::display_list::BgQuad, metrics: &CellMetrics) -> CustomGlyph {
+    let width = limits::clamp_custom_dimension(
+        metrics.cell_w * bg.width_cells.min(2) as f32,
+        metrics.cell_w,
+        2,
+    );
+    let height = limits::clamp_custom_dimension(metrics.cell_h, metrics.cell_h, 1);
+    CustomGlyph {
+        id: BG_SOLID_GLYPH_ID,
+        left: bg.col as f32 * metrics.cell_w,
+        top: bg.row as f32 * metrics.cell_h,
+        width,
+        height,
+        color: Some(bg.color),
+        snap_to_physical_pixel: true,
+        metadata: 0,
+    }
+}
+
+fn underline_quad_to_custom(underline: &UnderlineQuad, metrics: &CellMetrics) -> CustomGlyph {
+    underline_quad(
+        underline.row,
+        underline.col,
+        underline.width_cells,
+        metrics,
+        underline.color,
+    )
+}
+
+fn text_glyph_to_custom(
+    text: &TextGlyph,
+    metrics: &CellMetrics,
+    theme: &ThemeConfig,
+    font_family: &str,
+    glyph_cache: &mut GlyphCache,
+    font_system: &mut glyphon::FontSystem,
+    swash_cache: &mut glyphon::SwashCache,
+) -> Result<Option<CustomGlyph>, String> {
+    let cached = glyph_cache.get_or_insert(
+        font_system,
+        swash_cache,
+        metrics,
+        font_family,
+        text.glyph_key.clone(),
+    );
+
+    if cached.raster.missing {
+        return Ok(None);
+    }
+
+    let width = limits::clamp_custom_dimension(f32::from(cached.raster.width), metrics.cell_w, 2);
+    let height = limits::clamp_custom_dimension(f32::from(cached.raster.height), metrics.cell_h, 1);
+    if limits::custom_pixels(width, height) > MAX_CUSTOM_GLYPH_PIXELS {
+        return Ok(None);
+    }
+
+    let left = text.col as f32 * metrics.cell_w
+        + metrics.glyph_offset_x
+        + cached.raster.placement_left as f32;
+    // Misma formula que glyphon: round(line_y) + anchor_y - placement.top
+    let top = text.row as f32 * metrics.cell_h
+        + metrics.glyph_offset_y
+        + cached.shaped.line_y.round()
+        + cached.shaped.top
+        - cached.raster.placement_top as f32;
+
+    let fg_color = if text.selected {
+        selection_fg_glyphon(theme)
+    } else {
+        resolve_fg_glyphon(text.fg, text.dim, theme)
+    };
+
+    Ok(Some(CustomGlyph {
+        id: cached.custom_glyph_id,
+        left,
+        top,
+        width,
+        height,
+        color: Some(glyphon::Color::rgba(
+            fg_color.r(),
+            fg_color.g(),
+            fg_color.b(),
+            255,
+        )),
+        snap_to_physical_pixel: true,
+        metadata: 0,
+    }))
+}
+
+fn cursor_glyph_to_custom(
+    cursor: &CursorGlyph,
+    metrics: &CellMetrics,
+    theme: &ThemeConfig,
+    font_family: &str,
+    glyph_cache: &mut GlyphCache,
+    font_system: &mut glyphon::FontSystem,
+    swash_cache: &mut glyphon::SwashCache,
+) -> Result<Option<CustomGlyph>, String> {
+    let cached = glyph_cache.get_or_insert(
+        font_system,
+        swash_cache,
+        metrics,
+        font_family,
+        cursor.glyph_key.clone(),
+    );
+
+    if cached.raster.missing {
+        return Ok(None);
+    }
+
+    let width = limits::clamp_custom_dimension(f32::from(cached.raster.width), metrics.cell_w, 2);
+    let height = limits::clamp_custom_dimension(f32::from(cached.raster.height), metrics.cell_h, 1);
+    if limits::custom_pixels(width, height) > MAX_CUSTOM_GLYPH_PIXELS {
+        return Ok(None);
+    }
+
+    let (anchor_dx, anchor_dy) = cursor_anchor_offset(cursor.style, metrics, width, height);
+    let left = cursor.col as f32 * metrics.cell_w
+        + anchor_dx
+        + metrics.glyph_offset_x
+        + cached.raster.placement_left as f32;
+    let top = cursor.row as f32 * metrics.cell_h
+        + anchor_dy
+        + metrics.glyph_offset_y
+        + cached.shaped.line_y.round()
+        + cached.shaped.top
+        - cached.raster.placement_top as f32;
+
+    let (cur_r, cur_g, cur_b) = parse_hex(&theme.cursor);
+    let fg_color = glyphon::Color::rgb(cur_r, cur_g, cur_b);
+
+    Ok(Some(CustomGlyph {
+        id: cached.custom_glyph_id,
+        left,
+        top,
+        width,
+        height,
+        color: Some(fg_color),
+        snap_to_physical_pixel: true,
+        metadata: 0,
+    }))
+}
+
+fn rasterize_custom_glyph(
+    request: RasterizeCustomGlyphRequest,
+    glyph_cache: &GlyphCache,
+) -> Option<RasterizedCustomGlyph> {
+    if request.id == BG_SOLID_GLYPH_ID {
+        if request.width == 0 || request.height == 0 {
+            return None;
+        }
+        let len = limits::safe_mask_len(request.width, request.height)?;
+        return Some(RasterizedCustomGlyph {
+            data: vec![255u8; len],
+            content_type: ContentType::Mask,
+        });
+    }
+
+    let cached = glyph_cache.get_by_custom_id(request.id)?;
+    if cached.raster.missing {
+        let bpp = ContentType::Mask.bytes_per_pixel();
+        let len = request.width as usize * request.height as usize * bpp;
+        if len == 0 {
+            return None;
+        }
+        return Some(RasterizedCustomGlyph {
+            data: vec![0u8; len],
+            content_type: ContentType::Mask,
+        });
+    }
+
+    let content_type = cached.raster.content_type;
+    let (data, _, _) = super::glyph_cache::normalize_raster_bytes(
+        &cached.raster.data,
+        request.width as u32,
+        request.height as u32,
+        content_type,
+    );
+    let expected =
+        request.width as usize * request.height as usize * content_type.bytes_per_pixel();
+    if expected == 0 || data.len() != expected {
+        return None;
+    }
+
+    Some(RasterizedCustomGlyph { data, content_type })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ansi::Color;
+    use crate::config::FontConfig;
+
+    use super::super::display_list::BgQuad;
+    use super::super::glyph::GlyphKey;
+    use super::super::terminal_fallback::create_font_system;
+
+    fn test_metrics() -> (glyphon::FontSystem, CellMetrics) {
+        let mut font_system = create_font_system();
+        let font_config = FontConfig::default();
+        let metrics = CellMetrics::measure(
+            &mut font_system,
+            &font_config.family,
+            font_config.size as f32,
+            font_config.line_height,
+            font_config.glyph_offset,
+        );
+        (font_system, metrics)
+    }
+
+    #[test]
+    fn bg_quad_uses_solid_glyph_id() {
+        let metrics = CellMetrics {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            font_size: 14.0,
+            baseline_y: 14.0,
+            glyph_offset_x: 0.0,
+            glyph_offset_y: 0.0,
+        };
+        let bg = BgQuad {
+            row: 1,
+            col: 2,
+            width_cells: 1,
+            color: glyphon::Color::rgb(255, 0, 0),
+        };
+        let cg = bg_quad_to_custom(&bg, &metrics);
+        assert_eq!(cg.id, BG_SOLID_GLYPH_ID);
+        assert_eq!(cg.left, 20.0);
+        assert_eq!(cg.top, 20.0);
+        assert_eq!(cg.width, 10.0);
+        assert_eq!(cg.height, 20.0);
+    }
+
+    #[test]
+    fn rasterize_solid_bg_produces_mask() {
+        let request = RasterizeCustomGlyphRequest {
+            id: BG_SOLID_GLYPH_ID,
+            width: 4,
+            height: 2,
+            x_bin: glyphon::SubpixelBin::Zero,
+            y_bin: glyphon::SubpixelBin::Zero,
+            scale: 1.0,
+        };
+        let cache = GlyphCache::new();
+        let out = rasterize_custom_glyph(request, &cache).expect("solid bg");
+        assert_eq!(out.content_type, ContentType::Mask);
+        assert_eq!(out.data.len(), 8);
+        assert!(out.data.iter().all(|&b| b == 255));
+    }
+
+    #[test]
+    fn text_glyph_to_custom_resolves_cache_id() {
+        let (mut font_system, metrics) = test_metrics();
+        let mut swash_cache = glyphon::SwashCache::new();
+        let font_config = FontConfig::default();
+        let mut cache = GlyphCache::new();
+        let theme = ThemeConfig::default();
+
+        let text = TextGlyph {
+            row: 0,
+            col: 0,
+            width_cells: 1,
+            glyph_key: GlyphKey {
+                ch: 'A',
+                bold: false,
+                italic: false,
+                dim: false,
+                family: font_config.family.clone(),
+            },
+            fg: Color::Default,
+            dim: false,
+            custom_id: 0,
+            selected: false,
+        };
+
+        let cg = text_glyph_to_custom(
+            &text,
+            &metrics,
+            &theme,
+            &font_config.family,
+            &mut cache,
+            &mut font_system,
+            &mut swash_cache,
+        )
+        .expect("ok")
+        .expect("Some glyph");
+
+        assert!(
+            cg.id >= 1,
+            "ids de texto empiezan en 1 (0 reservado para bg)"
+        );
+        assert!(cg.width >= 1.0);
+        assert!(cg.height >= 1.0);
+    }
+}

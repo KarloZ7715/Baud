@@ -1,5 +1,7 @@
 pub mod ansi;
+pub mod clipboard;
 pub mod config;
+pub mod copy_mode;
 pub mod cursor;
 pub mod event_loop;
 pub mod grid;
@@ -7,4 +9,5 @@ pub mod input;
 pub mod pty;
 pub mod renderer;
 pub mod selection;
+pub mod smart_select;
 pub mod window;

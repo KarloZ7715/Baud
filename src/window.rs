@@ -12,14 +12,18 @@ use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
 
 use crate::ansi::Term;
+use crate::clipboard::{self, CopyTarget};
 use crate::config::Config;
+use crate::copy_mode::CopyModeState;
 use crate::event_loop::PtyCommand;
 use crate::grid::Cell;
 use crate::renderer::Renderer;
 use crate::selection::{Selection, SelectionMode, SelectionPoint};
+use crate::smart_select;
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
 use winit::event::MouseButton;
+use winit::event::MouseScrollDelta;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
@@ -58,6 +62,8 @@ pub struct App {
     window_height: f32,
     /// Instant del último click izquierdo (para detectar doble/triple click).
     last_click_time: Option<Instant>,
+    /// Ultima celda reportada al PTY en mouse motion (evita flood por pixel).
+    last_reported_cell: Option<(usize, usize)>,
 }
 
 impl App {
@@ -80,39 +86,45 @@ impl App {
             window_width: 800.0,
             window_height: 600.0,
             last_click_time: None,
+            last_reported_cell: None,
         }
     }
 
-    /// Copia texto al clipboard del sistema usando wl-copy (Wayland nativo).
-    /// Pasa el texto por stdin para evitar limites de argumentos en CLI.
+    /// Copia texto al clipboard del sistema (delegado a clipboard.rs).
     fn set_clipboard(&self, text: &str) {
-        tracing::info!("set_clipboard: INICIANDO con {} bytes", text.len());
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-        let mut child = match Command::new("wl-copy")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(c) => {
-                tracing::info!("set_clipboard: wl-copy spawned OK");
-                c
-            }
-            Err(e) => {
-                tracing::warn!("set_clipboard: wl-copy NO se pudo spawn: {e}");
-                return;
-            }
+        tracing::info!("set_clipboard: {} bytes", text.len());
+        clipboard::set(text, false);
+    }
+
+    /// Sincroniza grid emulado y PTY con el tamano de ventana en pixeles.
+    fn sync_grid_to_window(
+        &self,
+        width: u32,
+        height: u32,
+        cell_w: f32,
+        cell_h: f32,
+    ) -> (usize, usize, usize, usize) {
+        let (new_rows, new_cols) =
+            crate::renderer::limits::compute_grid_dims(width, height, cell_w, cell_h);
+        let (old_rows, old_cols) = if let Ok(guard) = self.term.lock() {
+            let active = guard.active_grid();
+            (active.rows_count, active.cols_count)
+        } else {
+            (new_rows, new_cols)
         };
-        if let Some(mut stdin) = child.stdin.take() {
-            match stdin.write_all(text.as_bytes()) {
-                Ok(_) => tracing::info!("set_clipboard: datos escritos en stdin OK"),
-                Err(e) => tracing::warn!("set_clipboard: error escribiendo stdin: {e}"),
-            }
-            drop(stdin);
+        if let Ok(mut guard) = self.term.lock() {
+            guard.resize_grid(new_rows, new_cols);
+            guard.scrollback_offset = 0;
         }
-        let wait_result = child.wait();
-        tracing::info!("set_clipboard: wl-copy termino con: {:?}", wait_result);
+        if old_rows != new_rows || old_cols != new_cols {
+            if let Some(tx) = self.pty_tx.lock().ok().and_then(|g| g.as_ref().cloned()) {
+                let _ = tx.send(PtyCommand::Resize {
+                    rows: new_rows as u16,
+                    cols: new_cols as u16,
+                });
+            }
+        }
+        (old_rows, old_cols, new_rows, new_cols)
     }
 
     /// Copia al clipboard: si hay selección activa, copia solo la selección;
@@ -166,48 +178,86 @@ impl App {
         }
     }
 
+    /// Expande la selección tras un doble clic: smart (URL/path/email) si está
+    /// activado en config, si no expand_to_word clásico.
+    fn expand_double_click(
+        &self,
+        sel: &mut Selection,
+        row_cells: &Option<Vec<Cell>>,
+        col: usize,
+        abs_row: usize,
+        _cols_count: usize,
+    ) {
+        let Some(cells) = row_cells else { return };
+        if self.config.selection.smart_selection {
+            if let Some(range) =
+                smart_select::expand_smart(cells, col, &self.config.selection.word_delimiters)
+            {
+                sel.start.row = abs_row;
+                sel.end.row = abs_row;
+                sel.start.col = range.start;
+                sel.end.col = range.end;
+                sel.mode = SelectionMode::Smart;
+                return;
+            }
+        }
+        sel.expand_to_word(cells, col);
+        sel.mode = SelectionMode::Word;
+    }
+
+    /// copy_on_select: copia la selección actual al destino configurado.
+    fn copy_selection_on_release(&self) {
+        let text = match self.term.lock() {
+            Ok(g) => g.selected_text(),
+            Err(_) => return,
+        };
+        if text.is_empty() {
+            return;
+        }
+        let target = CopyTarget::parse(&self.config.selection.copy_on_select_target);
+        target.write(&text);
+    }
+
     /// Obtiene texto del clipboard del sistema, lo filtra y lo envia al PTY.
     /// Usa wl-paste (Wayland nativo).
     /// Si bracketed paste mode (DEC 2004) esta activo, envuelve el texto en
     /// \x1b[200~...\x1b[201~ para que readline no ejecute comandos al pegar.
     fn handle_paste(&mut self) {
         tracing::debug!("handle_paste: iniciando");
-        // Obtener texto via wl-paste (Wayland nativo).
-        // ponytail: wl-paste debe estar instalado (parte de wl-clipboard).
-        let output = match std::process::Command::new("wl-paste").output() {
-            Ok(o) if o.status.success() => o,
-            _ => {
-                tracing::warn!("handle_paste: wl-paste fallo o no disponible");
-                return;
-            }
-        };
-        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        let text = clipboard::get(false);
+        self.paste_text(&text);
+    }
+
+    /// Pega desde la primary selection (botón medio del mouse).
+    fn handle_paste_primary(&mut self) {
+        tracing::debug!("handle_paste_primary: iniciando");
+        let text = clipboard::get(true);
+        self.paste_text(&text);
+    }
+
+    /// Filtra y envía texto pegado al PTY (con bracketing si aplica).
+    fn paste_text(&mut self, text: &str) {
+        if text.is_empty() {
+            tracing::debug!("paste_text: vacio, ignorar");
+            return;
+        }
         tracing::info!(
-            "handle_paste: wl-paste devolvio {} bytes: {:?}",
+            "paste_text: {} bytes: {:?}",
             text.len(),
             &text[..text.len().min(60)]
         );
-        // Eliminar newline final que wl-paste suele incluir.
-        // ponytail: trim_end_matches('\n') es mas compatible que --trim-newline.
         let text = text.trim_end_matches('\n').to_string();
-
-        // Verificar si bracketed paste mode esta activo para evitar que
-        // el texto pegado se ejecute como comandos al contener newlines.
         let bracketed = self
             .term
             .lock()
             .ok()
             .map(|t| t.bracketed_paste)
             .unwrap_or(false);
-
-        // Filtrar y (si aplica) envolver en marcadores DEC 2004.
         let filtered = if bracketed {
-            tracing::debug!("handle_paste: bracketed paste activo, envolviendo texto");
             crate::input::paste_with_bracketing(&text, true)
         } else {
             crate::input::paste_text(&text)
         };
-        tracing::debug!("handle_paste: {} bytes filtrados", filtered.len());
         if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
             let _ = tx.send(PtyCommand::Input(filtered));
         }
@@ -220,8 +270,10 @@ impl App {
             if guard.scrollback_offset > 0 {
                 guard.scrollback_offset = 0;
             }
-            // Limpiar seleccion al escribir teclas
-            guard.clear_selection();
+            // Limpiar seleccion al escribir teclas (no en copy mode).
+            if guard.copy_mode.is_none() {
+                guard.clear_selection();
+            }
         }
         tracing::debug!("send_input: {} bytes: {:02x?}", bytes.len(), bytes);
         if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
@@ -229,20 +281,26 @@ impl App {
         }
     }
 
-    /// Extiende la seleccion con teclado (Shift+arrow), estilo Alacritty.
+    /// Extiende la seleccion con teclado (Shift+arrow).
     /// Si no hay seleccion, crea una desde la posicion del cursor.
     fn extend_selection(&self, drow: isize, dcol: isize) {
         if let Ok(mut guard) = self.term.lock() {
             let cols_count = guard.grid.cols_count;
-            let rows_count = guard.grid.rows_count;
+            let sb_len = if guard.alt_screen {
+                0
+            } else {
+                guard.grid.scrollback.len()
+            };
+            let total_rows = sb_len + guard.grid.rows_count;
+            let max_row = total_rows.saturating_sub(1);
 
-            // Crear seleccion desde el cursor si no existe
+            // Crear seleccion desde el cursor si no existe (coordenadas absolutas).
             if guard.selection.is_none() {
-                let cur_row = guard.cursor.row;
+                let abs_row = guard.cursor_logical_row();
                 let cur_col = guard.cursor.col;
-                if cur_row < rows_count {
+                if abs_row < total_rows {
                     guard.selection = Some(Selection::new(SelectionPoint {
-                        row: cur_row,
+                        row: abs_row,
                         col: cur_col,
                     }));
                 } else {
@@ -250,7 +308,6 @@ impl App {
                 }
             }
 
-            // Calcular nuevo end point (sin mantener el borrow a sel)
             let (old_row, old_col) = guard
                 .selection
                 .as_ref()
@@ -260,7 +317,7 @@ impl App {
             let mut new_row = old_row as isize + drow;
             let mut new_col = old_col as isize + dcol;
 
-            // Wrap horizontal
+            // Wrap horizontal entre filas absolutas adyacentes.
             if new_col < 0 {
                 new_col = (cols_count - 1) as isize;
                 new_row -= 1;
@@ -269,32 +326,171 @@ impl App {
                 new_row += 1;
             }
 
-            // Wrap vertical + scrollback
-            if new_row < 0 && !guard.alt_screen {
-                let max_offset = guard.scrollback_len();
-                if guard.scrollback_offset < max_offset as isize {
-                    guard.scrollback_offset += 1;
-                    new_row = 0;
-                } else {
-                    new_row = 0;
-                }
-            } else if new_row >= rows_count as isize {
-                if guard.scrollback_offset > 0 {
-                    guard.scrollback_offset -= 1;
-                    new_row = (rows_count - 1) as isize;
-                } else {
-                    new_row = (rows_count - 1) as isize;
-                }
-            }
+            new_row = new_row.clamp(0, max_row as isize);
+            new_col = new_col.clamp(0, (cols_count.saturating_sub(1)) as isize);
 
-            // Actualizar end point
             if let Some(ref mut sel) = guard.selection {
-                sel.end.row = new_row.max(0) as usize;
-                sel.end.col = new_col.max(0) as usize;
+                sel.end.row = new_row as usize;
+                sel.end.col = new_col as usize;
             }
+            guard.scroll_to_show_logical_row(new_row as usize);
+            guard.mark_dirty();
         }
         if let Some(window) = &self.window {
             window.request_redraw();
+        }
+    }
+
+    /// Maneja una tecla en copy mode. Devuelve true si la tecla fue consumida
+    /// (navegación, selección, salir). Flechas mueven; Shift+flechas extienden;
+    /// q/Esc salen; `y` copia y sale (vim-style).
+    fn handle_copy_mode_key(&mut self, event: &winit::event::KeyEvent, shift: bool) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+        let (drow, dcol) = match &event.logical_key {
+            Key::Named(NamedKey::ArrowLeft) => (0, -1),
+            Key::Named(NamedKey::ArrowRight) => (0, 1),
+            Key::Named(NamedKey::ArrowUp) => (-1, 0),
+            Key::Named(NamedKey::ArrowDown) => (1, 0),
+            Key::Character(c) if !shift => match c.as_str() {
+                "h" => (0, -1),
+                "l" => (0, 1),
+                "k" => (-1, 0),
+                "j" => (1, 0),
+                _ => (0, 0),
+            },
+            _ => (0, 0),
+        };
+
+        let mut exit = false;
+        let mut copy_and_exit = false;
+        if let Ok(mut guard) = self.term.lock() {
+            // Salir con q o Esc.
+            match &event.logical_key {
+                Key::Character(c) if c == "q" => exit = true,
+                Key::Named(NamedKey::Escape) => exit = true,
+                Key::Character(c) if c == "y" => copy_and_exit = true,
+                _ => {}
+            }
+            if exit {
+                CopyModeState::exit(&mut guard);
+                return true;
+            }
+            if copy_and_exit {
+                // Copiar selección actual y salir.
+                let text = guard.selected_text();
+                if !text.is_empty() {
+                    drop(guard);
+                    clipboard::set(&text, false);
+                    if let Ok(mut g2) = self.term.lock() {
+                        CopyModeState::exit(&mut g2);
+                    }
+                } else if let Ok(mut g2) = self.term.lock() {
+                    CopyModeState::exit(&mut g2);
+                }
+                return true;
+            }
+
+            if drow != 0 || dcol != 0 {
+                if let Some(cm) = guard.copy_mode.take() {
+                    let mut cm = cm;
+                    cm.move_cursor(&mut guard, drow, dcol, shift);
+                    guard.copy_mode = Some(cm);
+                }
+            }
+        }
+        drow != 0 || dcol != 0
+    }
+
+    /// Envia bytes al PTY sin efectos secundarios (seleccion, scrollback).
+    fn send_pty_bytes(&self, bytes: Vec<u8>) {
+        tracing::debug!("send_pty_bytes: {} bytes: {:02x?}", bytes.len(), bytes);
+        if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
+            let _ = tx.send(PtyCommand::Input(bytes));
+        }
+    }
+
+    /// Coordenadas de celda (row, col) desde la ultima posicion del mouse.
+    fn mouse_cell_coords(&self, renderer: &Renderer) -> (usize, usize) {
+        let col = (self.mouse_x.max(0.0) as f32 / renderer.cell_w) as usize;
+        let row = (self.mouse_y.max(0.0) as f32 / renderer.cell_h) as usize;
+        (row, col)
+    }
+
+    /// Baud maneja seleccion local; si la app pidio mouse reporting, forward al PTY.
+    /// Modificadores de bypass configurables
+    /// Default: ["shift"]. Alt queda libre para selección en bloque.
+    fn local_selection_active(&self, mouse_reporting: &crate::ansi::MouseReporting) -> bool {
+        let mods = self.modifiers.state();
+        let cfg = &self.config.selection;
+        if (mods.shift_key() && cfg.bypass_contains("shift"))
+            || (mods.alt_key() && cfg.bypass_contains("alt"))
+            || (mods.control_key() && cfg.bypass_contains("ctrl"))
+        {
+            return true;
+        }
+        !mouse_reporting.is_active()
+    }
+
+    /// True si Alt está presionado (modificador de selección en bloque).
+    fn block_selection_active(&self) -> bool {
+        self.modifiers.state().alt_key()
+    }
+
+    /// Solo reenviar eventos de mouse a la app (no seleccion local).
+    fn should_forward_mouse_to_app(&self) -> bool {
+        if let Ok(guard) = self.term.lock() {
+            return guard.mouse_reporting.is_active()
+                && !self.local_selection_active(&guard.mouse_reporting);
+        }
+        false
+    }
+
+    fn encode_mouse_report(
+        reporting: &crate::ansi::MouseReporting,
+        button: u8,
+        col: usize,
+        row: usize,
+        release: bool,
+    ) -> Vec<u8> {
+        let x = col + 1;
+        let y = row + 1;
+        if reporting.sgr {
+            let suffix = if release { 'm' } else { 'M' };
+            format!("\x1b[<{};{};{}{}", button, x, y, suffix).into_bytes()
+        } else {
+            let b = if release { button + 3 } else { button } + 0x20;
+            vec![0x1b, b'M', b, (x + 0x20) as u8, (y + 0x20) as u8]
+        }
+    }
+
+    fn forward_mouse_button(&self, button: u8, release: bool) {
+        let Some(renderer) = &self.renderer else {
+            return;
+        };
+        let (row, col) = self.mouse_cell_coords(renderer);
+        if let Ok(guard) = self.term.lock() {
+            if !guard.mouse_reporting.is_active() {
+                return;
+            }
+            let bytes =
+                Self::encode_mouse_report(&guard.mouse_reporting, button, col, row, release);
+            drop(guard);
+            self.send_pty_bytes(bytes);
+        }
+    }
+
+    fn forward_mouse_motion(&self, button: u8) {
+        let Some(renderer) = &self.renderer else {
+            return;
+        };
+        let (row, col) = self.mouse_cell_coords(renderer);
+        if let Ok(guard) = self.term.lock() {
+            if !guard.mouse_reporting.reports_motion() {
+                return;
+            }
+            let bytes = Self::encode_mouse_report(&guard.mouse_reporting, button, col, row, false);
+            drop(guard);
+            self.send_pty_bytes(bytes);
         }
     }
 }
@@ -309,8 +505,14 @@ impl ApplicationHandler<UserEvent> for App {
         // 1. Crear ventana.
         let attrs = Window::default_attributes()
             .with_title("baud")
-            .with_transparent(true) // NUEVO: transparencia para alpha blending
             .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0));
+        // Solo activar transparencia si la opacidad es < 1.0
+        let opacity = self.config.window.opacity;
+        let attrs = if opacity < 1.0 {
+            attrs.with_transparent(true)
+        } else {
+            attrs
+        };
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -351,9 +553,16 @@ impl ApplicationHandler<UserEvent> for App {
         .expect("no se pudo crear el device GPU");
 
         let size = window.inner_size();
-        let config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
+        let surface_w = size.width.clamp(1, 16_384);
+        let surface_h = size.height.clamp(1, 16_384);
+        let mut config = surface
+            .get_default_config(&adapter, surface_w, surface_h)
             .expect("no se encontro formato de surface compatible");
+        // Si hay transparencia, asegurar que el alpha mode sea compatible
+        if opacity < 1.0 {
+            config.alpha_mode = wgpu::CompositeAlphaMode::Auto;
+            config.view_formats = vec![config.format.add_srgb_suffix()];
+        }
         surface.configure(&device, &config);
 
         // 4. Crear Renderer.
@@ -364,9 +573,13 @@ impl ApplicationHandler<UserEvent> for App {
             surface,
             config,
             &self.config.font,
-            &self.config.window,
         ));
         tracing::info!("renderer inicializado");
+
+        let size = window.inner_size();
+        if let Some(renderer) = &self.renderer {
+            self.sync_grid_to_window(size.width, size.height, renderer.cell_w, renderer.cell_h);
+        }
 
         // 5. Forzar el primer redraw para que winit dispare RedrawRequested.
         // Sin esto, la ventana queda vacia hasta que el drain envie bytes
@@ -391,97 +604,93 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Resized(new_size) => {
                 self.window_width = new_size.width as f32;
                 self.window_height = new_size.height as f32;
-                if let Some(renderer) = &mut self.renderer {
-                    let new_rows = (new_size.height as f32 / renderer.cell_h).max(1.0) as usize;
-                    let new_cols = (new_size.width as f32 / renderer.cell_w).max(1.0) as usize;
-                    tracing::info!(
-                        "[RESIZE] cell_h={:.1} cell_w={:.1} win={}x{} -> grid={}x{}",
-                        renderer.cell_h,
-                        renderer.cell_w,
-                        new_size.width,
-                        new_size.height,
-                        new_rows,
-                        new_cols,
+                let Some(renderer) = &mut self.renderer else {
+                    return;
+                };
+                renderer.resize(new_size.width, new_size.height, 0);
+                let cell_w = renderer.cell_w;
+                let cell_h = renderer.cell_h;
+                let (_old_rows, _old_cols, new_rows, new_cols) =
+                    self.sync_grid_to_window(new_size.width, new_size.height, cell_w, cell_h);
+                tracing::debug!(
+                    "[RESIZE] cell_h={:.1} cell_w={:.1} win={}x{} -> grid={}x{}",
+                    cell_h,
+                    cell_w,
+                    new_size.width,
+                    new_size.height,
+                    new_rows,
+                    new_cols,
+                );
+                if let Ok(guard) = self.term.lock() {
+                    let g = guard.active_grid();
+                    let n = g.rows.len().min(5);
+                    let mut summary_top = String::new();
+                    for r in 0..n {
+                        let s: String = g.rows[r].iter().take(20).map(|c| c.ch).collect();
+                        let cont = if r < g.row_continuations.len() && g.row_continuations[r] {
+                            "~"
+                        } else {
+                            "|"
+                        };
+                        summary_top.push_str(&format!("{}{}", cont, s));
+                    }
+                    let rows_len = g.rows.len();
+                    let mut summary_bot = String::new();
+                    let bot_start = rows_len.saturating_sub(5);
+                    for r in bot_start..rows_len {
+                        let s: String = g.rows[r].iter().take(20).map(|c| c.ch).collect();
+                        let cont = if r < g.row_continuations.len() && g.row_continuations[r] {
+                            "~"
+                        } else {
+                            "|"
+                        };
+                        summary_bot.push_str(&format!("{}{}", cont, s));
+                    }
+                    let non_empty = g
+                        .rows
+                        .iter()
+                        .filter(|r| r.iter().any(|c| *c != Cell::default()))
+                        .count();
+                    tracing::debug!(
+                        "[RESIZE] grid: {}x{} sb={} filled={}/{} top=[{}] bot=[{}]",
+                        g.rows_count,
+                        g.cols_count,
+                        guard.grid.scrollback.len(),
+                        non_empty,
+                        rows_len,
+                        summary_top,
+                        summary_bot,
                     );
-                    renderer.resize(new_size.width, new_size.height, new_rows);
-                    if let Ok(mut guard) = self.term.lock() {
-                        guard.resize_grid(new_rows, new_cols);
-                        guard.scrollback_offset = 0;
-                        // Log grid state after reflow
-                        let g = &guard.grid;
-                        let n = g.rows.len().min(5);
-                        let mut summary_top = String::new();
-                        for r in 0..n {
-                            let s: String = g.rows[r].iter().take(20).map(|c| c.ch).collect();
-                            let cont = if r < g.row_continuations.len() && g.row_continuations[r] {
-                                "~"
-                            } else {
-                                "|"
-                            };
-                            summary_top.push_str(&format!("{}{}", cont, s));
-                        }
-                        let mut summary_bot = String::new();
-                        let rows_len = g.rows.len();
-                        let bot_start = rows_len.saturating_sub(5);
-                        for r in bot_start..rows_len {
-                            let s: String = g.rows[r].iter().take(20).map(|c| c.ch).collect();
-                            let cont = if r < g.row_continuations.len() && g.row_continuations[r] {
-                                "~"
-                            } else {
-                                "|"
-                            };
-                            summary_bot.push_str(&format!("{}{}", cont, s));
-                        }
-                        let non_empty = g
-                            .rows
-                            .iter()
-                            .filter(|r| r.iter().any(|c| *c != Cell::default()))
-                            .count();
-                        tracing::info!(
-                            "[RESIZE] grid: {}x{} sb={} filled={}/{} top=[{}] bot=[{}]",
-                            g.rows_count,
-                            g.cols_count,
-                            g.scrollback.len(),
-                            non_empty,
-                            rows_len,
-                            summary_top,
-                            summary_bot,
-                        );
-                    }
-                    // Enviar resize al hilo PTY solo si el ancho cambio.
-                    // Si solo cambio el alto, bash re-ecoe el prompt y daña el
-                    // orden del contenido recuperado del scrollback.
-                    if let Ok(old_guard) = self.term.lock() {
-                        let old_cols = old_guard.grid.cols_count;
-                        if old_cols != new_cols {
-                            drop(old_guard);
-                            if let Some(tx) =
-                                self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref()
-                            {
-                                let _ = tx.send(PtyCommand::Resize {
-                                    rows: new_rows as u16,
-                                    cols: new_cols as u16,
-                                });
-                            }
-                        }
-                    }
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
                 }
             }
             WindowEvent::RedrawRequested => {
                 let Some(renderer) = &mut self.renderer else {
                     return;
                 };
-                tracing::debug!("RedrawRequested: renderizando frame");
-                // Lockear el term directamente; el campo es solo lectura aqui.
-                let term_guard = match self.term.lock() {
+                let mut term_guard = match self.term.lock() {
                     Ok(g) => g,
                     Err(poisoned) => {
                         tracing::warn!("term mutex poisoned: {poisoned}");
                         return;
                     }
                 };
-                if let Err(e) = renderer.render(&term_guard, &self.config.theme) {
+                if !term_guard.dirty && !renderer.status_overlay_active() {
+                    tracing::debug!("RedrawRequested: skip (nothing dirty)");
+                    return;
+                }
+                term_guard.take_dirty();
+                tracing::debug!("RedrawRequested: renderizando frame");
+                if let Err(e) = renderer.render(&mut term_guard, &self.config.theme) {
                     tracing::warn!("error al renderizar: {e}");
+                }
+                // Actualizar título de ventana si cambió vía OSC 0/1/2
+                if let Some(ref title) = term_guard.window_title {
+                    if let Some(window) = &self.window {
+                        window.set_title(title);
+                    }
                 }
             }
             // Track modifier state (Ctrl, Shift, Alt, etc.) for keyboard shortcuts.
@@ -511,10 +720,36 @@ impl ApplicationHandler<UserEvent> for App {
                 self.mouse_x = position.x;
                 self.mouse_y = position.y;
 
+                if self.should_forward_mouse_to_app() {
+                    let mouse_down = self.mouse_down.load(Ordering::Relaxed);
+                    if let Ok(guard) = self.term.lock() {
+                        let reporting = guard.mouse_reporting;
+                        if reporting.reports_motion() {
+                            let (row, col) = self.mouse_cell_coords(renderer);
+                            let cell = (row, col);
+                            if mouse_down && reporting.drag {
+                                drop(guard);
+                                if self.last_reported_cell != Some(cell) {
+                                    self.last_reported_cell = Some(cell);
+                                    self.forward_mouse_motion(32);
+                                }
+                            } else if reporting.any_motion {
+                                drop(guard);
+                                if self.last_reported_cell != Some(cell) {
+                                    self.last_reported_cell = Some(cell);
+                                    self.forward_mouse_motion(35);
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+
                 if self.mouse_down.load(Ordering::Relaxed) {
                     let visible_rows = (self.window_height / renderer.cell_h) as usize;
                     // Determinar si el mouse esta fuera del viewport
-                    let (row, col, needs_scroll_up, needs_scroll_down) = if position.y < 0.0 {
+                    let (visible_row, col, needs_scroll_up, needs_scroll_down) = if position.y < 0.0
+                    {
                         // Mouse arriba del viewport → scroll up, seleccion en row 0
                         (0usize, 0usize, true, false)
                     } else if position.y as f32 >= self.window_height {
@@ -539,12 +774,14 @@ impl ApplicationHandler<UserEvent> for App {
                                 guard.scrollback_offset = (guard.scrollback_offset - 1).max(0);
                             }
                         }
+                        let abs_row = guard.visible_to_logical_row(visible_row);
                         if let Some(ref mut sel) = guard.selection {
-                            sel.update_end(SelectionPoint { row, col });
+                            sel.update_end(SelectionPoint { row: abs_row, col });
                         }
-                        tracing::info!(
-                            "CursorMoved: mouse_drag row={} col={} scrollback_offset={}",
-                            row,
+                        guard.mark_dirty();
+                        tracing::debug!(
+                            "CursorMoved: mouse_drag visible_row={} col={} scrollback_offset={}",
+                            visible_row,
                             col,
                             guard.scrollback_offset
                         );
@@ -580,6 +817,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     }
                                     guard.scrollback_offset =
                                         (guard.scrollback_offset + 1).min(max_offset as isize);
+                                    guard.mark_dirty();
                                 }
                                 win_clone.request_redraw();
                                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -599,6 +837,31 @@ impl ApplicationHandler<UserEvent> for App {
                     self.mouse_x,
                     self.mouse_y,
                 );
+
+                if self.should_forward_mouse_to_app() {
+                    let btn = match button {
+                        MouseButton::Left => 0,
+                        MouseButton::Middle => 1,
+                        MouseButton::Right => 2,
+                        _ => return,
+                    };
+                    let release = state == ElementState::Released;
+                    self.forward_mouse_button(btn, release);
+                    if button == MouseButton::Left {
+                        self.mouse_down.store(!release, Ordering::Relaxed);
+                        if release {
+                            self.last_reported_cell = None;
+                        }
+                    }
+                    return;
+                }
+
+                // Middle-click: pegar primary selection.
+                if button == MouseButton::Middle && state == ElementState::Pressed {
+                    self.handle_paste_primary();
+                    return;
+                }
+
                 if button == MouseButton::Left {
                     let Some(renderer) = &self.renderer else {
                         tracing::warn!("MouseInput(Left): renderer no disponible");
@@ -611,9 +874,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 return;
                             }
                             let col = (self.mouse_x as f32 / renderer.cell_w) as usize;
-                            let row = (self.mouse_y as f32 / renderer.cell_h) as usize;
-                            let point = SelectionPoint { row, col };
+                            let visible_row = (self.mouse_y as f32 / renderer.cell_h) as usize;
                             let shift = self.modifiers.state().shift_key();
+                            let block = self.block_selection_active();
                             let now = Instant::now();
                             let is_rapid = self
                                 .last_click_time
@@ -621,37 +884,41 @@ impl ApplicationHandler<UserEvent> for App {
                                 .unwrap_or(false);
 
                             if let Ok(mut guard) = self.term.lock() {
-                                if shift && guard.selection.is_some() {
+                                let abs_row = guard.visible_to_logical_row(visible_row);
+                                let point = SelectionPoint { row: abs_row, col };
+                                if block {
+                                    // Alt+click: seleccion rectangular.
+                                    let mut sel = Selection::new(point);
+                                    sel.mode = SelectionMode::Block;
+                                    guard.selection = Some(sel);
+                                } else if shift && guard.selection.is_some() {
                                     // Shift+click: extender seleccion existente
                                     if let Some(ref mut sel) = guard.selection {
                                         sel.update_end(point);
                                     }
                                 } else if is_rapid {
                                     let cols_count = guard.grid.cols_count;
-                                    let row_cells: Option<Vec<Cell>> =
-                                        guard.active_grid().rows.get(row).cloned();
+                                    let row_cells = guard.row_cells_at_logical(abs_row);
                                     let mode = guard
                                         .selection
                                         .as_ref()
                                         .map(|s| s.mode)
                                         .unwrap_or(SelectionMode::Normal);
-                                    // Ahora podemos mutar guard.selection sin conflictos
                                     match mode {
                                         SelectionMode::Normal => {
                                             if let Some(ref mut sel) = guard.selection {
-                                                if let Some(cells) = row_cells {
-                                                    sel.expand_to_word(&cells, col);
-                                                }
-                                                sel.mode = SelectionMode::Word;
+                                                self.expand_double_click(
+                                                    sel, &row_cells, col, abs_row, cols_count,
+                                                );
                                             }
                                         }
-                                        SelectionMode::Word => {
+                                        SelectionMode::Word | SelectionMode::Smart => {
                                             if let Some(ref mut sel) = guard.selection {
-                                                sel.expand_to_line(row, cols_count);
+                                                sel.expand_to_line(abs_row, cols_count);
                                                 sel.mode = SelectionMode::Line;
                                             }
                                         }
-                                        SelectionMode::Line => {
+                                        SelectionMode::Line | SelectionMode::Block => {
                                             guard.selection = Some(Selection::new(point));
                                         }
                                     }
@@ -660,9 +927,10 @@ impl ApplicationHandler<UserEvent> for App {
                                     let sel = Selection::new(point);
                                     guard.selection = Some(sel);
                                 }
+                                guard.mark_dirty();
+                                self.mouse_start = Some(point);
                             }
                             self.mouse_down.store(true, Ordering::Relaxed);
-                            self.mouse_start = Some(point);
                             self.last_click_time = Some(now);
                             // Bugfix: solicitar redibujo inmediato al crear/modificar seleccion
                             if let Some(window) = &self.window {
@@ -672,12 +940,28 @@ impl ApplicationHandler<UserEvent> for App {
                         ElementState::Released => {
                             self.mouse_down.store(false, Ordering::Relaxed);
                             self.mouse_start = None;
+                            // copy_on_select: copiar al soltar si la config lo pide.
+                            if self.config.selection.copy_on_select {
+                                self.copy_selection_on_release();
+                            }
                             // Bugfix: redibujar al soltar para fijar estado visual final
                             if let Some(window) = &self.window {
                                 window.request_redraw();
                             }
                         }
                     }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                if self.should_forward_mouse_to_app() {
+                    let button = match delta {
+                        MouseScrollDelta::LineDelta(_, y) if y > 0.0 => 64,
+                        MouseScrollDelta::LineDelta(_, y) if y < 0.0 => 65,
+                        MouseScrollDelta::PixelDelta(pos) if pos.y > 0.0 => 64,
+                        MouseScrollDelta::PixelDelta(pos) if pos.y < 0.0 => 65,
+                        _ => return,
+                    };
+                    self.forward_mouse_button(button, false);
                 }
             }
             // Input de teclado completo: letras, Enter, Backspace, Tab, Ctrl+letter, etc.
@@ -702,7 +986,22 @@ impl ApplicationHandler<UserEvent> for App {
                             tracing::info!(
                                 "KEYBOARD: Ctrl+Shift+C detectado, llamando handle_copy()"
                             );
+                            // En copy mode: copiar y salir.
+                            let in_copy_mode = self
+                                .term
+                                .lock()
+                                .ok()
+                                .map(|g| g.copy_mode.is_some())
+                                .unwrap_or(false);
                             self.handle_copy();
+                            if in_copy_mode {
+                                if let Ok(mut guard) = self.term.lock() {
+                                    CopyModeState::exit(&mut guard);
+                                }
+                                if let Some(window) = &self.window {
+                                    window.request_redraw();
+                                }
+                            }
                             return;
                         }
                         Key::Character(c) if c.eq_ignore_ascii_case("v") => {
@@ -710,6 +1009,22 @@ impl ApplicationHandler<UserEvent> for App {
                                 "KEYBOARD: Ctrl+Shift+V detectado, llamando handle_paste()"
                             );
                             self.handle_paste();
+                            return;
+                        }
+                        Key::Character(c)
+                            if c.eq_ignore_ascii_case("x") && self.config.copy_mode.enabled =>
+                        {
+                            // Ctrl+Shift+X: entrar en copy mode.
+                            if let Ok(mut guard) = self.term.lock() {
+                                if guard.copy_mode.is_none() {
+                                    guard.copy_mode = Some(CopyModeState::enter(&guard));
+                                    guard.mark_dirty();
+                                    tracing::info!("KEYBOARD: copy mode activado");
+                                }
+                            }
+                            if let Some(window) = &self.window {
+                                window.request_redraw();
+                            }
                             return;
                         }
                         _ => {
@@ -721,7 +1036,23 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
 
-                // 2. Ctrl+letter: enviar byte de control (Ctrl+A=0x01 .. Ctrl+Z=0x1A).
+                // 2. Copy mode: si está activo, las teclas navegan/seleccionan
+                //    y NO se envían al PTY (excepto Ctrl+Shift+C ya manejado arriba).
+                if self
+                    .term
+                    .lock()
+                    .ok()
+                    .map(|g| g.copy_mode.is_some())
+                    .unwrap_or(false)
+                    && self.handle_copy_mode_key(&event, shift)
+                {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
+
+                // 3. Ctrl+letter: enviar byte de control (Ctrl+A=0x01 .. Ctrl+Z=0x1A).
                 if ctrl {
                     if let Key::Character(c) = &event.logical_key {
                         if let Some(&first_byte) = c.as_bytes().first() {
@@ -755,7 +1086,7 @@ impl ApplicationHandler<UserEvent> for App {
 
                 // 4. Teclas especiales sin texto asociado.
                 match &event.logical_key {
-                    // Shift+arrow: extender seleccion si shift activo (Alacritty style)
+                    // Shift+arrow: extender seleccion si shift activo
                     Key::Named(NamedKey::ArrowLeft) if shift && !ctrl && !alt => {
                         self.extend_selection(0, -1);
                     }
@@ -800,6 +1131,7 @@ impl ApplicationHandler<UserEvent> for App {
                             guard.scrollback_offset =
                                 (guard.scrollback_offset + 1).min(max_offset as isize);
                         }
+                        guard.mark_dirty();
                         drop(guard);
                         if let Some(window) = &self.window {
                             window.request_redraw();
@@ -809,6 +1141,7 @@ impl ApplicationHandler<UserEvent> for App {
                         // Ctrl+Shift+Down: scroll down one line.
                         let mut guard = self.term.lock().expect("term mutex poisoned");
                         guard.scrollback_offset = (guard.scrollback_offset - 1).max(0);
+                        guard.mark_dirty();
                         drop(guard);
                         if let Some(window) = &self.window {
                             window.request_redraw();
@@ -823,6 +1156,7 @@ impl ApplicationHandler<UserEvent> for App {
                             guard.scrollback_offset =
                                 (guard.scrollback_offset + page).min(max_offset as isize);
                         }
+                        guard.mark_dirty();
                         drop(guard);
                         if let Some(window) = &self.window {
                             window.request_redraw();
@@ -833,6 +1167,7 @@ impl ApplicationHandler<UserEvent> for App {
                         let mut guard = self.term.lock().expect("term mutex poisoned");
                         let page = guard.grid.rows_count as isize - 1;
                         guard.scrollback_offset = (guard.scrollback_offset - page).max(0);
+                        guard.mark_dirty();
                         drop(guard);
                         if let Some(window) = &self.window {
                             window.request_redraw();
@@ -869,10 +1204,10 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     Key::Named(NamedKey::End) if ctrl => {
-                        self.term
-                            .lock()
-                            .expect("term mutex poisoned")
-                            .scrollback_offset = 0;
+                        let mut guard = self.term.lock().expect("term mutex poisoned");
+                        guard.scrollback_offset = 0;
+                        guard.mark_dirty();
+                        drop(guard);
                         if let Some(window) = &self.window {
                             window.request_redraw();
                         }
@@ -891,6 +1226,7 @@ impl ApplicationHandler<UserEvent> for App {
                             guard.scrollback_offset =
                                 (guard.scrollback_offset + page).min(max_offset as isize);
                         }
+                        guard.mark_dirty();
                         drop(guard);
                         if let Some(window) = &self.window {
                             window.request_redraw();
@@ -900,6 +1236,7 @@ impl ApplicationHandler<UserEvent> for App {
                         let mut guard = self.term.lock().expect("term mutex poisoned");
                         let page = guard.grid.rows_count as isize - 1;
                         guard.scrollback_offset = (guard.scrollback_offset - page).max(0);
+                        guard.mark_dirty();
                         drop(guard);
                         if let Some(window) = &self.window {
                             window.request_redraw();
@@ -1197,15 +1534,29 @@ mod tests {
         );
     }
 
-    /// ADVERSARIAL: cell_h=0 produce división por cero. Mismo bug.
+    /// Regresion: en shell normal (sin mouse reporting) el mouse es local,
+    /// no se reenvia al PTY — de lo contrario la seleccion con raton no funciona.
     #[test]
-    fn test_division_by_zero_cell_h() {
-        // cell_h=0 -> guard retorna sentinel en ambos ejes
-        let (row, col) = coords_to_cell(100.0, 100.0, 10.0, 0.0);
-        assert_eq!(
-            (row, col),
-            (usize::MAX, usize::MAX),
-            "cell_h=0 debe retornar sentinel"
+    fn test_mouse_shell_uses_local_selection() {
+        use crate::ansi::MouseReporting;
+
+        let term = Arc::new(Mutex::new(Term::new()));
+        let app = App::new(term.clone(), Arc::new(Mutex::new(None)));
+        assert!(
+            !app.should_forward_mouse_to_app(),
+            "shell: no reenviar mouse al PTY (seleccion local)"
+        );
+
+        term.lock().expect("term lock").mouse_reporting = MouseReporting {
+            click: true,
+            drag: true,
+            any_motion: false,
+            sgr: true,
+        };
+        let app_vim = App::new(term, Arc::new(Mutex::new(None)));
+        assert!(
+            app_vim.should_forward_mouse_to_app(),
+            "vim: app captura mouse sin modificadores"
         );
     }
 }

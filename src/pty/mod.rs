@@ -113,13 +113,14 @@ pub fn spawn(shell: &str, args: &[&str]) -> nix::Result<Pty> {
         use nix::sys::termios;
         let mut termios = termios::tcgetattr(&result.slave)?;
         termios::cfmakeraw(&mut termios);
-        // Reactivar ECHO para que los caracteres se vean al escribir.
-        termios.local_flags |= nix::sys::termios::LocalFlags::ECHO;
-        // Reactivar OPOST + ONLCR para que \n se convierta en \r\n.
-        // cfmakeraw desactiva OPOST, lo que deshabilita todo el procesamiento
-        // de output. Sin ONLCR, cuando bash escribe \n, el cursor no vuelve
-        // a columna 0, causando que el prompt aparezca en la posicion incorrecta.
-        // OPOST+ONLCR es el comportamiento estandar de terminales.
+
+        // Deshabilitar ECHOCTL: evitar caret notation (^[) en el eco de secuencias ESC.
+        // cfmakeraw() de glibc no limpia este flag.
+        // ECHO se mantiene activo: el kernel hace eco de caracteres imprimibles.
+        termios.local_flags &= !(nix::sys::termios::LocalFlags::ECHOCTL);
+        termios.local_flags |=
+            nix::sys::termios::LocalFlags::ECHO | nix::sys::termios::LocalFlags::ISIG;
+
         termios.output_flags |=
             nix::sys::termios::OutputFlags::OPOST | nix::sys::termios::OutputFlags::ONLCR;
         termios::tcsetattr(&result.slave, termios::SetArg::TCSANOW, &termios)?;
@@ -318,5 +319,53 @@ mod tests {
             !master.send_sighup(),
             "send_sighup sin child debe retornar false"
         );
+    }
+
+    #[test]
+    fn test_echoctl_disabled_after_spawn() {
+        // Verificar que ECHOCTL esta deshabilitado y ECHO deshabilitado, ISIG habilitado
+        // después de la configuración de termios en spawn().
+        use nix::sys::termios;
+
+        let result = nix::pty::openpty(None, None).expect("openpty fallo");
+        let mut t = termios::tcgetattr(&result.slave).expect("tcgetattr fallo");
+        termios::cfmakeraw(&mut t);
+
+        // Aplicar la misma config que en spawn()
+        t.local_flags &= !(nix::sys::termios::LocalFlags::ECHOCTL);
+        t.local_flags |= nix::sys::termios::LocalFlags::ECHO | nix::sys::termios::LocalFlags::ISIG;
+        t.output_flags |=
+            nix::sys::termios::OutputFlags::OPOST | nix::sys::termios::OutputFlags::ONLCR;
+
+        // Verificar ECHOCTL deshabilitado
+        assert!(
+            !t.local_flags
+                .contains(nix::sys::termios::LocalFlags::ECHOCTL),
+            "ECHOCTL debe estar deshabilitado para evitar caret notation"
+        );
+        // Verificar ECHO habilitado para eco de caracteres imprimibles
+        assert!(
+            t.local_flags.contains(nix::sys::termios::LocalFlags::ECHO),
+            "ECHO debe estar habilitado para que el kernel haga eco de teclas"
+        );
+        // Verificar ISIG habilitado para Ctrl+C, Ctrl+Z
+        assert!(
+            t.local_flags.contains(nix::sys::termios::LocalFlags::ISIG),
+            "ISIG debe estar habilitado para Ctrl+C/Ctrl+Z"
+        );
+        // Verificar OPOST + ONLCR habilitados para output processing
+        assert!(
+            t.output_flags
+                .contains(nix::sys::termios::OutputFlags::OPOST),
+            "OPOST debe estar habilitado para output processing"
+        );
+        assert!(
+            t.output_flags
+                .contains(nix::sys::termios::OutputFlags::ONLCR),
+            "ONLCR debe estar habilitado para \\n -> \\r\\n conversion"
+        );
+
+        // Cerrar FDs
+        drop(result);
     }
 }

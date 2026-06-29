@@ -1,6 +1,10 @@
 use crate::ansi::Attrs;
 use std::collections::VecDeque;
 
+mod damage;
+
+pub use damage::{DamageSnapshot, GridDamage};
+
 /// Número de filas por defecto del grid virtual.
 pub const DEFAULT_ROWS: usize = 24;
 /// Número de columnas por defecto del grid virtual.
@@ -38,6 +42,8 @@ pub struct Grid {
     /// o por hard break / Enter explícito (false).
     /// Usado por reflow para decidir si insertar un newline marker entre filas.
     pub row_continuations: Vec<bool>,
+    /// Celdas modificadas desde el último frame (render incremental).
+    pub damage: GridDamage,
 }
 
 impl Default for Cell {
@@ -60,12 +66,18 @@ impl Grid {
     /// Crea un grid vacío: `DEFAULT_ROWS` filas, `DEFAULT_COLS` columnas,
     /// todo espacios con atributos por defecto.
     pub fn new() -> Self {
+        Self::new_sized(DEFAULT_ROWS, DEFAULT_COLS)
+    }
+
+    /// Crea un grid vacío con el tamaño especificado.
+    pub fn new_sized(rows: usize, cols: usize) -> Self {
         Self {
-            rows: vec![vec![Cell::default(); DEFAULT_COLS]; DEFAULT_ROWS],
+            rows: vec![vec![Cell::default(); cols]; rows],
             scrollback: VecDeque::with_capacity(MAX_SCROLLBACK),
-            rows_count: DEFAULT_ROWS,
-            cols_count: DEFAULT_COLS,
-            row_continuations: vec![false; DEFAULT_ROWS],
+            rows_count: rows,
+            cols_count: cols,
+            row_continuations: vec![false; rows],
+            damage: GridDamage::new(rows, cols),
         }
     }
 
@@ -89,6 +101,28 @@ impl Grid {
         if let Some(cell) = self.rows.get_mut(row).and_then(|r| r.get_mut(col)) {
             cell.ch = ch;
             cell.attrs = attrs;
+            self.damage.mark_cell(row, col);
+        }
+    }
+
+    /// Marca columnas de continuacion de un glifo ancho (width >= 2).
+    pub fn mark_wide_continuation(&mut self, row: usize, col: usize, width: u8, attrs: Attrs) {
+        let w = width.max(2) as usize;
+        for c in (col + 1)..col.saturating_add(w).min(self.cols_count) {
+            if let Some(cell) = self.rows.get_mut(row).and_then(|r| r.get_mut(c)) {
+                cell.ch = ' ';
+                cell.width = 0;
+                cell.attrs = attrs;
+            }
+            self.damage.mark_cell(row, c);
+        }
+    }
+
+    /// Marca una celda y columnas de continuación de glifo ancho.
+    pub fn mark_cell_written(&mut self, row: usize, col: usize, width: u8) {
+        let w = width.max(1) as usize;
+        for c in col..col.saturating_add(w).min(self.cols_count) {
+            self.damage.mark_cell(row, c);
         }
     }
 
@@ -101,6 +135,7 @@ impl Grid {
             }
         }
         self.row_continuations.fill(false);
+        self.damage.mark_all();
     }
 
     /// Limpia una línea desde `from` hasta `to` (exclusivo) con espacios.
@@ -109,6 +144,7 @@ impl Grid {
         for col in from..end {
             self.rows[row][col] = Cell::default();
         }
+        self.damage.mark_row_range(row, from, end);
     }
 
     /// Scroll up: mueve todas las filas de la región [top, bottom] una posición
@@ -127,6 +163,7 @@ impl Grid {
                 self.row_continuations.insert(bottom, false);
             }
         }
+        self.damage.mark_all();
     }
 
     /// Scroll down: mueve todas las filas de la región [top, bottom] una posición
@@ -157,6 +194,7 @@ impl Grid {
             self.rows.insert(row, blank);
             self.row_continuations.remove(self.rows_count - 1);
             self.row_continuations.insert(row, false);
+            self.damage.mark_all();
         }
     }
 
@@ -170,6 +208,7 @@ impl Grid {
             self.rows.push(vec![Cell::default(); self.cols_count]);
             self.row_continuations.remove(row);
             self.row_continuations.push(false);
+            self.damage.mark_all();
         }
     }
 
@@ -183,6 +222,7 @@ impl Grid {
                 self.rows[row].pop();
                 self.rows[row].insert(col, Cell::default());
             }
+            self.damage.mark_row_range(row, col, self.cols_count);
         }
     }
 
@@ -196,6 +236,7 @@ impl Grid {
                 self.rows[row].remove(col);
                 self.rows[row].push(Cell::default());
             }
+            self.damage.mark_row_range(row, col, self.cols_count);
         }
     }
 
@@ -203,9 +244,12 @@ impl Grid {
     /// Preserva el contenido existente tanto como sea posible.
     /// Si el nuevo grid es más grande, las celdas nuevas son default.
     /// Si es más pequeño, se truncan/descartan filas/columnas sobrantes.
-    /// Retorna cuántas filas se prependieron del scrollback (0 si no hubo).
+    /// Retorna cuantas filas se eliminaron del principio (0 si el grid crecio).
     // ponytail: con reflow.
     pub fn resize(&mut self, new_rows: usize, new_cols: usize) -> usize {
+        const MAX_GRID: usize = 4096;
+        let new_rows = new_rows.clamp(1, MAX_GRID);
+        let new_cols = new_cols.clamp(1, MAX_GRID);
         self.resync_continuations();
         // Primero truncar o expandir columnas en cada fila existente.
         for row in &mut self.rows {
@@ -216,49 +260,46 @@ impl Grid {
             }
         }
 
-        let mut prepended = 0usize;
+        let mut rows_removed = 0usize;
 
         // Luego truncar o expandir filas.
         if new_rows < self.rows.len() {
-            // Truncar del PRINCIPIO (lo más antiguo), no del final.
+            // Truncar del PRINCIPIO (lo mas antiguo), no del final.
             // El prompt y el contenido reciente deben quedar al fondo.
-            let removed = self.rows.len() - new_rows;
-            let truncated: Vec<Vec<Cell>> = self.rows.drain(..removed).collect();
-            for row in truncated {
-                self.push_scrollback(row);
-            }
-            self.row_continuations.drain(..removed);
+            rows_removed = self.rows.len() - new_rows;
+            let truncated: Vec<Vec<Cell>> = self.rows.drain(..rows_removed).collect();
+            // ponytail: truncar sin scrollback en resize; SIGWINCH redibuja prompt.
+            drop(truncated);
+            self.row_continuations.drain(..rows_removed);
         } else {
             let added = new_rows - self.rows.len();
-            // Recuperar del FINAL del scrollback (las más recientes).
-            let from_sb = added.min(self.scrollback.len());
-            prepended = from_sb;
-            let mut reclaimed: Vec<Vec<Cell>> = Vec::with_capacity(from_sb);
-            for _ in 0..from_sb {
-                if let Some(row) = self.scrollback.pop_back() {
-                    reclaimed.push(row);
-                }
-            }
-            // pop_back da las más recientes primero. Prepender sin revertir:
-            // el primer pop es el más reciente y debe ir más abajo, los
-            // insert(0) posteriores lo empujan hacia arriba.
-            for row in reclaimed.into_iter() {
-                self.rows.insert(0, row);
-                self.row_continuations.insert(0, false);
-            }
-            // Rellenar resto con filas vacías al final.
-            let remaining = added - from_sb;
-            if remaining > 0 {
-                let blank_row = vec![Cell::default(); new_cols];
-                self.rows.extend(std::iter::repeat_n(blank_row, remaining));
-                self.row_continuations
-                    .extend(std::iter::repeat_n(false, remaining));
-            }
+            let blank_row = vec![Cell::default(); new_cols];
+            self.rows.extend(std::iter::repeat_n(blank_row, added));
+            self.row_continuations
+                .extend(std::iter::repeat_n(false, added));
         }
 
         self.rows_count = new_rows;
         self.cols_count = new_cols;
-        prepended
+        Self::normalize_row_lengths(&mut self.rows, new_cols);
+        self.damage.resize(new_rows, new_cols);
+        rows_removed
+    }
+
+    /// Garantiza que cada fila tenga exactamente `cols` celdas.
+    fn normalize_row_lengths(rows: &mut [Vec<Cell>], cols: usize) {
+        for row in rows.iter_mut() {
+            if row.len() < cols {
+                row.extend(std::iter::repeat_n(Cell::default(), cols - row.len()));
+            } else if row.len() > cols {
+                row.truncate(cols);
+            }
+        }
+    }
+
+    /// Toma el snapshot de daño y resetea el tracker.
+    pub fn take_damage(&mut self) -> DamageSnapshot {
+        self.damage.take()
     }
 
     /// Guarda una fila en el scrollback cuando sale por arriba de la pantalla.
@@ -288,6 +329,83 @@ impl Grid {
         self.row_continuations.truncate(self.rows.len());
     }
 
+    fn push_wide_continuation(row: &mut Vec<Cell>) {
+        row.push(Cell {
+            width: 0,
+            ..Cell::default()
+        });
+    }
+
+    /// Cuenta caracteres lógicos escritos antes de la posición del cursor.
+    fn logical_offset_before_cursor(
+        rows: &[Vec<Cell>],
+        cursor_row: usize,
+        cursor_col: usize,
+    ) -> usize {
+        let mut offset = 0usize;
+        let max_row = cursor_row.min(rows.len().saturating_sub(1));
+        for (idx, row) in rows.iter().enumerate().take(max_row + 1) {
+            let end_col = if idx == cursor_row {
+                cursor_col.min(row.len())
+            } else {
+                row.len()
+            };
+            let mut col = 0;
+            while col < end_col {
+                if col >= row.len() {
+                    break;
+                }
+                let cell = row[col];
+                if cell.width == 0 {
+                    col += 1;
+                    continue;
+                }
+                if cell != Cell::default() {
+                    offset += 1;
+                }
+                col += (cell.width as usize).max(1);
+            }
+        }
+        offset
+    }
+
+    /// Mapea un offset lógico a (fila, col) tras redistribuir el contenido plano.
+    fn cursor_from_offset_in_flat(flat: &[Cell], new_cols: usize, target: usize) -> (usize, usize) {
+        if target == 0 {
+            return (0, 0);
+        }
+        let mut placed = 0usize;
+        let mut row_idx = 0usize;
+        let mut col = 0usize;
+
+        for cell in flat {
+            if cell.ch == '\n' && cell.width == 0 {
+                row_idx += 1;
+                col = 0;
+                continue;
+            }
+            let w = cell.width as usize;
+            if w == 0 {
+                continue;
+            }
+            if col > 0 && col + w > new_cols {
+                row_idx += 1;
+                col = 0;
+            }
+            if placed == target {
+                return (row_idx, col.min(new_cols.saturating_sub(1)));
+            }
+            placed += 1;
+            col += w;
+        }
+        (row_idx, col.min(new_cols.saturating_sub(1)))
+    }
+
+    /// Reflow sin seguimiento de cursor (tests y benchmarks).
+    pub fn reflow(&mut self, new_cols: usize) {
+        let _ = self.reflow_with_cursor(new_cols, None);
+    }
+
     /// Reflow: concatena todo el contenido logico del grid en una secuencia
     /// plana de celdas (preservando filas vacias como marcadores de nueva linea)
     /// y lo re-divide en filas de `new_cols` columnas.
@@ -302,9 +420,15 @@ impl Grid {
     ///   sobrantes mas antiguas se envian al scrollback.
     /// * Este metodo modifica `cols_count` pero NO `rows_count` (el llamante,
     ///   ej. `resize_grid`, ajusta `rows_count` posteriormente via `resize`).
-    pub fn reflow(&mut self, new_cols: usize) {
+    pub fn reflow_with_cursor(
+        &mut self,
+        new_cols: usize,
+        cursor: Option<(usize, usize)>,
+    ) -> Option<(usize, usize)> {
         let old_rows: Vec<Vec<Cell>> = self.rows.drain(..).collect();
         let old_row_continuations = self.row_continuations.clone();
+        let cursor_offset =
+            cursor.map(|(r, c)| Self::logical_offset_before_cursor(&old_rows, r, c));
         // Asegurar que continuations tenga la longitud correcta por seguridad
         self.resync_continuations();
 
@@ -364,7 +488,12 @@ impl Grid {
         if flat.is_empty() {
             self.rows = vec![vec![Cell::default(); new_cols]; self.rows_count];
             self.cols_count = new_cols;
-            return;
+            return cursor.map(|(r, c)| {
+                (
+                    r.min(self.rows_count.saturating_sub(1)),
+                    c.min(new_cols.saturating_sub(1)),
+                )
+            });
         }
 
         // ---- Step 5: re-divide the flat sequence into rows of new_cols ----
@@ -408,14 +537,14 @@ impl Grid {
                 // Fits in the current row.
                 current_row.push(*cell);
                 for _ in 1..w {
-                    current_row.push(Cell::default());
+                    Self::push_wide_continuation(&mut current_row);
                 }
                 col += w;
             } else if col == 0 && w > new_cols {
                 // Doesn't fit even as the first character: force it in.
                 current_row.push(*cell);
                 for _ in 1..w.min(new_cols) {
-                    current_row.push(Cell::default());
+                    Self::push_wide_continuation(&mut current_row);
                 }
                 col = w.min(new_cols);
             } else {
@@ -432,7 +561,7 @@ impl Grid {
                 current_row = Vec::with_capacity(new_cols);
                 current_row.push(*cell);
                 for _ in 1..w {
-                    current_row.push(Cell::default());
+                    Self::push_wide_continuation(&mut current_row);
                 }
                 col = w;
                 row_after_newline = false; // no hard break before this continuation
@@ -451,8 +580,11 @@ impl Grid {
 
         // ---- Step 6: overflow rows (oldest first) go to scrollback ----
 
-        if new_rows.len() > self.rows_count {
-            let overflow = new_rows.len() - self.rows_count;
+        let pre_overflow_cursor =
+            cursor_offset.map(|offset| Self::cursor_from_offset_in_flat(&flat, new_cols, offset));
+        let overflow = new_rows.len().saturating_sub(self.rows_count);
+
+        if overflow > 0 {
             for row in new_rows.drain(..overflow) {
                 self.push_scrollback(row);
             }
@@ -471,6 +603,15 @@ impl Grid {
         self.rows = new_rows;
         self.row_continuations = new_continuations;
         self.cols_count = new_cols;
+        self.damage.mark_all();
+
+        pre_overflow_cursor.map(|(row, col)| {
+            let row = row.saturating_sub(overflow);
+            (
+                row.min(self.rows_count.saturating_sub(1)),
+                col.min(new_cols.saturating_sub(1)),
+            )
+        })
     }
 }
 
@@ -506,12 +647,29 @@ mod tests {
         assert_eq!(grid.cols_count, 100);
         assert_eq!(grid.rows.len(), 30);
         assert_eq!(grid.rows[0].len(), 100);
-        // Contenido preservado
+        // Contenido preservado en su fila original; filas nuevas abajo son default
         assert_eq!(grid.rows[0][0].ch, 'A');
         assert_eq!(grid.rows[1][2].ch, 'B');
-        // Nuevas celdas son default
         assert_eq!(grid.rows[0][80].ch, ' ');
         assert_eq!(grid.rows[29][0].ch, ' ');
+    }
+
+    #[test]
+    fn test_grid_resize_smaller_adjusts_cursor_offset() {
+        let mut grid = Grid::new();
+        grid.resize(40, 80);
+        let removed = grid.resize(24, 80);
+        assert_eq!(removed, 16);
+    }
+
+    #[test]
+    fn test_reflow_tracks_cursor_on_narrow() {
+        let mut grid = Grid::new();
+        for col in 0..10 {
+            grid.rows[0][col].ch = (b'A' + col as u8) as char;
+        }
+        let cursor = grid.reflow_with_cursor(5, Some((0, 7)));
+        assert_eq!(cursor, Some((1, 2)));
     }
 
     #[test]
@@ -532,10 +690,10 @@ mod tests {
         // row[23] tenía Z, row[23] se convierte en row[4] del nuevo grid
         assert_eq!(grid.rows[4][0].ch, 'Z');
         assert_eq!(grid.rows[4][5].ch, 'Y');
-        // Scrollback debe tener las filas truncadas
+        // ponytail: resize trunca sin scrollback.
         assert!(
-            !grid.scrollback.is_empty(),
-            "rows should be in scrollback after truncation"
+            grid.scrollback.is_empty(),
+            "resize no debe empujar filas al scrollback"
         );
     }
 
@@ -726,6 +884,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resize_shrink_does_not_push_scrollback() {
+        let mut grid = Grid::new();
+        grid.resize(10, 80);
+        let scrollback_before = grid.scrollback.len();
+        grid.resize(5, 80);
+        assert_eq!(grid.scrollback.len(), scrollback_before);
+    }
+
     /// Verifica que resize (encoger y crecer) no corrompe el grid.
     #[test]
     #[allow(clippy::needless_range_loop)]
@@ -747,24 +914,19 @@ mod tests {
         grid.resize(5, 80);
         grid.resize(10, 80);
 
-        // Las primeras 5 filas deben preservarse (de antes del encogimiento)
+        // Tras truncar del inicio, se preservan las ultimas 5 filas del grid original
         for r in 0..5 {
             let s: String = grid.rows[r].iter().take(5).map(|c| c.ch).collect();
-            assert_eq!(s, original[r], "la fila {r} debe preservarse");
+            assert_eq!(s, original[r + 5], "la fila {r} debe preservarse");
         }
-        // Las filas 5-9 deben contener el contenido recuperado (del scrollback)
+        // Las filas 5-9 son nuevas (vacias) al crecer por extension abajo
         for r in 5..10 {
-            let s: String = grid.rows[r].iter().take(5).map(|c| c.ch).collect();
-            assert_eq!(
-                s, original[r],
-                "la fila {r} debe recuperarse del scrollback"
+            assert!(
+                grid.rows[r].iter().all(|c| *c == Cell::default()),
+                "la fila {r} debe estar vacia tras crecer"
             );
         }
-        // El scrollback debe tener menos filas (algunas se reclamaron)
-        assert!(
-            grid.scrollback.len() < 24,
-            "el scrollback debio perder filas por reclamacion"
-        );
+        assert_eq!(grid.rows[0].len(), 80, "todas las filas tienen new_cols");
     }
 
     #[test]

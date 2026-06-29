@@ -24,6 +24,39 @@ pub struct Config {
     pub font: FontConfig,
     #[serde(default)]
     pub window: WindowConfig,
+    #[serde(default)]
+    pub selection: SelectionConfig,
+    #[serde(default)]
+    pub copy_mode: CopyModeConfig,
+}
+
+/// Configuración de selección de texto.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SelectionConfig {
+    /// Copiar al soltar el boton izquierdo. Off por defecto.
+    #[serde(default)]
+    pub copy_on_select: bool,
+    /// Destino al copiar por selección: "primary" | "clipboard" | "both".
+    #[serde(default = "default_copy_on_select_target")]
+    pub copy_on_select_target: String,
+    /// Modificadores que suprimen el mouse reporting de la app.
+    /// `bypass_mouse_reporting_modifiers`). Valores: "shift", "alt", "ctrl".
+    #[serde(default = "default_bypass_modifiers")]
+    pub bypass_mouse_reporting_modifiers: Vec<String>,
+    /// Doble clic semántico (URLs, paths, emails). On por defecto.
+    #[serde(default = "default_true")]
+    pub smart_selection: bool,
+    /// Delimitadores de palabra para doble clic no-semantico.
+    #[serde(default = "default_word_delimiters")]
+    pub word_delimiters: String,
+}
+
+/// Configuración del copy mode.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CopyModeConfig {
+    /// Habilitar copy mode. On por defecto.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 /// Colores del tema de terminal (ANSI de 16 colores + extras).
@@ -35,8 +68,10 @@ pub struct ThemeConfig {
     pub background: String,
     #[serde(default = "default_cursor")]
     pub cursor: String,
-    #[serde(default)]
+    #[serde(default = "default_selection_bg_option")]
     pub selection_bg: Option<String>,
+    #[serde(default = "default_selection_fg_option")]
+    pub selection_fg: Option<String>,
     #[serde(default = "default_black")]
     pub black: String,
     #[serde(default = "default_red")]
@@ -74,15 +109,25 @@ pub struct ThemeConfig {
 }
 
 /// Configuración de la fuente (tipografía y tamaño).
-///
-/// La funcionalidad real de renderizado de fuente se implementará en
-/// sprints posteriores (Sprint A2).
 #[derive(Debug, Clone, Deserialize)]
 pub struct FontConfig {
     #[serde(default = "default_font_family")]
     pub family: String,
     #[serde(default = "default_font_size")]
     pub size: u16,
+    #[serde(default = "default_glyph_offset")]
+    pub glyph_offset: GlyphOffset,
+    #[serde(default = "default_line_height")]
+    pub line_height: f32,
+}
+
+/// Desplazamiento fino del glifo dentro de la celda.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct GlyphOffset {
+    #[serde(default)]
+    pub x: f32,
+    #[serde(default)]
+    pub y: f32,
 }
 
 /// Configuración de la ventana (opacidad, etc.).
@@ -104,7 +149,8 @@ impl Default for ThemeConfig {
             foreground: default_foreground(),
             background: default_background(),
             cursor: default_cursor(),
-            selection_bg: None,
+            selection_bg: Some(default_selection_bg()),
+            selection_fg: Some(default_selection_fg()),
             black: default_black(),
             red: default_red(),
             green: default_green(),
@@ -130,6 +176,8 @@ impl Default for FontConfig {
         Self {
             family: default_font_family(),
             size: default_font_size(),
+            glyph_offset: default_glyph_offset(),
+            line_height: default_line_height(),
         }
     }
 }
@@ -142,78 +190,143 @@ impl Default for WindowConfig {
     }
 }
 
+impl Default for SelectionConfig {
+    fn default() -> Self {
+        Self {
+            copy_on_select: false,
+            copy_on_select_target: default_copy_on_select_target(),
+            bypass_mouse_reporting_modifiers: default_bypass_modifiers(),
+            smart_selection: default_true(),
+            word_delimiters: default_word_delimiters(),
+        }
+    }
+}
+
+impl Default for CopyModeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+        }
+    }
+}
+
+impl SelectionConfig {
+    /// True si `modifier` ("shift"|"alt"|"ctrl") está en la lista de bypass.
+    pub fn bypass_contains(&self, modifier: &str) -> bool {
+        self.bypass_mouse_reporting_modifiers
+            .iter()
+            .any(|m| m.eq_ignore_ascii_case(modifier))
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Funciones default — tema Catppuccin Mocha
+// Funciones default — tema oscuro
 // ---------------------------------------------------------------------------
 
 fn default_foreground() -> String {
-    "#cdd6f4".into()
+    "#ececec".into()
 }
 fn default_background() -> String {
-    "#1e1e2e".into()
+    "#0a0a0a".into()
 }
 fn default_cursor() -> String {
-    "#f5e0dc".into()
+    "#d97757".into()
 }
 fn default_black() -> String {
-    "#45475a".into()
+    "#3d3d3d".into()
 }
 fn default_red() -> String {
-    "#f38ba8".into()
+    "#e85d5d".into()
 }
 fn default_green() -> String {
-    "#a6e3a1".into()
+    "#6bbf8a".into()
 }
 fn default_yellow() -> String {
-    "#f9e2af".into()
+    "#d4a574".into()
 }
 fn default_blue() -> String {
-    "#89b4fa".into()
+    "#6b9fd4".into()
 }
 fn default_magenta() -> String {
-    "#f5c2e7".into()
+    "#c47ad4".into()
 }
 fn default_cyan() -> String {
-    "#94e2d5".into()
+    "#5eb8b8".into()
 }
 fn default_white() -> String {
-    "#bac2de".into()
+    "#ececec".into()
 }
-// pony tail: Catppuccin Mocha no diferencia bright; reutilizamos los valores
-// normales para los brillantes.
 fn default_bright_black() -> String {
-    default_black()
+    "#3d3d3d".into()
 }
 fn default_bright_red() -> String {
-    default_red()
+    "#f07070".into()
 }
 fn default_bright_green() -> String {
-    default_green()
+    "#7ed49a".into()
 }
 fn default_bright_yellow() -> String {
-    default_yellow()
+    "#e8b888".into()
 }
 fn default_bright_blue() -> String {
-    default_blue()
+    "#82b4e8".into()
 }
 fn default_bright_magenta() -> String {
-    default_magenta()
+    "#d494e8".into()
 }
 fn default_bright_cyan() -> String {
-    default_cyan()
+    "#72d0d0".into()
 }
 fn default_bright_white() -> String {
-    default_foreground()
+    "#ffffff".into()
+}
+
+fn default_selection_bg() -> String {
+    "#c4704a".into()
+}
+
+fn default_selection_fg() -> String {
+    "#0a0a0a".into()
+}
+
+fn default_selection_bg_option() -> Option<String> {
+    Some(default_selection_bg())
+}
+
+fn default_selection_fg_option() -> Option<String> {
+    Some(default_selection_fg())
 }
 
 fn default_font_family() -> String {
-    "monospace".into()
+    // NOTA: Usar "monospace" delega en fontdb la resolución a Family::Monospace,
+    // que por defecto busca "Courier New" (no disponible en Linux). En su lugar,
+    // se usa una fuente concreta con soporte garantizado de box-drawing Unicode
+    // y glifos TUI. El usuario puede sobrescribir esto en ~/.config/baud/config.toml.
+    "MesloLGS Nerd Font Mono".into()
 }
 fn default_font_size() -> u16 {
     14
 }
+fn default_glyph_offset() -> GlyphOffset {
+    GlyphOffset { x: 0.0, y: 0.0 }
+}
+fn default_line_height() -> f32 {
+    1.0
+}
 fn default_opacity() -> f32 {
     1.0
+}
+fn default_true() -> bool {
+    true
+}
+fn default_copy_on_select_target() -> String {
+    "primary".into()
+}
+fn default_bypass_modifiers() -> Vec<String> {
+    vec!["shift".into()]
+}
+fn default_word_delimiters() -> String {
+    ",│`|:\"' ()[]{}<>\t".into()
 }
 
 // ---------------------------------------------------------------------------
@@ -312,41 +425,41 @@ impl Config {
 mod tests {
     use super::*;
 
-    /// Verifica que `Config::default()` use los colores de Catppuccin Mocha.
+    /// Verifica que `Config::default()` use el tema oscuro.
     #[test]
     fn test_config_default_values() {
         let config = Config::default();
 
-        // Tema — valores representativos de Catppuccin Mocha
-        assert_eq!(config.theme.foreground, "#cdd6f4");
-        assert_eq!(config.theme.background, "#1e1e2e");
-        assert_eq!(config.theme.cursor, "#f5e0dc");
-        assert_eq!(config.theme.selection_bg, None);
-        assert_eq!(config.theme.black, "#45475a");
-        assert_eq!(config.theme.red, "#f38ba8");
-        assert_eq!(config.theme.green, "#a6e3a1");
-        assert_eq!(config.theme.yellow, "#f9e2af");
-        assert_eq!(config.theme.blue, "#89b4fa");
-        assert_eq!(config.theme.magenta, "#f5c2e7");
-        assert_eq!(config.theme.cyan, "#94e2d5");
-        assert_eq!(config.theme.white, "#bac2de");
+        assert_eq!(config.theme.foreground, "#ececec");
+        assert_eq!(config.theme.background, "#0a0a0a");
+        assert_eq!(config.theme.cursor, "#d97757");
+        assert_eq!(config.theme.selection_bg, Some("#c4704a".into()));
+        assert_eq!(config.theme.selection_fg, Some("#0a0a0a".into()));
+        assert_eq!(config.theme.black, "#3d3d3d");
+        assert_eq!(config.theme.red, "#e85d5d");
+        assert_eq!(config.theme.green, "#6bbf8a");
+        assert_eq!(config.theme.yellow, "#d4a574");
+        assert_eq!(config.theme.blue, "#6b9fd4");
+        assert_eq!(config.theme.magenta, "#c47ad4");
+        assert_eq!(config.theme.cyan, "#5eb8b8");
+        assert_eq!(config.theme.white, "#ececec");
 
-        // Brillantes — mismos valores que los normales (Catppuccin no diferencia)
-        assert_eq!(config.theme.bright_black, config.theme.black);
-        assert_eq!(config.theme.bright_red, config.theme.red);
-        assert_eq!(config.theme.bright_green, config.theme.green);
-        assert_eq!(config.theme.bright_yellow, config.theme.yellow);
-        assert_eq!(config.theme.bright_blue, config.theme.blue);
-        assert_eq!(config.theme.bright_magenta, config.theme.magenta);
-        assert_eq!(config.theme.bright_cyan, config.theme.cyan);
-        assert_eq!(config.theme.bright_white, config.theme.foreground);
+        assert_eq!(config.theme.bright_white, "#ffffff");
 
         // Fuente
-        assert_eq!(config.font.family, "monospace");
+        assert_eq!(config.font.family, "MesloLGS Nerd Font Mono");
         assert_eq!(config.font.size, 14);
 
         // Ventana
         assert_eq!(config.window.opacity, 1.0);
+
+        // Selección por defecto: copy_on_select off, smart on, bypass=[shift]
+        assert!(!config.selection.copy_on_select);
+        assert!(config.selection.smart_selection);
+        assert!(config.selection.bypass_contains("shift"));
+        assert!(!config.selection.bypass_contains("alt"));
+        // Copy mode habilitado por defecto
+        assert!(config.copy_mode.enabled);
     }
 
     /// Verifica que un TOML con todos los campos se parsea correctamente.
@@ -395,6 +508,26 @@ opacity = 0.85
         assert!((config.window.opacity - 0.85).abs() < f32::EPSILON);
     }
 
+    /// Verifica que la sección [selection] se parsea y respeta overrides.
+    #[test]
+    fn test_config_selection_section() {
+        let toml_str = r##"
+[selection]
+copy_on_select = true
+copy_on_select_target = "both"
+bypass_mouse_reporting_modifiers = ["shift", "alt"]
+smart_selection = false
+word_delimiters = " ,.;"
+"##;
+        let config: Config = toml::from_str(toml_str).expect("TOML selección");
+        assert!(config.selection.copy_on_select);
+        assert_eq!(config.selection.copy_on_select_target, "both");
+        assert!(config.selection.bypass_contains("shift"));
+        assert!(config.selection.bypass_contains("alt"));
+        assert!(!config.selection.smart_selection);
+        assert_eq!(config.selection.word_delimiters, " ,.;");
+    }
+
     /// Verifica que `parse_hex` convierte correctamente colores válidos.
     #[test]
     fn test_parse_hex() {
@@ -429,12 +562,13 @@ background = "#ddeeff"
         // Campos explícitos
         assert_eq!(config.theme.foreground, "#aabbcc");
         assert_eq!(config.theme.background, "#ddeeff");
-        // El resto debe ser default (Catppuccin Mocha)
-        assert_eq!(config.theme.cursor, "#f5e0dc");
-        assert_eq!(config.theme.selection_bg, None);
-        assert_eq!(config.theme.red, "#f38ba8");
+        // El resto debe ser default
+        assert_eq!(config.theme.cursor, "#d97757");
+        assert_eq!(config.theme.selection_bg, Some("#c4704a".into()));
+        assert_eq!(config.theme.selection_fg, Some("#0a0a0a".into()));
+        assert_eq!(config.theme.red, "#e85d5d");
         // Fuente por defecto
-        assert_eq!(config.font.family, "monospace");
+        assert_eq!(config.font.family, "MesloLGS Nerd Font Mono");
         assert_eq!(config.font.size, 14);
         // Ventana por defecto
         assert_eq!(config.window.opacity, 1.0);

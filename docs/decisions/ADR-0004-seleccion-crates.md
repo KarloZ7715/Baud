@@ -77,6 +77,9 @@ fija en 1.87.0.
    para wgpu). crossfont (Alacritty) usa glutin (OpenGL).
    Si se hubiera elegido glow, la seleccion seria
    crossfont. La decision esta acoplada a la de render.
+   Desde ADR-0009, Baud pinta el grid con `CustomGlyph`
+   posicionados por celda (`left`/`top` = `col * cell_w`,
+   `row * cell_h`), no con `TextArea` por fila.
 6. **unicode-width 0.2.** Estandar de facto para calcular
    el ancho de caracteres Unicode (CJK de ancho 2,
    emojis ZWJ, etc.). Usado por Alacritty, WezTerm y

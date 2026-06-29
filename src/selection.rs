@@ -18,6 +18,11 @@ pub enum SelectionMode {
     Word,
     /// Selección por línea (triple click).
     Line,
+    /// Selección rectangular (Alt+arrastrar).
+    /// Rango de columnas fijo aplicado a todas las filas entre start y end.
+    Block,
+    /// Selección semántica (smart: URL, path, email…).
+    Smart,
 }
 
 /// Representa una selección activa en el terminal.
@@ -93,6 +98,51 @@ impl Selection {
 
     /// Verifica si la celda lógica (row, col) está dentro del rango seleccionado.
     pub fn contains(&self, row: usize, col: usize) -> bool {
+        match self.mode {
+            SelectionMode::Block => self.contains_block(row, col),
+            _ => self.contains_normal(row, col),
+        }
+    }
+
+    /// Contención para selección rectangular: entre filas start/end, columnas
+    /// entre min(start.col, end.col) y max(start.col, end.col).
+    pub fn contains_block(&self, row: usize, col: usize) -> bool {
+        let (start_row, end_row) = if self.start.row <= self.end.row {
+            (self.start.row, self.end.row)
+        } else {
+            (self.end.row, self.start.row)
+        };
+        let (min_col, max_col) = if self.start.col <= self.end.col {
+            (self.start.col, self.end.col)
+        } else {
+            (self.end.col, self.start.col)
+        };
+        row >= start_row && row <= end_row && col >= min_col && col <= max_col
+    }
+
+    /// Rango de columnas de un bloque para una fila dada (None si la fila
+    /// está fuera del rango). Usado por `selected_text` en modo Block.
+    pub fn block_col_range(&self, row: usize) -> Option<(usize, usize)> {
+        if self.mode != SelectionMode::Block {
+            return None;
+        }
+        let (start_row, end_row) = if self.start.row <= self.end.row {
+            (self.start.row, self.end.row)
+        } else {
+            (self.end.row, self.start.row)
+        };
+        if row < start_row || row > end_row {
+            return None;
+        }
+        let (min_col, max_col) = if self.start.col <= self.end.col {
+            (self.start.col, self.end.col)
+        } else {
+            (self.end.col, self.start.col)
+        };
+        Some((min_col, max_col))
+    }
+
+    fn contains_normal(&self, row: usize, col: usize) -> bool {
         let (start_row, start_col, end_row, end_col) = self.normalize();
         if row < start_row || row > end_row {
             return false;
@@ -605,5 +655,53 @@ mod tests {
             !sel2.contains(0, usize::MAX - 1),
             "col MAX-1 fuera de rango"
         );
+    }
+
+    /// Block selection: rectángulo (1,2)-(3,5) debe contener solo ese rango
+    /// de columnas en cada fila entre la 1 y la 3.
+    #[test]
+    fn test_block_contains_forward() {
+        let sel = Selection {
+            start: SelectionPoint { row: 1, col: 2 },
+            end: SelectionPoint { row: 3, col: 5 },
+            mode: SelectionMode::Block,
+        };
+        // Esquinas y centro del bloque
+        assert!(sel.contains(1, 2));
+        assert!(sel.contains(1, 5));
+        assert!(sel.contains(2, 3));
+        assert!(sel.contains(3, 2));
+        assert!(sel.contains(3, 5));
+        // Fuera del bloque
+        assert!(!sel.contains(0, 3), "fila arriba del bloque");
+        assert!(!sel.contains(4, 3), "fila abajo del bloque");
+        assert!(!sel.contains(2, 1), "col izquierda del bloque");
+        assert!(!sel.contains(2, 6), "col derecha del bloque");
+    }
+
+    /// Block selection invertida (drag de abajo-arriba): mismo rectángulo.
+    #[test]
+    fn test_block_contains_reversed() {
+        let sel = Selection {
+            start: SelectionPoint { row: 3, col: 5 },
+            end: SelectionPoint { row: 1, col: 2 },
+            mode: SelectionMode::Block,
+        };
+        assert!(sel.contains(2, 3));
+        assert!(!sel.contains(2, 1));
+        assert!(!sel.contains(2, 6));
+        assert_eq!(sel.block_col_range(2), Some((2, 5)));
+        assert_eq!(sel.block_col_range(0), None, "fila fuera del bloque");
+    }
+
+    /// block_col_range solo aplica en modo Block.
+    #[test]
+    fn test_block_col_range_only_for_block() {
+        let sel = Selection {
+            start: SelectionPoint { row: 0, col: 0 },
+            end: SelectionPoint { row: 2, col: 4 },
+            mode: SelectionMode::Normal,
+        };
+        assert_eq!(sel.block_col_range(1), None, "Normal no tiene block range");
     }
 }

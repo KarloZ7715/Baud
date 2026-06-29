@@ -10,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::ansi::Term;
+use crate::grid::{DEFAULT_COLS, DEFAULT_ROWS};
 use crate::pty;
 use crate::window::{App, UserEvent};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
@@ -42,6 +43,7 @@ pub enum PtyEvent {
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // ponytail: spawn bash interactivo. -i fuerza prompt interactivo.
     let master = pty::spawn("bash", &["-i"])?;
+    master.set_winsize(DEFAULT_ROWS as u16, DEFAULT_COLS as u16)?;
 
     // Dos canales separados: PTY->drain y GUI->PTY
     let (tx_pty_to_gui, rx_pty_to_gui) = mpsc::channel::<PtyEvent>();
@@ -67,8 +69,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         let mut term_guard =
                             term_drain.lock().expect("term mutex poisoned en drain");
                         parser.advance(&mut *term_guard, &bytes);
+                        term_guard.mark_dirty();
                     }
-                    tracing::info!(
+                    tracing::trace!(
                         "drain: processed {} bytes: {:02x?}, sending RedrawNeeded",
                         bytes.len(),
                         &bytes[..bytes.len().min(40)]
@@ -148,7 +151,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(n) => {
                         had_activity = true;
                         let data = PtyEvent::Output(buf[..n].to_vec());
-                        tracing::info!("pty_thread: read {} bytes: {:02x?}", n, &buf[..n.min(40)]);
+                        tracing::trace!("pty_thread: read {} bytes: {:02x?}", n, &buf[..n.min(40)]);
                         if tx_pty_to_gui.send(data).is_err() {
                             return; // drain cerro el canal
                         }
@@ -167,7 +170,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 had_activity = true;
                 match cmd {
                     PtyCommand::Input(bytes) => {
-                        tracing::info!("pty_thread: write {} bytes: {:02x?}", bytes.len(), bytes);
+                        tracing::trace!("pty_thread: write {} bytes: {:02x?}", bytes.len(), bytes);
                         let _ = master.write_all(&bytes);
                     }
                     PtyCommand::Resize { rows, cols } => {
@@ -209,6 +212,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_set_winsize_after_spawn() {
+        // verificar que set_winsize funciona inmediatamente despues de spawn.
+        // Sin el fix, el PTY se crea con winsize={0,0,0,0} y bash usa fallback de 80 cols.
+        let master = pty::spawn("bash", &["-c", "exit"]).expect("spawn fallo");
+        assert!(master.set_winsize(24, 80).is_ok());
+    }
 
     #[test]
     fn test_pty_eof_no_panic() {
