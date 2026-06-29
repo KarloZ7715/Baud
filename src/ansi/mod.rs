@@ -183,6 +183,10 @@ pub struct Term {
     insert_mode: bool,
     /// LNM: line feed/newline mode (20).
     pub newline_mode: bool,
+    /// Flags del protocolo de teclado extendido (CSI u): bitmask activa.
+    pub keyboard_flags: u8,
+    /// Stack para CSI > u (push) / CSI < u (pop).
+    keyboard_flags_stack: Vec<u8>,
 }
 
 fn default_tab_stops(cols: usize) -> Vec<bool> {
@@ -249,6 +253,8 @@ impl Term {
             origin_mode: false,
             insert_mode: false,
             newline_mode: false,
+            keyboard_flags: 0,
+            keyboard_flags_stack: Vec::new(),
         }
     }
 
@@ -1072,6 +1078,43 @@ impl vte::Perform for Term {
             return;
         }
 
+        // Protocolo de teclado extendido: CSI ... u (solo con intermediate).
+        if action == 'u' {
+            let n = params
+                .iter()
+                .next()
+                .and_then(|p| p.first().copied())
+                .unwrap_or(0);
+            if intermediates == b">" {
+                self.keyboard_flags_stack.push(self.keyboard_flags);
+                self.keyboard_flags = n as u8;
+                return;
+            } else if intermediates == b"=" {
+                let mode = params
+                    .iter()
+                    .nth(1)
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(1);
+                let bits = n as u8;
+                self.keyboard_flags = match mode {
+                    2 => self.keyboard_flags | bits,
+                    3 => self.keyboard_flags & !bits,
+                    _ => bits,
+                };
+                return;
+            } else if intermediates == b"<" {
+                let count = n.max(1) as usize;
+                for _ in 0..count {
+                    self.keyboard_flags = self.keyboard_flags_stack.pop().unwrap_or(0);
+                }
+                return;
+            } else if intermediates == b"?" {
+                let resp = format!("\x1b[?{}u", self.keyboard_flags);
+                self.respond(resp.as_bytes());
+                return;
+            }
+        }
+
         // DEC private modes: handler temprano con return para no ensuciar
         // el match principal.
         if intermediates == b"?" {
@@ -1594,6 +1637,20 @@ mod tests {
     fn feed(term: &mut Term, data: &[u8]) {
         let mut parser = vte::Parser::new();
         parser.advance(term, data);
+    }
+
+    #[test]
+    fn test_keyboard_push_set_pop_query() {
+        let mut term = Term::new();
+        assert_eq!(term.keyboard_flags, 0);
+        feed(&mut term, b"\x1b[>1u");
+        assert_eq!(term.keyboard_flags, 1);
+        feed(&mut term, b"\x1b[=2;2u");
+        assert_eq!(term.keyboard_flags, 3);
+        feed(&mut term, b"\x1b[?u");
+        assert_eq!(term.take_pty_response(), b"\x1b[?3u");
+        feed(&mut term, b"\x1b[<1u");
+        assert_eq!(term.keyboard_flags, 0);
     }
 
     #[test]
