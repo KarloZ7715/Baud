@@ -92,6 +92,11 @@ fn current_key_modes(term: &Arc<Mutex<Term>>) -> KeyModes {
     }
 }
 
+fn clamp_font_size(current: u16, dir: i8) -> u16 {
+    let next = current as i32 + dir as i32;
+    next.clamp(6, 72) as u16
+}
+
 /// Estado de la aplicación GUI.
 pub struct App {
     window: Option<Arc<Window>>,
@@ -99,6 +104,8 @@ pub struct App {
     term: Arc<Mutex<Term>>,
     pty_tx: Arc<Mutex<Option<mpsc::Sender<PtyCommand>>>>,
     config: Config,
+    /// Tamano de fuente efectivo en runtime (puede diferir del config tras zoom).
+    font_size: u16,
     /// Estado de teclas modificadoras (Ctrl, Shift, Alt, etc.).
     modifiers: winit::event::Modifiers,
     /// Indica si el botón izquierdo del mouse está presionado.
@@ -126,12 +133,15 @@ impl App {
         term: Arc<Mutex<Term>>,
         pty_tx: Arc<Mutex<Option<mpsc::Sender<PtyCommand>>>>,
     ) -> Self {
+        let config = Config::load();
+        let font_size = config.font.size;
         Self {
             window: None,
             renderer: None,
             term,
             pty_tx,
-            config: Config::load(),
+            config,
+            font_size,
             modifiers: winit::event::Modifiers::default(),
             mouse_down: Arc::new(AtomicBool::new(false)),
             mouse_start: None,
@@ -436,7 +446,22 @@ impl App {
         }
     }
 
-    fn font_zoom(&mut self, _dir: i8) {}
+    fn font_zoom(&mut self, dir: i8) {
+        let base = self.config.font.size;
+        self.font_size = if dir == 0 {
+            base
+        } else {
+            clamp_font_size(self.font_size, dir)
+        };
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_font_size(self.font_size);
+        }
+        let metrics = self.renderer.as_ref().map(|r| (r.cell_w(), r.cell_h()));
+        if let (Some(window), Some((cell_w, cell_h))) = (&self.window, metrics) {
+            let size = window.inner_size();
+            self.sync_grid_to_window(size.width, size.height, cell_w, cell_h);
+        }
+    }
 
     fn run_action(&mut self, action: Action) {
         use crate::input::actions::Action::*;
@@ -1256,9 +1281,13 @@ static VTABLE: RawWakerVTable = RawWakerVTable::new(
 mod tests {
     use super::*;
 
-    /// Helper que replica la lógica de CursorMoved / MouseInput en window.rs:
-    ///   col = (x / cell_w) as usize;
-    ///   row = (y / cell_h) as usize;
+    #[test]
+    fn test_font_zoom_clamp() {
+        assert_eq!(clamp_font_size(14, 1), 15);
+        assert_eq!(clamp_font_size(72, 1), 72);
+        assert_eq!(clamp_font_size(6, -1), 6);
+    }
+
     fn coords_to_cell(x: f64, y: f64, cell_w: f32, cell_h: f32) -> (usize, usize) {
         // Bugfix: coordenadas negativas o cell_w/cell_h invalidos retornan sentinel
         if x < 0.0 || y < 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {

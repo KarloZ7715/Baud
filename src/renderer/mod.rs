@@ -211,6 +211,18 @@ impl Renderer {
         self.cell_h = self.cell_metrics.cell_h;
     }
 
+    /// Aplica un nuevo tamano de fuente y recalcula metricas de celda.
+    pub fn set_font_size(&mut self, size: u16) {
+        self.font_size = size as f32;
+        self.refresh_cell_metrics();
+        self.reset_glyph_pipeline();
+        let metrics = glyphon::Metrics::new(self.font_size, self.cell_h);
+        self.overlay_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+        Self::configure_buffer(&mut self.font_system, &mut self.overlay_buffer, self.cell_w);
+        self.bg_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+        Self::configure_buffer(&mut self.font_system, &mut self.bg_buffer, self.cell_w);
+    }
+
     /// Invalida caches GPU tras cambio de metricas (resize).
     fn reset_glyph_pipeline(&mut self) {
         self.glyph_cache.clear();
