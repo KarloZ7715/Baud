@@ -1,4 +1,5 @@
 pub mod ansi;
+pub mod base64;
 pub mod clipboard;
 pub mod config;
 pub mod copy_mode;
