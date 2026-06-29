@@ -17,6 +17,7 @@ use crate::config::Config;
 use crate::copy_mode::CopyModeState;
 use crate::event_loop::PtyCommand;
 use crate::grid::Cell;
+use crate::input::keymap::{self, Key as KKey, KeyModes, Mods};
 use crate::renderer::Renderer;
 use crate::selection::{Selection, SelectionMode, SelectionPoint};
 use crate::smart_select;
@@ -42,6 +43,51 @@ pub enum UserEvent {
     SetTitle(String),
     /// OSC 52 query: leer clipboard y responder al PTY (target, bell_terminated).
     ReadClipboard(u8, bool),
+}
+
+fn winit_to_key(k: &Key) -> Option<KKey> {
+    Some(match k {
+        Key::Named(NamedKey::Enter) => KKey::Enter,
+        Key::Named(NamedKey::Tab) => KKey::Tab,
+        Key::Named(NamedKey::Backspace) => KKey::Backspace,
+        Key::Named(NamedKey::Escape) => KKey::Escape,
+        Key::Named(NamedKey::ArrowUp) => KKey::Up,
+        Key::Named(NamedKey::ArrowDown) => KKey::Down,
+        Key::Named(NamedKey::ArrowLeft) => KKey::Left,
+        Key::Named(NamedKey::ArrowRight) => KKey::Right,
+        Key::Named(NamedKey::Home) => KKey::Home,
+        Key::Named(NamedKey::End) => KKey::End,
+        Key::Named(NamedKey::PageUp) => KKey::PageUp,
+        Key::Named(NamedKey::PageDown) => KKey::PageDown,
+        Key::Named(NamedKey::Insert) => KKey::Insert,
+        Key::Named(NamedKey::Delete) => KKey::Delete,
+        Key::Named(NamedKey::F1) => KKey::F(1),
+        Key::Named(NamedKey::F2) => KKey::F(2),
+        Key::Named(NamedKey::F3) => KKey::F(3),
+        Key::Named(NamedKey::F4) => KKey::F(4),
+        Key::Named(NamedKey::F5) => KKey::F(5),
+        Key::Named(NamedKey::F6) => KKey::F(6),
+        Key::Named(NamedKey::F7) => KKey::F(7),
+        Key::Named(NamedKey::F8) => KKey::F(8),
+        Key::Named(NamedKey::F9) => KKey::F(9),
+        Key::Named(NamedKey::F10) => KKey::F(10),
+        Key::Named(NamedKey::F11) => KKey::F(11),
+        Key::Named(NamedKey::F12) => KKey::F(12),
+        Key::Character(s) => KKey::Char(s.chars().next()?),
+        _ => return None,
+    })
+}
+
+fn current_key_modes(term: &Arc<Mutex<Term>>) -> KeyModes {
+    if let Ok(g) = term.lock() {
+        KeyModes {
+            app_cursor_keys: g.app_cursor_keys,
+            app_keypad: g.keypad_application_mode,
+            newline_mode: g.newline_mode,
+        }
+    } else {
+        KeyModes::default()
+    }
 }
 
 /// Estado de la aplicación GUI.
@@ -1050,79 +1096,25 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
-                // 3. Ctrl+letter: enviar byte de control (Ctrl+A=0x01 .. Ctrl+Z=0x1A).
-                if ctrl {
-                    if let Key::Character(c) = &event.logical_key {
-                        if let Some(&first_byte) = c.as_bytes().first() {
-                            self.send_input(vec![first_byte & 0x1F]);
-                            if let Some(window) = &self.window {
-                                window.request_redraw();
-                            }
-                            return;
-                        }
-                    }
-                }
-
-                // 3. Teclas con texto generado (letras, numeros, simbolos con Shift).
-                if let Some(text) = event.text {
-                    self.send_input(text.as_bytes().to_vec());
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
-                    }
-                    return;
-                }
-                if let Key::Character(c) = &event.logical_key {
-                    if !c.is_empty() {
-                        tracing::info!("keyboard: text=None, logical_key=Character({c}), fallback");
-                        self.send_input(c.as_bytes().to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                        return;
-                    }
-                }
-
-                // 4. Teclas especiales sin texto asociado.
+                // 3. Handlers locales de seleccion/scroll (se reconcilian en Teclado 2).
                 match &event.logical_key {
-                    // Shift+arrow: extender seleccion si shift activo
                     Key::Named(NamedKey::ArrowLeft) if shift && !ctrl && !alt => {
                         self.extend_selection(0, -1);
+                        return;
                     }
                     Key::Named(NamedKey::ArrowRight) if shift && !ctrl && !alt => {
                         self.extend_selection(0, 1);
+                        return;
                     }
                     Key::Named(NamedKey::ArrowUp) if shift && !ctrl && !alt => {
                         self.extend_selection(-1, 0);
+                        return;
                     }
                     Key::Named(NamedKey::ArrowDown) if shift && !ctrl && !alt => {
                         self.extend_selection(1, 0);
-                    }
-                    Key::Named(NamedKey::Enter) => {
-                        self.send_input(b"\r".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::Backspace) => {
-                        self.send_input(b"\x7f".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::Tab) => {
-                        self.send_input(b"\t".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::Escape) => {
-                        self.send_input(b"\x1b".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
+                        return;
                     }
                     Key::Named(NamedKey::ArrowUp) if ctrl && shift => {
-                        // Ctrl+Shift+Up: scroll up one line (para teclados sin scroll dedicado).
                         let mut guard = self.term.lock().expect("term mutex poisoned");
                         if !guard.alt_screen {
                             let max_offset = guard.scrollback_len();
@@ -1134,9 +1126,9 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(window) = &self.window {
                             window.request_redraw();
                         }
+                        return;
                     }
                     Key::Named(NamedKey::ArrowDown) if ctrl && shift => {
-                        // Ctrl+Shift+Down: scroll down one line.
                         let mut guard = self.term.lock().expect("term mutex poisoned");
                         guard.scrollback_offset = (guard.scrollback_offset - 1).max(0);
                         guard.mark_dirty();
@@ -1144,9 +1136,9 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(window) = &self.window {
                             window.request_redraw();
                         }
+                        return;
                     }
                     Key::Named(NamedKey::ArrowUp) if alt => {
-                        // Alt+Up = page up (alternativa para teclados sin PageUp)
                         let mut guard = self.term.lock().expect("term mutex poisoned");
                         if !guard.alt_screen {
                             let max_offset = guard.scrollback_len();
@@ -1159,9 +1151,9 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(window) = &self.window {
                             window.request_redraw();
                         }
+                        return;
                     }
                     Key::Named(NamedKey::ArrowDown) if alt => {
-                        // Alt+Down = page down
                         let mut guard = self.term.lock().expect("term mutex poisoned");
                         let page = guard.grid.rows_count as isize - 1;
                         guard.scrollback_offset = (guard.scrollback_offset - page).max(0);
@@ -1170,36 +1162,7 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(window) = &self.window {
                             window.request_redraw();
                         }
-                    }
-                    Key::Named(NamedKey::ArrowUp) => {
-                        self.send_input(b"\x1b[A".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::ArrowDown) => {
-                        self.send_input(b"\x1b[B".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::ArrowLeft) => {
-                        self.send_input(b"\x1b[D".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::ArrowRight) => {
-                        self.send_input(b"\x1b[C".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::Home) => {
-                        self.send_input(b"\x1b[H".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
+                        return;
                     }
                     Key::Named(NamedKey::End) if ctrl => {
                         let mut guard = self.term.lock().expect("term mutex poisoned");
@@ -1209,12 +1172,7 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(window) = &self.window {
                             window.request_redraw();
                         }
-                    }
-                    Key::Named(NamedKey::End) => {
-                        self.send_input(b"\x1b[F".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
+                        return;
                     }
                     Key::Named(NamedKey::PageUp) => {
                         let mut guard = self.term.lock().expect("term mutex poisoned");
@@ -1229,6 +1187,7 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(window) = &self.window {
                             window.request_redraw();
                         }
+                        return;
                     }
                     Key::Named(NamedKey::PageDown) => {
                         let mut guard = self.term.lock().expect("term mutex poisoned");
@@ -1239,92 +1198,26 @@ impl ApplicationHandler<UserEvent> for App {
                         if let Some(window) = &self.window {
                             window.request_redraw();
                         }
-                    }
-                    Key::Named(NamedKey::Delete) => {
-                        self.send_input(b"\x1b[3~".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::Insert) => {
-                        self.send_input(b"\x1b[2~".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::F1) => {
-                        self.send_input(b"\x1bOP".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::F2) => {
-                        self.send_input(b"\x1bOQ".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::F3) => {
-                        self.send_input(b"\x1bOR".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::F4) => {
-                        self.send_input(b"\x1bOS".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::F5) => {
-                        self.send_input(b"\x1b[15~".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::F6) => {
-                        self.send_input(b"\x1b[17~".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::F7) => {
-                        self.send_input(b"\x1b[18~".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::F8) => {
-                        self.send_input(b"\x1b[19~".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::F9) => {
-                        self.send_input(b"\x1b[20~".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::F10) => {
-                        self.send_input(b"\x1b[21~".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::F11) => {
-                        self.send_input(b"\x1b[23~".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                    }
-                    Key::Named(NamedKey::F12) => {
-                        self.send_input(b"\x1b[24~".to_vec());
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
+                        return;
                     }
                     _ => {}
+                }
+
+                // 4. Fallback: keymap::encode_key (Alt/Meta, mods xterm, DECCKM).
+                let mods = Mods {
+                    shift: self.modifiers.state().shift_key(),
+                    alt: self.modifiers.state().alt_key(),
+                    ctrl: self.modifiers.state().control_key(),
+                    sup: self.modifiers.state().super_key(),
+                };
+                if let Some(k) = winit_to_key(&event.logical_key) {
+                    let modes = current_key_modes(&self.term);
+                    if let Some(bytes) = keymap::encode_key(k, mods, modes) {
+                        self.send_input(bytes);
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
                 }
             }
             _ => {}

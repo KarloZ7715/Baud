@@ -182,7 +182,7 @@ pub struct Term {
     /// IRM: insert/replace mode (4).
     insert_mode: bool,
     /// LNM: line feed/newline mode (20).
-    newline_mode: bool,
+    pub newline_mode: bool,
 }
 
 fn default_tab_stops(cols: usize) -> Vec<bool> {
