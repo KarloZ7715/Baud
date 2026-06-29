@@ -23,6 +23,8 @@ pub struct Cell {
     pub attrs: Attrs,
     /// Ancho del carácter (en columnas). 1 para latino, 2 para CJK, etc.
     pub width: u8,
+    /// Indice en `Term::hyperlinks` (OSC 8); `None` si la celda no tiene link.
+    pub hyperlink: Option<u32>,
 }
 
 /// Grid virtual con tamaño dinámico que representa el buffer del terminal.
@@ -52,6 +54,7 @@ impl Default for Cell {
             ch: ' ',
             attrs: Attrs::default(),
             width: 1,
+            hyperlink: None,
         }
     }
 }
@@ -477,7 +480,7 @@ impl Grid {
                     flat.push(Cell {
                         ch: '\n',
                         width: 0,
-                        attrs: Attrs::default(),
+                        ..Cell::default()
                     });
                 }
             }

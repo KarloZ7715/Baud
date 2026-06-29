@@ -158,8 +158,7 @@ mod tests {
         s.chars()
             .map(|c| Cell {
                 ch: c,
-                attrs: Default::default(),
-                width: 1,
+                ..Default::default()
             })
             .collect()
     }

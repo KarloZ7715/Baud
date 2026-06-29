@@ -38,6 +38,10 @@ pub enum UserEvent {
     PtyExited(i32),
     /// Error de I/O del PTY.
     PtyError(String),
+    /// OSC 0/1/2: actualizar titulo de ventana.
+    SetTitle(String),
+    /// OSC 52 query: leer clipboard y responder al PTY (target, bell_terminated).
+    ReadClipboard(u8, bool),
 }
 
 /// Estado de la aplicación GUI.
@@ -685,12 +689,6 @@ impl ApplicationHandler<UserEvent> for App {
                 tracing::debug!("RedrawRequested: renderizando frame");
                 if let Err(e) = renderer.render(&mut term_guard, &self.config.theme) {
                     tracing::warn!("error al renderizar: {e}");
-                }
-                // Actualizar título de ventana si cambió vía OSC 0/1/2
-                if let Some(ref title) = term_guard.window_title {
-                    if let Some(window) = &self.window {
-                        window.set_title(title);
-                    }
                 }
             }
             // Track modifier state (Ctrl, Shift, Alt, etc.) for keyboard shortcuts.
@@ -1356,6 +1354,18 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
+            }
+            UserEvent::SetTitle(title) => {
+                if let Some(window) = &self.window {
+                    window.set_title(&title);
+                }
+            }
+            UserEvent::ReadClipboard(target, bell_terminated) => {
+                let primary = target == b'p' || target == b's';
+                let text = clipboard::get(primary);
+                let encoded = crate::base64::encode(text.as_bytes());
+                let response = Term::format_osc52_read_response(target, &encoded, bell_terminated);
+                self.send_input(response);
             }
         }
     }

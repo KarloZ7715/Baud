@@ -248,8 +248,7 @@ mod tests {
             .chars()
             .map(|c| Cell {
                 ch: c,
-                attrs: Default::default(),
-                width: 1,
+                ..Default::default()
             })
             .collect();
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
@@ -283,8 +282,7 @@ mod tests {
             .chars()
             .map(|c| Cell {
                 ch: c,
-                attrs: Default::default(),
-                width: 1,
+                ..Default::default()
             })
             .collect();
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
@@ -465,8 +463,7 @@ mod tests {
             .chars()
             .map(|c| Cell {
                 ch: c,
-                attrs: Default::default(),
-                width: 1,
+                ..Default::default()
             })
             .collect();
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
@@ -484,8 +481,7 @@ mod tests {
             .chars()
             .map(|c| Cell {
                 ch: c,
-                attrs: Default::default(),
-                width: 1,
+                ..Default::default()
             })
             .collect();
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 10 });
@@ -503,8 +499,7 @@ mod tests {
             .chars()
             .map(|c| Cell {
                 ch: c,
-                attrs: Default::default(),
-                width: 1,
+                ..Default::default()
             })
             .collect();
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
@@ -535,8 +530,7 @@ mod tests {
             .chars()
             .map(|c| Cell {
                 ch: c,
-                attrs: Default::default(),
-                width: 1,
+                ..Default::default()
             })
             .collect();
         // Punto inicial en col 0 (.) -> no es word char -> no expande
@@ -560,8 +554,7 @@ mod tests {
             .chars()
             .map(|c| Cell {
                 ch: c,
-                attrs: Default::default(),
-                width: 1,
+                ..Default::default()
             })
             .collect();
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });

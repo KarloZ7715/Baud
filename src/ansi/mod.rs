@@ -153,6 +153,17 @@ pub struct Term {
     pub selection: Option<Selection>,
     pub dirty: bool,
     pub window_title: Option<String>,
+    pub icon_title: Option<String>,
+    pub title_dirty: bool,
+    pub cwd: Option<String>,
+    pub hyperlinks: Vec<String>,
+    current_link: Option<usize>,
+    /// OSC 52 query pendiente: target (`c`/`p`/`s`) y terminador del request.
+    pub(crate) clipboard_read_pending: Option<(u8, bool)>,
+    pub runtime_palette: [Option<(u8, u8, u8)>; 256],
+    pub fg_override: Option<(u8, u8, u8)>,
+    pub bg_override: Option<(u8, u8, u8)>,
+    pub cursor_color_override: Option<(u8, u8, u8)>,
     pub mouse_reporting: MouseReporting,
     pub copy_mode: Option<CopyModeState>,
     pub cursor_style: CursorStyle,
@@ -218,6 +229,16 @@ impl Term {
             selection: None,
             dirty: true,
             window_title: None,
+            icon_title: None,
+            title_dirty: false,
+            cwd: None,
+            hyperlinks: Vec::new(),
+            current_link: None,
+            clipboard_read_pending: None,
+            runtime_palette: [None; 256],
+            fg_override: None,
+            bg_override: None,
+            cursor_color_override: None,
             mouse_reporting: MouseReporting::default(),
             copy_mode: None,
             cursor_style: CursorStyle::default(),
@@ -361,12 +382,141 @@ impl Term {
         }
     }
 
-    fn term_version_id() -> u32 {
+    pub(crate) fn term_version_id() -> u32 {
         env!("CARGO_PKG_VERSION")
             .split('.')
             .next_back()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0)
+    }
+
+    pub(crate) fn osc_st(bell_terminated: bool) -> &'static [u8] {
+        if bell_terminated {
+            b"\x07"
+        } else {
+            b"\x1b\\"
+        }
+    }
+
+    fn parse_color_spec(spec: &[u8]) -> Option<(u8, u8, u8)> {
+        if spec == b"?" {
+            return None;
+        }
+        if let Ok(s) = std::str::from_utf8(spec) {
+            if let Some(hex) = s.strip_prefix('#') {
+                if hex.len() == 6 {
+                    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                    return Some((r, g, b));
+                }
+            }
+            if let Some(rgb) = s.strip_prefix("rgb:") {
+                let parts: Vec<&str> = rgb.split('/').collect();
+                if parts.len() == 3 {
+                    let parse_ch = |p: &str| {
+                        let v = u16::from_str_radix(p, 16).ok()?;
+                        Some((v >> 8) as u8)
+                    };
+                    let r = parse_ch(parts[0])?;
+                    let g = parse_ch(parts[1])?;
+                    let b = parse_ch(parts[2])?;
+                    return Some((r, g, b));
+                }
+            }
+        }
+        None
+    }
+
+    fn rgb_to_osc16((r, g, b): (u8, u8, u8)) -> String {
+        let fmt = |c: u8| format!("{:04x}", (c as u16) * 257);
+        format!("rgb:{}/{}/{}", fmt(r), fmt(g), fmt(b))
+    }
+
+    fn percent_decode(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%' && i + 2 < bytes.len() {
+                if let Ok(v) =
+                    u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+                {
+                    out.push(v as char);
+                    i += 3;
+                    continue;
+                }
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+        out
+    }
+
+    fn parse_file_uri(raw: &[u8]) -> Option<String> {
+        let s = std::str::from_utf8(raw).ok()?;
+        let rest = s.strip_prefix("file://")?;
+        let path = if rest.starts_with('/') {
+            rest
+        } else {
+            rest.find('/').map(|i| &rest[i..])?
+        };
+        Some(Self::percent_decode(path))
+    }
+
+    fn set_title_from_bytes(&mut self, osc_num: u16, title: &[u8]) {
+        let t = String::from_utf8_lossy(title).into_owned();
+        match osc_num {
+            0 => {
+                self.window_title = Some(t.clone());
+                self.icon_title = Some(t);
+            }
+            1 => self.icon_title = Some(t),
+            2 => self.window_title = Some(t),
+            _ => return,
+        }
+        self.title_dirty = true;
+    }
+
+    pub fn take_title_if_dirty(&mut self) -> Option<String> {
+        if self.title_dirty {
+            self.title_dirty = false;
+            self.window_title.clone()
+        } else {
+            None
+        }
+    }
+
+    pub fn take_clipboard_read_pending(&mut self) -> Option<(u8, bool)> {
+        self.clipboard_read_pending.take()
+    }
+
+    /// Construye la respuesta OSC 52 a una query de lectura de clipboard.
+    pub fn format_osc52_read_response(
+        target: u8,
+        payload_b64: &str,
+        bell_terminated: bool,
+    ) -> Vec<u8> {
+        let mut out = format!("\x1b]52;{};{}", target as char, payload_b64).into_bytes();
+        out.extend_from_slice(Self::osc_st(bell_terminated));
+        out
+    }
+
+    fn color_override_mut(&mut self, osc: u16) -> &mut Option<(u8, u8, u8)> {
+        match osc {
+            10 => &mut self.fg_override,
+            11 => &mut self.bg_override,
+            12 => &mut self.cursor_color_override,
+            _ => &mut self.bg_override,
+        }
+    }
+
+    fn respond_osc_color_query(&mut self, osc: u16, rgb: (u8, u8, u8), bell_terminated: bool) {
+        let body = Self::rgb_to_osc16(rgb);
+        let st = Self::osc_st(bell_terminated);
+        let resp = format!("\x1b]{osc};{body}");
+        self.respond(resp.as_bytes());
+        self.respond(st);
     }
 
     fn decrqm_state(&self, mode: u16) -> u16 {
@@ -769,6 +919,7 @@ impl vte::Perform for Term {
         let row = self.cursor.row;
         let col = self.cursor.col;
         let attrs = self.attrs;
+        let link = self.current_link.map(|i| i as u32);
         let cols = self.cursor.cols_count;
 
         // Caracter ancho (CJK) en la ultima columna: wrap forzado.
@@ -790,6 +941,7 @@ impl vte::Perform for Term {
                         cell.ch = c;
                         cell.attrs = attrs;
                         cell.width = c_width as u8;
+                        cell.hyperlink = link;
                     }
                     active.mark_cell_written(row, col, c_width as u8);
                 }
@@ -820,6 +972,7 @@ impl vte::Perform for Term {
                     cell.ch = c;
                     cell.attrs = attrs;
                     cell.width = c_width as u8;
+                    cell.hyperlink = link;
                 }
                 active.mark_cell_written(row, col, c_width as u8);
             }
@@ -947,6 +1100,12 @@ impl vte::Perform for Term {
                 // DEC 2004: bracketed paste mode
                 ('h', 2004) => self.bracketed_paste = true,
                 ('l', 2004) => self.bracketed_paste = false,
+                ('n', 6) => {
+                    let row = (self.cursor.row + 1) as u16;
+                    let col = (self.cursor.col + 1) as u16;
+                    let resp = format!("\x1b[?{row};{col}R");
+                    self.respond(resp.as_bytes());
+                }
                 _ => {}
             }
             return;
@@ -1312,13 +1471,103 @@ impl vte::Perform for Term {
             _ => {}
         }
     }
-    fn osc_dispatch(&mut self, params: &[&[u8]], _bell: bool) {
-        let cmd = params.first().copied().unwrap_or(&[]);
-        let payload = params.get(1).copied().unwrap_or(&[]);
-        if cmd == b"0" || cmd == b"2" {
-            if let Ok(t) = std::str::from_utf8(payload) {
-                self.window_title = Some(t.into());
+    fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, action: char) {
+        tracing::debug!("DCS hook action={:?} (no implementado)", action);
+    }
+
+    fn put(&mut self, _byte: u8) {}
+
+    fn unhook(&mut self) {}
+
+    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        let Some(first) = params.first() else {
+            return;
+        };
+        let osc_num = match std::str::from_utf8(first)
+            .ok()
+            .and_then(|s| s.parse::<u16>().ok())
+        {
+            Some(n) => n,
+            None => return,
+        };
+        match osc_num {
+            0..=2 => {
+                if let Some(title) = params.get(1) {
+                    self.set_title_from_bytes(osc_num, title);
+                }
             }
+            4 => {
+                let idx = params
+                    .get(1)
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .and_then(|s| s.parse::<usize>().ok());
+                let spec = params.get(2).copied().unwrap_or(b"");
+                if let Some(i) = idx {
+                    if spec == b"?" {
+                        if let Some(rgb) = self.runtime_palette[i] {
+                            let body = Self::rgb_to_osc16(rgb);
+                            let st = Self::osc_st(bell_terminated);
+                            let resp = format!("\x1b]4;{i};{body}");
+                            self.respond(resp.as_bytes());
+                            self.respond(st);
+                        }
+                    } else if let Some(rgb) = Self::parse_color_spec(spec) {
+                        if i < 256 {
+                            self.runtime_palette[i] = Some(rgb);
+                        }
+                    }
+                }
+            }
+            7 => {
+                if let Some(raw) = params.get(1) {
+                    if let Some(path) = Self::parse_file_uri(raw) {
+                        self.cwd = Some(path);
+                    }
+                }
+            }
+            8 => {
+                let uri = params.get(2).copied().unwrap_or(b"");
+                if uri.is_empty() {
+                    self.current_link = None;
+                } else if let Ok(s) = std::str::from_utf8(uri) {
+                    if let Some(idx) = self.hyperlinks.iter().position(|u| u == s) {
+                        self.current_link = Some(idx);
+                    } else {
+                        self.hyperlinks.push(s.to_owned());
+                        self.current_link = Some(self.hyperlinks.len() - 1);
+                    }
+                }
+            }
+            10..=12 => {
+                let spec = params.get(1).copied().unwrap_or(b"");
+                if spec == b"?" {
+                    if let Some(rgb) = *self.color_override_mut(osc_num) {
+                        self.respond_osc_color_query(osc_num, rgb, bell_terminated);
+                    }
+                } else if let Some(rgb) = Self::parse_color_spec(spec) {
+                    *self.color_override_mut(osc_num) = Some(rgb);
+                }
+            }
+            52 => {
+                let target = params.get(1).copied().unwrap_or(b"c");
+                let data = params.get(2).copied().unwrap_or(b"");
+                if data == b"?" {
+                    self.clipboard_read_pending = Some((target[0], bell_terminated));
+                } else if let Some(bytes) = crate::base64::decode(data) {
+                    const MAX_CLIP: usize = 512 * 1024;
+                    let slice = if bytes.len() > MAX_CLIP {
+                        &bytes[..MAX_CLIP]
+                    } else {
+                        &bytes
+                    };
+                    if let Ok(text) = std::str::from_utf8(slice) {
+                        let primary =
+                            target.first() == Some(&b'p') || target.first() == Some(&b's');
+                        crate::clipboard::set(text, primary);
+                    }
+                }
+            }
+            _ => tracing::debug!("OSC {} no implementado", osc_num),
         }
     }
 }
@@ -1481,6 +1730,189 @@ mod tests {
         feed(&mut term, b"\x1b[?1h");
         feed(&mut term, b"\x1b[?1$p");
         assert_eq!(term.take_pty_response(), b"\x1b[?1;1$y");
+    }
+
+    #[test]
+    fn test_osc_vacio_y_desconocido_no_panic() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]\x07");
+        feed(&mut term, b"\x1b]99999;x\x07");
+    }
+
+    #[test]
+    fn test_osc_2_setea_titulo() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]2;mi titulo\x07");
+        assert_eq!(term.window_title.as_deref(), Some("mi titulo"));
+        assert!(term.title_dirty);
+    }
+
+    #[test]
+    fn test_osc_0_setea_ambos_con_st_esc_backslash() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]0;t\x1b\\");
+        assert_eq!(term.window_title.as_deref(), Some("t"));
+        assert_eq!(term.icon_title.as_deref(), Some("t"));
+    }
+
+    #[test]
+    fn test_osc_7_guarda_cwd_desde_file_uri() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]7;file://localhost/home/u/proj\x07");
+        assert_eq!(term.cwd.as_deref(), Some("/home/u/proj"));
+    }
+
+    #[test]
+    fn test_osc_52_query_marca_lectura_pendiente() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]52;c;?\x07");
+        assert_eq!(term.clipboard_read_pending, Some((b'c', true)));
+    }
+
+    #[test]
+    fn test_osc_52_query_guarda_terminador_st() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]52;c;?\x1b\\");
+        assert_eq!(term.clipboard_read_pending, Some((b'c', false)));
+    }
+
+    #[test]
+    fn test_osc_52_write_no_marca_query() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]52;c;dGVzdA==\x07");
+        assert!(term.clipboard_read_pending.is_none());
+    }
+
+    #[test]
+    fn test_osc_52_write_invalido_no_panic() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]52;c;!!!!\x07");
+        assert!(term.clipboard_read_pending.is_none());
+    }
+
+    #[test]
+    fn test_osc_52_read_response_usa_terminador() {
+        let bel = Term::format_osc52_read_response(b'c', "dGVzdA==", true);
+        assert_eq!(bel, b"\x1b]52;c;dGVzdA==\x07");
+        let st = Term::format_osc52_read_response(b'c', "dGVzdA==", false);
+        assert_eq!(st, b"\x1b]52;c;dGVzdA==\x1b\\");
+    }
+
+    #[test]
+    fn test_osc_8_asocia_link_a_celdas() {
+        let mut term = Term::new();
+        feed(
+            &mut term,
+            b"\x1b]8;;https://example.com\x07LINK\x1b]8;;\x07X",
+        );
+        let idx = term.grid.rows[0][0].hyperlink.expect("celda con link");
+        assert_eq!(term.hyperlinks[idx as usize], "https://example.com");
+        assert!(term.grid.rows[0][4].hyperlink.is_none());
+    }
+
+    #[test]
+    fn test_osc_11_set_y_query() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]11;#102030\x07");
+        assert_eq!(term.bg_override, Some((0x10, 0x20, 0x30)));
+        feed(&mut term, b"\x1b]11;?\x07");
+        assert_eq!(term.take_pty_response(), b"\x1b]11;rgb:1010/2020/3030\x07");
+    }
+
+    #[test]
+    fn test_osc_11_query_con_st() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]11;#102030\x07");
+        feed(&mut term, b"\x1b]11;?\x1b\\");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1b]11;rgb:1010/2020/3030\x1b\\"
+        );
+    }
+
+    #[test]
+    fn test_osc_4_set_indexado() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]4;1;#ff0000\x07");
+        assert_eq!(term.runtime_palette[1], Some((0xff, 0x00, 0x00)));
+    }
+
+    #[test]
+    fn test_osc_4_query_indexado() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]4;1;#ff0000\x07");
+        feed(&mut term, b"\x1b]4;1;?\x07");
+        assert_eq!(term.take_pty_response(), b"\x1b]4;1;rgb:ffff/0000/0000\x07");
+    }
+
+    #[test]
+    fn test_da2_responde_version_patch() {
+        let mut term = Term::new();
+        let ver = Term::term_version_id();
+        feed(&mut term, b"\x1b[>c");
+        assert_eq!(
+            term.take_pty_response(),
+            format!("\x1b[>1;{ver};0c").as_bytes()
+        );
+        let mut term2 = Term::new();
+        feed(&mut term2, b"\x1b[>0c");
+        assert_eq!(
+            term2.take_pty_response(),
+            format!("\x1b[>1;{ver};0c").as_bytes()
+        );
+    }
+
+    #[test]
+    fn test_cpr_dec_con_prefijo_interrogacion() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[5;10H\x1b[?6n");
+        assert_eq!(term.take_pty_response(), b"\x1b[?5;10R");
+    }
+
+    #[test]
+    fn test_xtversion_dcs() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[>q");
+        assert_eq!(term.take_pty_response(), b"\x1bP>|baud\x1b\\");
+    }
+
+    #[test]
+    fn test_sgr_blink() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[5mX");
+        assert!(term.grid.rows[0][0].attrs.blink);
+        feed(&mut term, b"\x1b[25mY");
+        assert!(!term.grid.rows[0][1].attrs.blink);
+    }
+
+    #[test]
+    fn test_sgr_invisible() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[8mX");
+        assert!(term.grid.rows[0][0].attrs.invisible);
+        feed(&mut term, b"\x1b[28mY");
+        assert!(!term.grid.rows[0][1].attrs.invisible);
+    }
+
+    #[test]
+    fn test_sgr_overline() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[53mX");
+        assert!(term.grid.rows[0][0].attrs.overline);
+        feed(&mut term, b"\x1b[55mY");
+        assert!(!term.grid.rows[0][1].attrs.overline);
+    }
+
+    #[test]
+    fn test_sgr_underline_color() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[58;5;4mX");
+        assert_eq!(
+            term.grid.rows[0][0].attrs.underline_color,
+            Color::Indexed(4)
+        );
+        feed(&mut term, b"\x1b[59mY");
+        assert_eq!(term.grid.rows[0][1].attrs.underline_color, Color::Default);
     }
 
     #[test]
@@ -2722,8 +3154,7 @@ mod tests {
             .chars()
             .map(|c| Cell {
                 ch: c,
-                attrs: Attrs::default(),
-                width: 1,
+                ..Default::default()
             })
             .collect();
         term.grid.scrollback.push_back(short_sb_row);
@@ -2897,8 +3328,7 @@ mod tests {
             .chars()
             .map(|c| Cell {
                 ch: c,
-                attrs: Attrs::default(),
-                width: 1,
+                ..Default::default()
             })
             .collect();
         term.grid.scrollback.push_back(sb_row);

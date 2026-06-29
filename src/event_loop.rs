@@ -66,18 +66,33 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         while let Ok(event) = rx_pty_to_gui.recv() {
             match event {
                 PtyEvent::Output(bytes) => {
-                    let response = {
+                    let (response, title, clipboard_pending) = {
                         let mut term_guard =
                             term_drain.lock().expect("term mutex poisoned en drain");
                         parser.advance(&mut *term_guard, &bytes);
                         term_guard.mark_dirty();
-                        term_guard.take_pty_response()
+                        let response = term_guard.take_pty_response();
+                        let title = term_guard.take_title_if_dirty();
+                        let clipboard_pending = term_guard.take_clipboard_read_pending();
+                        (response, title, clipboard_pending)
                     };
                     if !response.is_empty() {
                         if let Err(e) = tx_response.send(PtyCommand::Input(response)) {
                             tracing::warn!(
                                 "drain: no se pudo reenviar respuesta PTY ({e}); query descartada"
                             );
+                        }
+                    }
+                    if let Some(proxy) = proxy_for_drain_clone
+                        .lock()
+                        .expect("proxy mutex poisoned en drain")
+                        .as_ref()
+                    {
+                        if let Some(t) = title {
+                            let _ = proxy.send_event(UserEvent::SetTitle(t));
+                        }
+                        if let Some((target, bell)) = clipboard_pending {
+                            let _ = proxy.send_event(UserEvent::ReadClipboard(target, bell));
                         }
                     }
                     tracing::trace!(
