@@ -10,6 +10,7 @@ pub enum Action {
     ScrollLineDown,
     ScrollPageUp,
     ScrollPageDown,
+    ScrollToBottom,
     FontZoomIn,
     FontZoomOut,
     FontZoomReset,
@@ -82,6 +83,9 @@ impl Default for Keybindings {
                 (Key::Down, alt, Action::ScrollPageDown),
                 (Key::PageUp, shift, Action::ScrollPageUp),
                 (Key::PageDown, shift, Action::ScrollPageDown),
+                (Key::PageUp, Mods::NONE, Action::ScrollPageUp),
+                (Key::PageDown, Mods::NONE, Action::ScrollPageDown),
+                (Key::End, ctrl, Action::ScrollToBottom),
             ],
         }
     }
@@ -153,11 +157,21 @@ pub fn parse_action(s: &str) -> Option<Action> {
         "scroll_line_down" => Action::ScrollLineDown,
         "scroll_page_up" => Action::ScrollPageUp,
         "scroll_page_down" => Action::ScrollPageDown,
+        "scroll_to_bottom" => Action::ScrollToBottom,
         "font_zoom_in" => Action::FontZoomIn,
         "font_zoom_out" => Action::FontZoomOut,
         "font_zoom_reset" => Action::FontZoomReset,
         _ => return None,
     })
+}
+
+/// Normaliza tecla y modificadores antes de consultar el mapa de bindings.
+pub fn normalize_binding_key(key: Key, mods: Mods) -> Key {
+    match key {
+        Key::Char(c) if mods.ctrl => Key::Char(c.to_ascii_lowercase()),
+        Key::Char('+') => Key::Char('='),
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -227,7 +241,57 @@ mod tests {
     fn test_parse_action_str() {
         assert_eq!(parse_action("copy"), Some(Action::Copy));
         assert_eq!(parse_action("font_zoom_in"), Some(Action::FontZoomIn));
+        assert_eq!(
+            parse_action("scroll_to_bottom"),
+            Some(Action::ScrollToBottom)
+        );
         assert_eq!(parse_action("desconocida"), None);
+    }
+
+    #[test]
+    fn test_default_bindings_page_scroll() {
+        let kb = Keybindings::default();
+        assert_eq!(
+            kb.lookup(Key::PageUp, Mods::NONE),
+            Some(Action::ScrollPageUp)
+        );
+        assert_eq!(
+            kb.lookup(Key::PageDown, Mods::NONE),
+            Some(Action::ScrollPageDown)
+        );
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        assert_eq!(kb.lookup(Key::End, ctrl), Some(Action::ScrollToBottom));
+    }
+
+    #[test]
+    fn test_normalize_binding_key_uppercase_ctrl() {
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        let kb = Keybindings::default();
+        let normalized = normalize_binding_key(Key::Char('C'), cs);
+        assert_eq!(kb.lookup(normalized, cs), Some(Action::Copy));
+    }
+
+    #[test]
+    fn test_keybindings_from_overrides_invalid_keeps_default() {
+        let overrides = vec![
+            ("ctrl+shift+v".to_string(), "paste_primary".to_string()),
+            ("mal+combo".to_string(), "copy".to_string()),
+        ];
+        let kb = Keybindings::from_overrides(&overrides);
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(kb.lookup(Key::Char('v'), cs), Some(Action::PastePrimary));
+        assert_eq!(kb.lookup(Key::Char('c'), cs), Some(Action::Copy));
     }
 
     #[test]

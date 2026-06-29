@@ -627,10 +627,9 @@ impl Term {
     }
 
     /// Cambia el tamano del grid primario y alt grid.
-    /// En pantalla primaria: aplica reflow de lineas antes de resize.
-    /// En alt screen: resize directo sin reflow.
-    /// Tambien ajusta scroll_region, cursor y pending_wrap si es necesario.
-    pub fn resize_grid(&mut self, new_rows: usize, new_cols: usize) {
+    /// En pantalla primaria: aplica reflow de lineas antes de resize si `reflow` es true.
+    /// Font zoom usa `reflow = false` para evitar reordenar el grid antes de SIGWINCH.
+    pub fn resize_grid(&mut self, new_rows: usize, new_cols: usize, reflow: bool) {
         const MAX_GRID: usize = 4096;
         let new_rows = new_rows.clamp(1, MAX_GRID);
         let new_cols = new_cols.clamp(1, MAX_GRID);
@@ -658,11 +657,15 @@ impl Term {
             self.cursor.cols_count = new_cols;
         } else {
             let mut cursor_pos = cursor_before;
-            if new_cols != old_cols {
+            if reflow && new_cols != old_cols {
                 cursor_pos = self
                     .grid
                     .reflow_with_cursor(new_cols, Some(cursor_pos))
                     .unwrap_or(cursor_pos);
+            } else if !reflow && new_cols != old_cols {
+                for c in &mut self.grid.row_continuations {
+                    *c = false;
+                }
             }
             let removed = self.grid.resize(new_rows, new_cols);
             cursor_pos = Self::adjust_cursor_after_resize(
@@ -1669,7 +1672,7 @@ mod tests {
     #[test]
     fn test_irm_inserta_en_ruta_wide_char() {
         let mut term = Term::new();
-        term.resize_grid(term.grid.rows_count, 10);
+        term.resize_grid(term.grid.rows_count, 10, true);
         feed(&mut term, b"\x1b[2;1HZZZZ");
         feed(&mut term, b"\x1b[1;10H\x1b[4h");
         feed(&mut term, "\u{4e2d}".as_bytes());
@@ -1705,7 +1708,7 @@ mod tests {
     fn test_tab_stops_preservados_en_resize() {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[3G\x1bH");
-        term.resize_grid(term.grid.rows_count, term.grid.cols_count + 8);
+        term.resize_grid(term.grid.rows_count, term.grid.cols_count + 8, true);
         feed(&mut term, b"\r\t");
         assert_eq!(term.cursor.col, 2);
     }
@@ -1944,7 +1947,7 @@ mod tests {
     #[test]
     fn enter_alt_screen_preserves_grid_dimensions() {
         let mut t = Term::new();
-        t.resize_grid(35, 120);
+        t.resize_grid(35, 120, true);
         t.enter_alt_screen();
         assert_eq!(t.alt_grid.rows_count, 35);
         assert_eq!(t.alt_grid.cols_count, 120);
@@ -2682,7 +2685,7 @@ mod tests {
         // Reducir tamano (simula resize de terminal)
         // El resize trunca del PRINCIPIO, asi que el contenido de row 0
         // se mueve al scrollback. Verificamos que esta alli.
-        term.resize_grid(10, 5);
+        term.resize_grid(10, 5, true);
 
         // Alt grid debe haberse redimensionado
         assert_eq!(term.alt_grid.rows_count, 10);
@@ -2710,7 +2713,7 @@ mod tests {
         feed(&mut term, b"ABCDEFGHIJKLMNOPQRST");
 
         // Reducir ancho significativamente
-        term.resize_grid(24, 5);
+        term.resize_grid(24, 5, true);
 
         // El contenido debe haberse reflujeado a varias filas
         assert_eq!(term.grid.rows[0][0].ch, 'A');

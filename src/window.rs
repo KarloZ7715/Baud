@@ -17,7 +17,7 @@ use crate::config::Config;
 use crate::copy_mode::CopyModeState;
 use crate::event_loop::PtyCommand;
 use crate::grid::Cell;
-use crate::input::actions::{Action, Keybindings};
+use crate::input::actions::{normalize_binding_key, Action, Keybindings};
 use crate::input::keymap::{self, Key as KKey, KeyModes, Mods};
 use crate::renderer::Renderer;
 use crate::selection::{Selection, SelectionMode, SelectionPoint};
@@ -151,6 +151,7 @@ impl App {
             window_height: 600.0,
             last_click_time: None,
             last_reported_cell: None,
+            // ponytail: overrides TOML [keys] se conectan en el plan de Personalizacion.
             keybindings: Keybindings::default(),
         }
     }
@@ -168,6 +169,8 @@ impl App {
         height: u32,
         cell_w: f32,
         cell_h: f32,
+        preserve_scrollback: bool,
+        reflow: bool,
     ) -> (usize, usize, usize, usize) {
         let (new_rows, new_cols) =
             crate::renderer::limits::compute_grid_dims(width, height, cell_w, cell_h);
@@ -178,8 +181,13 @@ impl App {
             (new_rows, new_cols)
         };
         if let Ok(mut guard) = self.term.lock() {
-            guard.resize_grid(new_rows, new_cols);
-            guard.scrollback_offset = 0;
+            guard.resize_grid(new_rows, new_cols, reflow);
+            if preserve_scrollback {
+                let max_offset = guard.scrollback_len();
+                guard.scrollback_offset = guard.scrollback_offset.min(max_offset as isize);
+            } else {
+                guard.scrollback_offset = 0;
+            }
         }
         if old_rows != new_rows || old_cols != new_cols {
             if let Some(tx) = self.pty_tx.lock().ok().and_then(|g| g.as_ref().cloned()) {
@@ -433,6 +441,13 @@ impl App {
         guard.mark_dirty();
     }
 
+    fn scroll_to_bottom(&mut self) {
+        let mut guard = self.term.lock().expect("term mutex poisoned");
+        guard.scrollback_offset = 0;
+        guard.mark_dirty();
+    }
+
+    /// Entra en copy mode si esta habilitado en config (no sale; usar q/Esc en copy mode).
     fn toggle_copy_mode(&mut self) {
         if !self.config.copy_mode.enabled {
             return;
@@ -459,7 +474,7 @@ impl App {
         let metrics = self.renderer.as_ref().map(|r| (r.cell_w(), r.cell_h()));
         if let (Some(window), Some((cell_w, cell_h))) = (&self.window, metrics) {
             let size = window.inner_size();
-            self.sync_grid_to_window(size.width, size.height, cell_w, cell_h);
+            self.sync_grid_to_window(size.width, size.height, cell_w, cell_h, true, false);
         }
     }
 
@@ -487,6 +502,7 @@ impl App {
             ScrollLineDown => self.scroll_lines(-1),
             ScrollPageUp => self.scroll_page(1),
             ScrollPageDown => self.scroll_page(-1),
+            ScrollToBottom => self.scroll_to_bottom(),
             FontZoomIn => self.font_zoom(1),
             FontZoomOut => self.font_zoom(-1),
             FontZoomReset => self.font_zoom(0),
@@ -733,7 +749,14 @@ impl ApplicationHandler<UserEvent> for App {
 
         let size = window.inner_size();
         if let Some(renderer) = &self.renderer {
-            self.sync_grid_to_window(size.width, size.height, renderer.cell_w, renderer.cell_h);
+            self.sync_grid_to_window(
+                size.width,
+                size.height,
+                renderer.cell_w,
+                renderer.cell_h,
+                false,
+                true,
+            );
         }
 
         // 5. Forzar el primer redraw para que winit dispare RedrawRequested.
@@ -765,8 +788,14 @@ impl ApplicationHandler<UserEvent> for App {
                 renderer.resize(new_size.width, new_size.height, 0);
                 let cell_w = renderer.cell_w;
                 let cell_h = renderer.cell_h;
-                let (_old_rows, _old_cols, new_rows, new_cols) =
-                    self.sync_grid_to_window(new_size.width, new_size.height, cell_w, cell_h);
+                let (_old_rows, _old_cols, new_rows, new_cols) = self.sync_grid_to_window(
+                    new_size.width,
+                    new_size.height,
+                    cell_w,
+                    cell_h,
+                    false,
+                    true,
+                );
                 tracing::debug!(
                     "[RESIZE] cell_h={:.1} cell_w={:.1} win={}x{} -> grid={}x{}",
                     cell_h,
@@ -1136,11 +1165,7 @@ impl ApplicationHandler<UserEvent> for App {
                 };
 
                 if let Some(k) = winit_to_key(&event.logical_key) {
-                    let k_norm = if k == KKey::Char('+') {
-                        KKey::Char('=')
-                    } else {
-                        k
-                    };
+                    let k_norm = normalize_binding_key(k, mods);
                     if let Some(action) = self.keybindings.lookup(k_norm, mods) {
                         self.run_action(action);
                         return;
