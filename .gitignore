@@ -18,18 +18,15 @@ tmp/
 .env.local
 .env.*.local
 
-# Build artifacts
+# Artefactos del build
 *.o
 *.so
 *.dylib
 *.dll
 *.pdb
 
-# Documentation
+# Documentacion
 docs/*
-!docs/README.md
-!docs/specs
-!docs/decisions
 
 # AI
 src/prompts/*

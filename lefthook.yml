@@ -20,12 +20,12 @@ pre-commit:
       glob: "*.rs"
       run: cargo clippy --all-targets -- -D warnings
 
-# Hooks desactivados (plantillas listas, descomentar cuando se necesiten)
-# pre-push:
-#   jobs:
-#     - name: test
-#       run: cargo test --all
-#
+
+pre-push:
+  jobs:
+    - name: test
+      run: cargo test --all
+
 commit-msg:
   commands:
     conventional-commit:
