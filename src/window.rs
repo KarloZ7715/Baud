@@ -17,6 +17,7 @@ use crate::config::Config;
 use crate::copy_mode::CopyModeState;
 use crate::event_loop::PtyCommand;
 use crate::grid::Cell;
+use crate::input::actions::{Action, Keybindings};
 use crate::input::keymap::{self, Key as KKey, KeyModes, Mods};
 use crate::renderer::Renderer;
 use crate::selection::{Selection, SelectionMode, SelectionPoint};
@@ -115,6 +116,8 @@ pub struct App {
     last_click_time: Option<Instant>,
     /// Ultima celda reportada al PTY en mouse motion (evita flood por pixel).
     last_reported_cell: Option<(usize, usize)>,
+    /// Mapa de atajos de teclado (defaults + overrides de config).
+    keybindings: Keybindings,
 }
 
 impl App {
@@ -138,6 +141,7 @@ impl App {
             window_height: 600.0,
             last_click_time: None,
             last_reported_cell: None,
+            keybindings: Keybindings::default(),
         }
     }
 
@@ -386,6 +390,81 @@ impl App {
             }
             guard.scroll_to_show_logical_row(new_row as usize);
             guard.mark_dirty();
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn scroll_lines(&mut self, n: isize) {
+        let mut guard = self.term.lock().expect("term mutex poisoned");
+        if n > 0 {
+            if !guard.alt_screen {
+                let max_offset = guard.scrollback_len();
+                guard.scrollback_offset = (guard.scrollback_offset + n).min(max_offset as isize);
+            }
+        } else {
+            guard.scrollback_offset = (guard.scrollback_offset + n).max(0);
+        }
+        guard.mark_dirty();
+    }
+
+    fn scroll_page(&mut self, dir: isize) {
+        let mut guard = self.term.lock().expect("term mutex poisoned");
+        let page = guard.grid.rows_count as isize - 1;
+        if dir > 0 {
+            if !guard.alt_screen {
+                let max_offset = guard.scrollback_len();
+                guard.scrollback_offset = (guard.scrollback_offset + page).min(max_offset as isize);
+            }
+        } else {
+            guard.scrollback_offset = (guard.scrollback_offset - page).max(0);
+        }
+        guard.mark_dirty();
+    }
+
+    fn toggle_copy_mode(&mut self) {
+        if !self.config.copy_mode.enabled {
+            return;
+        }
+        if let Ok(mut guard) = self.term.lock() {
+            if guard.copy_mode.is_none() {
+                guard.copy_mode = Some(CopyModeState::enter(&guard));
+                guard.mark_dirty();
+                tracing::info!("KEYBOARD: copy mode activado");
+            }
+        }
+    }
+
+    fn font_zoom(&mut self, _dir: i8) {}
+
+    fn run_action(&mut self, action: Action) {
+        use crate::input::actions::Action::*;
+        match action {
+            Copy => {
+                let in_copy_mode = self
+                    .term
+                    .lock()
+                    .ok()
+                    .map(|g| g.copy_mode.is_some())
+                    .unwrap_or(false);
+                self.handle_copy();
+                if in_copy_mode {
+                    if let Ok(mut guard) = self.term.lock() {
+                        CopyModeState::exit(&mut guard);
+                    }
+                }
+            }
+            Paste => self.handle_paste(),
+            PastePrimary => self.handle_paste_primary(),
+            ToggleCopyMode => self.toggle_copy_mode(),
+            ScrollLineUp => self.scroll_lines(1),
+            ScrollLineDown => self.scroll_lines(-1),
+            ScrollPageUp => self.scroll_page(1),
+            ScrollPageDown => self.scroll_page(-1),
+            FontZoomIn => self.font_zoom(1),
+            FontZoomOut => self.font_zoom(-1),
+            FontZoomReset => self.font_zoom(0),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -1024,65 +1103,27 @@ impl ApplicationHandler<UserEvent> for App {
                     alt
                 );
 
-                // 1. Ctrl+Shift+C/V (copy/paste).
-                if ctrl && shift {
-                    match &event.logical_key {
-                        Key::Character(c) if c.eq_ignore_ascii_case("c") => {
-                            tracing::info!(
-                                "KEYBOARD: Ctrl+Shift+C detectado, llamando handle_copy()"
-                            );
-                            // En copy mode: copiar y salir.
-                            let in_copy_mode = self
-                                .term
-                                .lock()
-                                .ok()
-                                .map(|g| g.copy_mode.is_some())
-                                .unwrap_or(false);
-                            self.handle_copy();
-                            if in_copy_mode {
-                                if let Ok(mut guard) = self.term.lock() {
-                                    CopyModeState::exit(&mut guard);
-                                }
-                                if let Some(window) = &self.window {
-                                    window.request_redraw();
-                                }
-                            }
-                            return;
-                        }
-                        Key::Character(c) if c.eq_ignore_ascii_case("v") => {
-                            tracing::info!(
-                                "KEYBOARD: Ctrl+Shift+V detectado, llamando handle_paste()"
-                            );
-                            self.handle_paste();
-                            return;
-                        }
-                        Key::Character(c)
-                            if c.eq_ignore_ascii_case("x") && self.config.copy_mode.enabled =>
-                        {
-                            // Ctrl+Shift+X: entrar en copy mode.
-                            if let Ok(mut guard) = self.term.lock() {
-                                if guard.copy_mode.is_none() {
-                                    guard.copy_mode = Some(CopyModeState::enter(&guard));
-                                    guard.mark_dirty();
-                                    tracing::info!("KEYBOARD: copy mode activado");
-                                }
-                            }
-                            if let Some(window) = &self.window {
-                                window.request_redraw();
-                            }
-                            return;
-                        }
-                        _ => {
-                            tracing::debug!(
-                                "KEYBOARD: ctrl+shift+{:?} (no es C ni V)",
-                                event.logical_key
-                            );
-                        }
+                let mods = Mods {
+                    shift: self.modifiers.state().shift_key(),
+                    alt: self.modifiers.state().alt_key(),
+                    ctrl: self.modifiers.state().control_key(),
+                    sup: self.modifiers.state().super_key(),
+                };
+
+                if let Some(k) = winit_to_key(&event.logical_key) {
+                    let k_norm = if k == KKey::Char('+') {
+                        KKey::Char('=')
+                    } else {
+                        k
+                    };
+                    if let Some(action) = self.keybindings.lookup(k_norm, mods) {
+                        self.run_action(action);
+                        return;
                     }
                 }
 
-                // 2. Copy mode: si está activo, las teclas navegan/seleccionan
-                //    y NO se envían al PTY (excepto Ctrl+Shift+C ya manejado arriba).
+                // Copy mode: si está activo, las teclas navegan/seleccionan
+                // y NO se envían al PTY (excepto Ctrl+Shift+C ya manejado arriba).
                 if self
                     .term
                     .lock()
@@ -1097,7 +1138,7 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
-                // 3. Handlers locales de seleccion/scroll (se reconcilian en Teclado 2).
+                // ponytail: seleccion por teclado vive fuera del binding map por su estado.
                 match &event.logical_key {
                     Key::Named(NamedKey::ArrowLeft) if shift && !ctrl && !alt => {
                         self.extend_selection(0, -1);
@@ -1115,102 +1156,10 @@ impl ApplicationHandler<UserEvent> for App {
                         self.extend_selection(1, 0);
                         return;
                     }
-                    Key::Named(NamedKey::ArrowUp) if ctrl && shift => {
-                        let mut guard = self.term.lock().expect("term mutex poisoned");
-                        if !guard.alt_screen {
-                            let max_offset = guard.scrollback_len();
-                            guard.scrollback_offset =
-                                (guard.scrollback_offset + 1).min(max_offset as isize);
-                        }
-                        guard.mark_dirty();
-                        drop(guard);
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                        return;
-                    }
-                    Key::Named(NamedKey::ArrowDown) if ctrl && shift => {
-                        let mut guard = self.term.lock().expect("term mutex poisoned");
-                        guard.scrollback_offset = (guard.scrollback_offset - 1).max(0);
-                        guard.mark_dirty();
-                        drop(guard);
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                        return;
-                    }
-                    Key::Named(NamedKey::ArrowUp) if alt => {
-                        let mut guard = self.term.lock().expect("term mutex poisoned");
-                        if !guard.alt_screen {
-                            let max_offset = guard.scrollback_len();
-                            let page = guard.grid.rows_count as isize - 1;
-                            guard.scrollback_offset =
-                                (guard.scrollback_offset + page).min(max_offset as isize);
-                        }
-                        guard.mark_dirty();
-                        drop(guard);
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                        return;
-                    }
-                    Key::Named(NamedKey::ArrowDown) if alt => {
-                        let mut guard = self.term.lock().expect("term mutex poisoned");
-                        let page = guard.grid.rows_count as isize - 1;
-                        guard.scrollback_offset = (guard.scrollback_offset - page).max(0);
-                        guard.mark_dirty();
-                        drop(guard);
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                        return;
-                    }
-                    Key::Named(NamedKey::End) if ctrl => {
-                        let mut guard = self.term.lock().expect("term mutex poisoned");
-                        guard.scrollback_offset = 0;
-                        guard.mark_dirty();
-                        drop(guard);
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                        return;
-                    }
-                    Key::Named(NamedKey::PageUp) => {
-                        let mut guard = self.term.lock().expect("term mutex poisoned");
-                        if !guard.alt_screen {
-                            let max_offset = guard.scrollback_len();
-                            let page = guard.grid.rows_count as isize - 1;
-                            guard.scrollback_offset =
-                                (guard.scrollback_offset + page).min(max_offset as isize);
-                        }
-                        guard.mark_dirty();
-                        drop(guard);
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                        return;
-                    }
-                    Key::Named(NamedKey::PageDown) => {
-                        let mut guard = self.term.lock().expect("term mutex poisoned");
-                        let page = guard.grid.rows_count as isize - 1;
-                        guard.scrollback_offset = (guard.scrollback_offset - page).max(0);
-                        guard.mark_dirty();
-                        drop(guard);
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                        return;
-                    }
                     _ => {}
                 }
 
-                // 4. Fallback: keymap::encode_key (Alt/Meta, mods xterm, DECCKM).
-                let mods = Mods {
-                    shift: self.modifiers.state().shift_key(),
-                    alt: self.modifiers.state().alt_key(),
-                    ctrl: self.modifiers.state().control_key(),
-                    sup: self.modifiers.state().super_key(),
-                };
+                // Fallback: keymap::encode_key (Alt/Meta, mods xterm, DECCKM).
                 if let Some(k) = winit_to_key(&event.logical_key) {
                     let modes = current_key_modes(&self.term);
                     if let Some(bytes) = keymap::encode_key(k, mods, modes) {
