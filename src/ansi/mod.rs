@@ -146,6 +146,14 @@ pub struct Term {
     tab_stops: Vec<bool>,
     /// Keypad en modo aplicacion (DECKPAM/DECKPNM).
     keypad_application_mode: bool,
+    /// DECCKM: application cursor keys (?1).
+    pub app_cursor_keys: bool,
+    /// DECOM: origin mode (?6), cursor relativo a scroll region.
+    origin_mode: bool,
+    /// IRM: insert/replace mode (4).
+    insert_mode: bool,
+    /// LNM: line feed/newline mode (20).
+    newline_mode: bool,
 }
 
 fn default_tab_stops(cols: usize) -> Vec<bool> {
@@ -188,7 +196,19 @@ impl Term {
             pty_response: Vec::new(),
             tab_stops: default_tab_stops(DEFAULT_COLS),
             keypad_application_mode: false,
+            app_cursor_keys: false,
+            origin_mode: false,
+            insert_mode: false,
+            newline_mode: false,
         }
+    }
+
+    fn resolve_origin_row(&self, param_row: u16) -> usize {
+        let mut row = param_row.max(1).saturating_sub(1) as usize;
+        if self.origin_mode {
+            row += self.scroll_region.0;
+        }
+        row.min(self.scroll_region.1)
     }
 
     /// Encola bytes de respuesta hacia el PTY.
@@ -585,6 +605,10 @@ impl vte::Perform for Term {
 
         // Ruta normal: escribir caracter y avanzar cursor.
         {
+            if self.insert_mode {
+                self.active_grid_mut()
+                    .insert_chars(row, col, c_width.max(1));
+            }
             let active = self.active_grid_mut();
             let cols = active.cols_count;
             let wrote = active.cell(row, col).is_some();
@@ -631,15 +655,11 @@ impl vte::Perform for Term {
                 self.cursor.move_to(self.cursor.row, next);
             }
             0x0A => {
-                // LF (line feed): CR+LF implicito. En terminales reales, el
-                // driver del PTY convierte \\n a \\r\\n via ONLCR, pero en
-                // llamadas directas a feed()/advance() sin PTY, LF debe
-                // resetear la columna para que el texto siguiente empiece
-                // al inicio de la linea (comportamiento intuitivo esperado).
-                // ponytail: CR+LF en 1 sola linea.
                 self.pending_wrap = false;
                 let (top, bottom) = self.scroll_region;
-                self.cursor.move_to(self.cursor.row, 0);
+                if self.newline_mode {
+                    self.cursor.move_to(self.cursor.row, 0);
+                }
                 if self.cursor.row == bottom {
                     self.active_grid_mut().scroll_up_region(1, top, bottom);
                 } else {
@@ -680,6 +700,10 @@ impl vte::Perform for Term {
             match (action, mode) {
                 ('h', 25) => self.cursor_visible = true,
                 ('l', 25) => self.cursor_visible = false,
+                ('h', 1) => self.app_cursor_keys = true,
+                ('l', 1) => self.app_cursor_keys = false,
+                ('h', 6) => self.origin_mode = true,
+                ('l', 6) => self.origin_mode = false,
                 ('h', 7) => self.auto_wrap = true,
                 ('l', 7) => self.auto_wrap = false,
                 ('h', 1049) => self.enter_alt_screen(),
@@ -697,6 +721,18 @@ impl vte::Perform for Term {
                 ('h', 2004) => self.bracketed_paste = true,
                 ('l', 2004) => self.bracketed_paste = false,
                 _ => {}
+            }
+            return;
+        }
+
+        if intermediates.is_empty() && (action == 'h' || action == 'l') {
+            let set = action == 'h';
+            for p in params.iter() {
+                match p.first().copied().unwrap_or(0) {
+                    4 => self.insert_mode = set,
+                    20 => self.newline_mode = set,
+                    _ => {}
+                }
             }
             return;
         }
@@ -845,11 +881,8 @@ impl vte::Perform for Term {
                 self.cursor.move_back(n as usize);
             }
             'H' => {
-                // Cursor position: params son 1-indexed, default (1,1).
-                // ponytail: 0/1-indexed equivalente, convencion comun.
-                // CANCELA pending_wrap.
                 self.pending_wrap = false;
-                let row = params.first().copied().unwrap_or(1).saturating_sub(1) as usize;
+                let row = self.resolve_origin_row(params.first().copied().unwrap_or(1));
                 let col = params.get(1).copied().unwrap_or(1).saturating_sub(1) as usize;
                 self.cursor.move_to(row, col);
             }
@@ -933,17 +966,12 @@ impl vte::Perform for Term {
             }
             'd' => {
                 self.pending_wrap = false;
-                let row = params
-                    .first()
-                    .copied()
-                    .unwrap_or(1)
-                    .max(1)
-                    .saturating_sub(1) as usize;
+                let row = self.resolve_origin_row(params.first().copied().unwrap_or(1));
                 self.cursor.move_to(row, self.cursor.col);
             }
             'f' => {
                 self.pending_wrap = false;
-                let row = params.first().copied().unwrap_or(1).saturating_sub(1) as usize;
+                let row = self.resolve_origin_row(params.first().copied().unwrap_or(1));
                 let col = params.get(1).copied().unwrap_or(1).saturating_sub(1) as usize;
                 self.cursor.move_to(row, col);
             }
@@ -1153,6 +1181,24 @@ mod tests {
     }
 
     #[test]
+    fn test_decckm_set_reset() {
+        let mut term = Term::new();
+        assert!(!term.app_cursor_keys);
+        feed(&mut term, b"\x1b[?1h");
+        assert!(term.app_cursor_keys);
+        feed(&mut term, b"\x1b[?1l");
+        assert!(!term.app_cursor_keys);
+    }
+
+    #[test]
+    fn test_irm_inserta() {
+        let mut term = Term::new();
+        feed(&mut term, b"ABC\x1b[1G\x1b[4hX");
+        let fila: String = term.grid.rows[0].iter().take(4).map(|c| c.ch).collect();
+        assert_eq!(fila, "XABC");
+    }
+
+    #[test]
     fn print_marks_damage_on_active_grid() {
         let mut t = Term::new();
         let _ = t.take_active_grid_damage();
@@ -1356,11 +1402,12 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"a\n");
         assert_eq!(term.cursor.row, 1);
-        assert_eq!(
-            term.cursor.col, 0,
-            "LF debe hacer CR+FL: col debe resetearse a 0"
-        );
+        assert_eq!(term.cursor.col, 1, "LNM off: LF no resetea columna");
         assert_eq!(term.grid.rows[0][0].ch, 'a');
+        feed(&mut term, b"\x1b[20h");
+        feed(&mut term, b"b\n");
+        assert_eq!(term.cursor.row, 2);
+        assert_eq!(term.cursor.col, 0, "LNM on: LF hace CR+LF");
     }
 
     #[test]
