@@ -138,6 +138,10 @@ pub struct Term {
     pub mouse_reporting: MouseReporting,
     pub copy_mode: Option<CopyModeState>,
     pub cursor_style: CursorStyle,
+    /// Bytes que el terminal debe escribir de vuelta al PTY (respuestas a
+    /// queries: DA1/DA2/DSR/CPR/XTVERSION y, mas adelante, OSC query).
+    /// El hilo drain lo vacia tras cada parser.advance().
+    pub pty_response: Vec<u8>,
 }
 
 impl Default for Term {
@@ -169,8 +173,20 @@ impl Term {
             mouse_reporting: MouseReporting::default(),
             copy_mode: None,
             cursor_style: CursorStyle::default(),
+            pty_response: Vec::new(),
         }
     }
+
+    /// Encola bytes de respuesta hacia el PTY.
+    pub fn respond(&mut self, bytes: &[u8]) {
+        self.pty_response.extend_from_slice(bytes);
+    }
+
+    /// Vacia y devuelve la respuesta pendiente (la mueve, dejando el buffer vacio).
+    pub fn take_pty_response(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pty_response)
+    }
+
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
     }
@@ -933,6 +949,17 @@ mod tests {
     fn feed(term: &mut Term, data: &[u8]) {
         let mut parser = vte::Parser::new();
         parser.advance(term, data);
+    }
+
+    #[test]
+    fn test_respond_acumula_y_take_vacia() {
+        let mut term = Term::new();
+        assert!(term.take_pty_response().is_empty());
+        term.respond(b"\x1b[0n");
+        term.respond(b"AB");
+        let out = term.take_pty_response();
+        assert_eq!(out, b"\x1b[0nAB");
+        assert!(term.take_pty_response().is_empty());
     }
 
     #[test]

@@ -48,6 +48,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Dos canales separados: PTY->drain y GUI->PTY
     let (tx_pty_to_gui, rx_pty_to_gui) = mpsc::channel::<PtyEvent>();
     let (tx_gui_to_pty, rx_gui_to_pty) = mpsc::channel::<PtyCommand>();
+    let tx_response = tx_gui_to_pty.clone();
 
     // Term compartido entre hilo drain y App (GUI).
     let term = Arc::new(Mutex::new(Term::new()));
@@ -65,11 +66,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         while let Ok(event) = rx_pty_to_gui.recv() {
             match event {
                 PtyEvent::Output(bytes) => {
-                    {
+                    let response = {
                         let mut term_guard =
                             term_drain.lock().expect("term mutex poisoned en drain");
                         parser.advance(&mut *term_guard, &bytes);
                         term_guard.mark_dirty();
+                        term_guard.take_pty_response()
+                    };
+                    if !response.is_empty() {
+                        let _ = tx_response.send(PtyCommand::Input(response));
                     }
                     tracing::trace!(
                         "drain: processed {} bytes: {:02x?}, sending RedrawNeeded",
