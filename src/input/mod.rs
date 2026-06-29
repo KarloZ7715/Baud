@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod keymap;
 
 /// Filtra bytes problematicos (ESC 0x1B, ETX 0x03) del texto pegado.
