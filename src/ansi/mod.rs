@@ -1,6 +1,6 @@
 use crate::copy_mode::CopyModeState;
 use crate::cursor::Cursor;
-use crate::grid::{Grid, DEFAULT_ROWS};
+use crate::grid::{Grid, DEFAULT_COLS, DEFAULT_ROWS};
 use crate::selection::Selection;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -142,6 +142,18 @@ pub struct Term {
     /// queries: DA1/DA2/DSR/CPR/XTVERSION y, mas adelante, OSC query).
     /// El hilo drain lo vacia tras cada parser.advance().
     pub pty_response: Vec<u8>,
+    /// Tab stops por columna (true = parada activa).
+    tab_stops: Vec<bool>,
+    /// Keypad en modo aplicacion (DECKPAM/DECKPNM).
+    keypad_application_mode: bool,
+}
+
+fn default_tab_stops(cols: usize) -> Vec<bool> {
+    let mut stops = vec![false; cols];
+    for col in (8..cols).step_by(8) {
+        stops[col] = true;
+    }
+    stops
 }
 
 impl Default for Term {
@@ -174,6 +186,8 @@ impl Term {
             copy_mode: None,
             cursor_style: CursorStyle::default(),
             pty_response: Vec::new(),
+            tab_stops: default_tab_stops(DEFAULT_COLS),
+            keypad_application_mode: false,
         }
     }
 
@@ -298,6 +312,7 @@ impl Term {
         self.alt_grid.resize(new_rows, new_cols);
         self.scroll_region = (0, new_rows - 1);
         self.pending_wrap = false;
+        self.tab_stops = default_tab_stops(new_cols);
         self.mark_dirty();
     }
     fn adjust_cursor_after_resize(
@@ -606,11 +621,14 @@ impl vte::Perform for Term {
                 self.cursor.move_back(1);
             }
             0x09 => {
-                // TAB: avanza al proximo tab stop (cada 8 columnas).
-                // ponytail: tab stops fijos cada 8 cols.
-                let next = ((self.cursor.col / 8) + 1) * 8;
-                self.cursor
-                    .move_to(self.cursor.row, next.min(self.cursor.cols_count - 1));
+                self.pending_wrap = false;
+                let cols = self.cursor.cols_count;
+                let next = self.tab_stops[self.cursor.col + 1..]
+                    .iter()
+                    .position(|&s| s)
+                    .map(|i| self.cursor.col + 1 + i)
+                    .unwrap_or(cols.saturating_sub(1));
+                self.cursor.move_to(self.cursor.row, next);
             }
             0x0A => {
                 // LF (line feed): CR+LF implicito. En terminales reales, el
@@ -958,6 +976,32 @@ impl vte::Perform for Term {
                 let (top, bottom) = self.scroll_region;
                 self.active_grid_mut().scroll_down_region(n, top, bottom);
             }
+            'Z' => {
+                self.pending_wrap = false;
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                let mut col = self.cursor.col;
+                for _ in 0..n {
+                    let prev = self.tab_stops[..col].iter().rposition(|&s| s).unwrap_or(0);
+                    col = prev;
+                }
+                self.cursor.move_to(self.cursor.row, col);
+            }
+            'g' => {
+                let ps = params.first().copied().unwrap_or(0);
+                match ps {
+                    0 => {
+                        if self.cursor.col < self.tab_stops.len() {
+                            self.tab_stops[self.cursor.col] = false;
+                        }
+                    }
+                    3 => {
+                        for stop in &mut self.tab_stops {
+                            *stop = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
@@ -966,11 +1010,58 @@ impl vte::Perform for Term {
     /// CRITICO: byte == 0x37 para DECSC (ESC 7) y 0x38 para DECRC (ESC 8),
     /// NO confundir con 0x07 (BEL) ni 0x08 (BS). vte ya ejecuta 0x07 y 0x08
     /// via execute(), asi que en esc_dispatch jamas llegan.
-    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
-        // ponytail: DECSC / DECRC con 0x37 / 0x38.
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        if intermediates == b"#" && byte == 0x38 {
+            let rows = self.active_grid().rows_count;
+            let cols = self.active_grid().cols_count;
+            for row in 0..rows {
+                for col in 0..cols {
+                    if let Some(cell) = self.active_grid_mut().cell(row, col) {
+                        cell.ch = 'E';
+                    }
+                }
+            }
+            self.mark_dirty();
+            return;
+        }
         match byte {
-            0x37 => self.save_cursor(),    // DECSC: "ESC 7"
-            0x38 => self.restore_cursor(), // DECRC: "ESC 8"
+            0x37 => self.save_cursor(),
+            0x38 => self.restore_cursor(),
+            0x44 => {
+                self.pending_wrap = false;
+                let (top, bottom) = self.scroll_region;
+                if self.cursor.row == bottom {
+                    self.active_grid_mut().scroll_up_region(1, top, bottom);
+                } else {
+                    self.cursor.move_down(1);
+                }
+            }
+            0x45 => {
+                self.pending_wrap = false;
+                let (top, bottom) = self.scroll_region;
+                self.cursor.move_to(self.cursor.row, 0);
+                if self.cursor.row == bottom {
+                    self.active_grid_mut().scroll_up_region(1, top, bottom);
+                } else {
+                    self.cursor.move_down(1);
+                }
+            }
+            0x48 => {
+                if self.cursor.col < self.tab_stops.len() {
+                    self.tab_stops[self.cursor.col] = true;
+                }
+            }
+            0x4D => {
+                self.pending_wrap = false;
+                let (top, bottom) = self.scroll_region;
+                if self.cursor.row == top {
+                    self.active_grid_mut().scroll_down_region(1, top, bottom);
+                } else {
+                    self.cursor.move_up(1);
+                }
+            }
+            0x3D => self.keypad_application_mode = true,
+            0x3E => self.keypad_application_mode = false,
             _ => {}
         }
     }
@@ -1015,6 +1106,50 @@ mod tests {
         let out = term.take_pty_response();
         assert_eq!(out, b"\x1b[0nAB");
         assert!(term.take_pty_response().is_empty());
+    }
+
+    #[test]
+    fn test_tab_stops_default_cada_8() {
+        let mut term = Term::new();
+        feed(&mut term, b"\t");
+        assert_eq!(term.cursor.col, 8);
+        feed(&mut term, b"\t");
+        assert_eq!(term.cursor.col, 16);
+    }
+
+    #[test]
+    fn test_hts_y_tbc() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[3G\x1bH");
+        feed(&mut term, b"\r\t");
+        assert_eq!(term.cursor.col, 2);
+        feed(&mut term, b"\x1b[3g");
+        feed(&mut term, b"\r\t");
+        assert_eq!(term.cursor.col, term.grid.cols_count - 1);
+    }
+
+    #[test]
+    fn test_cbt_retrocede_tab() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[20G\x1b[2Z");
+        assert_eq!(term.cursor.col, 8);
+    }
+
+    #[test]
+    fn test_ri_hace_scroll_down_en_tope() {
+        let mut term = Term::new();
+        feed(&mut term, b"linea0\r\nlinea1");
+        feed(&mut term, b"\x1b[H");
+        feed(&mut term, b"\x1bM");
+        let fila1: String = term.grid.rows[1].iter().map(|c| c.ch).collect();
+        assert!(fila1.starts_with("linea0"));
+    }
+
+    #[test]
+    fn test_decaln_rellena_con_e() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b#8");
+        assert!(term.grid.rows.iter().all(|r| r.iter().all(|c| c.ch == 'E')));
     }
 
     #[test]

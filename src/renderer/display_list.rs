@@ -515,10 +515,8 @@ mod tests {
         row[0].attrs.reverse = true;
         row[0].attrs.dim = true;
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
-        let term = Term {
-            cursor_visible: false,
-            ..Default::default()
-        };
+        let mut term = Term::new();
+        term.cursor_visible = false;
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
 
