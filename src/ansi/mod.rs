@@ -211,6 +211,35 @@ impl Term {
         row.min(self.scroll_region.1)
     }
 
+    fn term_version_id() -> u32 {
+        env!("CARGO_PKG_VERSION")
+            .split('.')
+            .next_back()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    fn decrqm_state(&self, mode: u16) -> u16 {
+        let set = match mode {
+            1 => self.app_cursor_keys,
+            6 => self.origin_mode,
+            7 => self.auto_wrap,
+            25 => self.cursor_visible,
+            1049 => self.alt_screen,
+            1000 => self.mouse_reporting.click,
+            1002 => self.mouse_reporting.drag,
+            1003 => self.mouse_reporting.any_motion,
+            1006 => self.mouse_reporting.sgr,
+            2004 => self.bracketed_paste,
+            _ => return 0,
+        };
+        if set {
+            1
+        } else {
+            2
+        }
+    }
+
     /// Encola bytes de respuesta hacia el PTY.
     pub fn respond(&mut self, bytes: &[u8]) {
         self.pty_response.extend_from_slice(bytes);
@@ -689,6 +718,18 @@ impl vte::Perform for Term {
         _ignore: bool,
         action: char,
     ) {
+        if action == 'p' && intermediates == b"?$" {
+            let mode = params
+                .iter()
+                .next()
+                .and_then(|p| p.first().copied())
+                .unwrap_or(0);
+            let state = self.decrqm_state(mode);
+            let resp = format!("\x1b[?{mode};{state}$y");
+            self.respond(resp.as_bytes());
+            return;
+        }
+
         // DEC private modes: handler temprano con return para no ensuciar
         // el match principal.
         if intermediates == b"?" {
@@ -1030,6 +1071,45 @@ impl vte::Perform for Term {
                     _ => {}
                 }
             }
+            'c' => {
+                if intermediates == b">" {
+                    let ver = Self::term_version_id();
+                    let resp = format!("\x1b[>1;{ver};0c");
+                    self.respond(resp.as_bytes());
+                } else {
+                    self.respond(b"\x1b[?62;22c");
+                }
+            }
+            'n' => {
+                let ps = params.first().copied().unwrap_or(0);
+                match ps {
+                    5 => self.respond(b"\x1b[0n"),
+                    6 => {
+                        let row = (self.cursor.row + 1) as u16;
+                        let col = (self.cursor.col + 1) as u16;
+                        if intermediates == b"?" {
+                            let resp = format!("\x1b[?{row};{col}R");
+                            self.respond(resp.as_bytes());
+                        } else {
+                            let resp = format!("\x1b[{row};{col}R");
+                            self.respond(resp.as_bytes());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            'q' => {
+                if intermediates == b">" {
+                    self.respond(b"\x1bP>|baud\x1b\\");
+                } else {
+                    let style = params.first().copied().unwrap_or(0);
+                    self.cursor_style = match style {
+                        2 | 4 => CursorStyle::Underline,
+                        6 => CursorStyle::Bar,
+                        _ => CursorStyle::Block,
+                    };
+                }
+            }
             _ => {}
         }
     }
@@ -1196,6 +1276,28 @@ mod tests {
         feed(&mut term, b"ABC\x1b[1G\x1b[4hX");
         let fila: String = term.grid.rows[0].iter().take(4).map(|c| c.ch).collect();
         assert_eq!(fila, "XABC");
+    }
+
+    #[test]
+    fn test_da1_responde() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[c");
+        assert_eq!(term.take_pty_response(), b"\x1b[?62;22c");
+    }
+
+    #[test]
+    fn test_cpr_reporta_posicion_1based() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[5;10H\x1b[6n");
+        assert_eq!(term.take_pty_response(), b"\x1b[5;10R");
+    }
+
+    #[test]
+    fn test_decrqm_reporta_modo_conocido() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?1h");
+        feed(&mut term, b"\x1b[?1$p");
+        assert_eq!(term.take_pty_response(), b"\x1b[?1;1$y");
     }
 
     #[test]
