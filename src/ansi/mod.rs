@@ -903,6 +903,61 @@ impl vte::Perform for Term {
                 self.active_grid_mut().delete_chars(row, col, n);
                 self.pending_wrap = false;
             }
+            'G' | '`' => {
+                self.pending_wrap = false;
+                let col = params
+                    .first()
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1)
+                    .saturating_sub(1) as usize;
+                self.cursor.move_to(self.cursor.row, col);
+            }
+            'd' => {
+                self.pending_wrap = false;
+                let row = params
+                    .first()
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1)
+                    .saturating_sub(1) as usize;
+                self.cursor.move_to(row, self.cursor.col);
+            }
+            'f' => {
+                self.pending_wrap = false;
+                let row = params.first().copied().unwrap_or(1).saturating_sub(1) as usize;
+                let col = params.get(1).copied().unwrap_or(1).saturating_sub(1) as usize;
+                self.cursor.move_to(row, col);
+            }
+            'E' => {
+                self.pending_wrap = false;
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                self.cursor.move_down(n);
+                self.cursor.move_to(self.cursor.row, 0);
+            }
+            'F' => {
+                self.pending_wrap = false;
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                self.cursor.move_up(n);
+                self.cursor.move_to(self.cursor.row, 0);
+            }
+            'X' => {
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                let (row, col) = (self.cursor.row, self.cursor.col);
+                let end = (col + n).min(self.grid.cols_count);
+                self.active_grid_mut().clear_line(row, col, end);
+                self.pending_wrap = false;
+            }
+            'S' => {
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                let (top, bottom) = self.scroll_region;
+                self.active_grid_mut().scroll_up_region(n, top, bottom);
+            }
+            'T' => {
+                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                let (top, bottom) = self.scroll_region;
+                self.active_grid_mut().scroll_down_region(n, top, bottom);
+            }
             _ => {}
         }
     }
@@ -1060,6 +1115,48 @@ mod tests {
         feed(&mut term, b"\x1b[5;10H");
         assert_eq!(term.cursor.row, 4);
         assert_eq!(term.cursor.col, 9);
+    }
+
+    #[test]
+    fn test_csi_movimiento_absoluto() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[5;5H");
+        feed(&mut term, b"\x1b[10G");
+        assert_eq!(term.cursor.col, 9);
+        assert_eq!(term.cursor.row, 4);
+        feed(&mut term, b"\x1b[3d");
+        assert_eq!(term.cursor.row, 2);
+        assert_eq!(term.cursor.col, 9);
+    }
+
+    #[test]
+    fn test_csi_ech_borra_sin_desplazar() {
+        let mut term = Term::new();
+        feed(&mut term, b"ABCDE\x1b[3G\x1b[2X");
+        assert_eq!(term.grid.rows[0][2].ch, ' ');
+        assert_eq!(term.grid.rows[0][3].ch, ' ');
+        assert_eq!(term.grid.rows[0][4].ch, 'E');
+    }
+
+    #[test]
+    fn test_csi_su_sd_respetan_region() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[2;4r");
+        feed(&mut term, b"\x1b[2;1H");
+        feed(&mut term, b"A");
+        feed(&mut term, b"\x1b[3;1H");
+        feed(&mut term, b"B");
+        feed(&mut term, b"\x1b[4;1H");
+        feed(&mut term, b"C");
+        feed(&mut term, b"\x1b[2;1H");
+        feed(&mut term, b"\x1b[1S");
+        assert_eq!(term.grid.rows[1][0].ch, 'B');
+        assert_eq!(term.grid.rows[2][0].ch, 'C');
+        assert_eq!(term.grid.rows[3][0].ch, ' ');
+        feed(&mut term, b"\x1b[1T");
+        assert_eq!(term.grid.rows[1][0].ch, ' ');
+        assert_eq!(term.grid.rows[2][0].ch, 'B');
+        assert_eq!(term.grid.rows[3][0].ch, 'C');
     }
 
     // -----------------------------------------------------------------------
