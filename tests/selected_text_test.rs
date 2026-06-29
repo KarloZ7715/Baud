@@ -29,9 +29,9 @@ fn test_selected_text_multiline() {
     let mut term = Term::new();
     let mut parser = vte::Parser::new();
 
-    // Feed multiple lines
-    parser.advance(&mut term, b"line1\n");
-    parser.advance(&mut term, b"line2\n");
+    // Feed multiple lines (PTY entrega CR+LF via ONLCR)
+    parser.advance(&mut term, b"line1\r\n");
+    parser.advance(&mut term, b"line2\r\n");
     parser.advance(&mut term, b"line3");
 
     // Select all three lines

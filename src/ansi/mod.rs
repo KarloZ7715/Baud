@@ -89,6 +89,18 @@ impl Color {
     }
 }
 
+/// Estilo de subrayado SGR (4:0..4:5).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum UnderlineStyle {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
 /// Atributos de estilo de texto (foreground, background, bold, underline).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Attrs {
@@ -103,6 +115,12 @@ pub struct Attrs {
     pub italic: bool,
     pub dim: bool,
     pub reverse: bool,
+    pub blink: bool,
+    pub invisible: bool,
+    pub strikethrough: bool,
+    pub overline: bool,
+    pub underline_style: UnderlineStyle,
+    pub underline_color: Color,
 }
 
 /// Estado completo del terminal virtual.
@@ -209,6 +227,128 @@ impl Term {
             row += self.scroll_region.0;
         }
         row.min(self.scroll_region.1)
+    }
+
+    /// Aplica SGR leyendo subparametros agrupados de vte (p.ej. 4:3, 58;2;...).
+    fn apply_sgr(&mut self, params: &vte::Params) {
+        let slices: Vec<&[u16]> = params.iter().collect();
+        if slices.is_empty() {
+            self.attrs = Attrs::default();
+            return;
+        }
+        let mut i = 0;
+        while i < slices.len() {
+            let p = slices[i];
+            let code = p.first().copied().unwrap_or(0);
+            if p.len() >= 2 && p[0] == 4 {
+                match p[1] {
+                    0 => {
+                        self.attrs.underline = false;
+                        self.attrs.underline_style = UnderlineStyle::None;
+                    }
+                    1 => {
+                        self.attrs.underline = true;
+                        self.attrs.underline_style = UnderlineStyle::Single;
+                    }
+                    2 => {
+                        self.attrs.underline = true;
+                        self.attrs.underline_style = UnderlineStyle::Double;
+                    }
+                    3 => {
+                        self.attrs.underline = true;
+                        self.attrs.underline_style = UnderlineStyle::Curly;
+                    }
+                    4 => {
+                        self.attrs.underline = true;
+                        self.attrs.underline_style = UnderlineStyle::Dotted;
+                    }
+                    5 => {
+                        self.attrs.underline = true;
+                        self.attrs.underline_style = UnderlineStyle::Dashed;
+                    }
+                    _ => {}
+                }
+                i += 1;
+                continue;
+            }
+            match code {
+                0 => self.attrs = Attrs::default(),
+                1 => self.attrs.bold = true,
+                2 => self.attrs.dim = true,
+                3 => self.attrs.italic = true,
+                4 => {
+                    self.attrs.underline = true;
+                    self.attrs.underline_style = UnderlineStyle::Single;
+                }
+                5 | 6 => self.attrs.blink = true,
+                7 => self.attrs.reverse = true,
+                8 => self.attrs.invisible = true,
+                9 => self.attrs.strikethrough = true,
+                22 => self.attrs.bold = false,
+                23 => self.attrs.italic = false,
+                24 => {
+                    self.attrs.underline = false;
+                    self.attrs.underline_style = UnderlineStyle::None;
+                }
+                25 => self.attrs.blink = false,
+                27 => self.attrs.reverse = false,
+                28 => self.attrs.invisible = false,
+                29 => self.attrs.strikethrough = false,
+                53 => self.attrs.overline = true,
+                55 => self.attrs.overline = false,
+                30..=37 => self.attrs.fg = Color::from_code(code),
+                40..=47 => self.attrs.bg = Color::from_code(code),
+                90..=97 => self.attrs.fg = Color::from_bright_code(code),
+                100..=107 => self.attrs.bg = Color::from_bright_code(code),
+                38 => {
+                    if i + 2 < slices.len() && slices[i + 1].first() == Some(&5) {
+                        if let Some(&n) = slices[i + 2].first() {
+                            self.attrs.fg = Color::Indexed(n as u8);
+                        }
+                        i += 2;
+                    } else if i + 4 < slices.len() && slices[i + 1].first() == Some(&2) {
+                        let r = slices[i + 2].first().copied().unwrap_or(0) as u8;
+                        let g = slices[i + 3].first().copied().unwrap_or(0) as u8;
+                        let b = slices[i + 4].first().copied().unwrap_or(0) as u8;
+                        self.attrs.fg = Color::Rgb(r, g, b);
+                        i += 4;
+                    }
+                }
+                48 => {
+                    if i + 2 < slices.len() && slices[i + 1].first() == Some(&5) {
+                        if let Some(&n) = slices[i + 2].first() {
+                            self.attrs.bg = Color::Indexed(n as u8);
+                        }
+                        i += 2;
+                    } else if i + 4 < slices.len() && slices[i + 1].first() == Some(&2) {
+                        let r = slices[i + 2].first().copied().unwrap_or(0) as u8;
+                        let g = slices[i + 3].first().copied().unwrap_or(0) as u8;
+                        let b = slices[i + 4].first().copied().unwrap_or(0) as u8;
+                        self.attrs.bg = Color::Rgb(r, g, b);
+                        i += 4;
+                    }
+                }
+                58 => {
+                    if i + 2 < slices.len() && slices[i + 1].first() == Some(&5) {
+                        if let Some(&n) = slices[i + 2].first() {
+                            self.attrs.underline_color = Color::Indexed(n as u8);
+                        }
+                        i += 2;
+                    } else if i + 4 < slices.len() && slices[i + 1].first() == Some(&2) {
+                        let r = slices[i + 2].first().copied().unwrap_or(0) as u8;
+                        let g = slices[i + 3].first().copied().unwrap_or(0) as u8;
+                        let b = slices[i + 4].first().copied().unwrap_or(0) as u8;
+                        self.attrs.underline_color = Color::Rgb(r, g, b);
+                        i += 4;
+                    }
+                }
+                39 => self.attrs.fg = Color::Default,
+                49 => self.attrs.bg = Color::Default,
+                59 => self.attrs.underline_color = Color::Default,
+                _ => {}
+            }
+            i += 1;
+        }
     }
 
     fn term_version_id() -> u32 {
@@ -790,72 +930,16 @@ impl vte::Perform for Term {
 
         // vte 0.15: Params::iter() devuelve &[u16] por parametro (subparams agrupados).
         // Para SGR/J/K, el primer subparam es el valor del parametro. Si el slice
-        // esta vacio, vte lo trata como 0
-        let params: Vec<u16> = params
+        // esta vacio, vte lo trata como 0. SGR usa el Params original (apply_sgr).
+        let flat_params: Vec<u16> = params
             .iter()
             .map(|p| p.first().copied().unwrap_or(0))
             .collect();
 
         match action {
-            'm' => {
-                // SGR (Select Graphic Rendition)
-                // Si no hay params, el estandar dice aplicar 0 (reset).
-                if params.is_empty() {
-                    self.attrs = Attrs::default();
-                }
-                // ponytail: indice i para saltar params consumidos por 38;5;N y 38;2;R;G;B.
-                let mut i = 0;
-                while i < params.len() {
-                    match params[i] {
-                        0 => self.attrs = Attrs::default(),
-                        1 => self.attrs.bold = true,
-                        2 => self.attrs.dim = true,
-                        3 => self.attrs.italic = true,
-                        4 => self.attrs.underline = true,
-                        7 => self.attrs.reverse = true,
-                        22 => self.attrs.bold = false,
-                        23 => self.attrs.italic = false,
-                        24 => self.attrs.underline = false,
-                        27 => self.attrs.reverse = false,
-                        30..=37 => self.attrs.fg = Color::from_code(params[i]),
-                        40..=47 => self.attrs.bg = Color::from_code(params[i]),
-                        90..=97 => self.attrs.fg = Color::from_bright_code(params[i]),
-                        100..=107 => self.attrs.bg = Color::from_bright_code(params[i]),
-                        38 => {
-                            if i + 2 < params.len() && params[i + 1] == 5 {
-                                self.attrs.fg = Color::Indexed(params[i + 2] as u8);
-                                i += 2;
-                            } else if i + 4 < params.len() && params[i + 1] == 2 {
-                                self.attrs.fg = Color::Rgb(
-                                    params[i + 2] as u8,
-                                    params[i + 3] as u8,
-                                    params[i + 4] as u8,
-                                );
-                                i += 4;
-                            }
-                        }
-                        48 => {
-                            if i + 2 < params.len() && params[i + 1] == 5 {
-                                self.attrs.bg = Color::Indexed(params[i + 2] as u8);
-                                i += 2;
-                            } else if i + 4 < params.len() && params[i + 1] == 2 {
-                                self.attrs.bg = Color::Rgb(
-                                    params[i + 2] as u8,
-                                    params[i + 3] as u8,
-                                    params[i + 4] as u8,
-                                );
-                                i += 4;
-                            }
-                        }
-                        39 => self.attrs.fg = Color::Default,
-                        49 => self.attrs.bg = Color::Default,
-                        _ => {}
-                    }
-                    i += 1;
-                }
-            }
+            'm' => self.apply_sgr(params),
             'J' => {
-                let n = params.first().copied().unwrap_or(0);
+                let n = flat_params.first().copied().unwrap_or(0);
                 let cur_row = self.cursor.row;
                 let cur_col = self.cursor.col;
                 let cols_count = self.active_grid().cols_count;
@@ -880,7 +964,7 @@ impl vte::Perform for Term {
                 }
             }
             'K' => {
-                let n = params.first().copied().unwrap_or(0);
+                let n = flat_params.first().copied().unwrap_or(0);
                 let cur_row = self.cursor.row;
                 let cur_col = self.cursor.col;
                 let cols_count = self.active_grid().cols_count;
@@ -897,34 +981,34 @@ impl vte::Perform for Term {
                 // Cursor up: default 1 si param vacio o 0.
                 // CANCELA pending_wrap.
                 self.pending_wrap = false;
-                let n = params.first().copied().unwrap_or(1).max(1);
+                let n = flat_params.first().copied().unwrap_or(1).max(1);
                 self.cursor.move_up(n as usize);
             }
             'B' => {
                 // Cursor down: default 1 si param vacio o 0.
                 // CANCELA pending_wrap.
                 self.pending_wrap = false;
-                let n = params.first().copied().unwrap_or(1).max(1);
+                let n = flat_params.first().copied().unwrap_or(1).max(1);
                 self.cursor.move_down(n as usize);
             }
             'C' => {
                 // Cursor forward: default 1 si param vacio o 0.
                 // CANCELA pending_wrap.
                 self.pending_wrap = false;
-                let n = params.first().copied().unwrap_or(1).max(1);
+                let n = flat_params.first().copied().unwrap_or(1).max(1);
                 self.cursor.move_forward(n as usize);
             }
             'D' => {
                 // Cursor back: default 1 si param vacio o 0.
                 // CANCELA pending_wrap.
                 self.pending_wrap = false;
-                let n = params.first().copied().unwrap_or(1).max(1);
+                let n = flat_params.first().copied().unwrap_or(1).max(1);
                 self.cursor.move_back(n as usize);
             }
             'H' => {
                 self.pending_wrap = false;
-                let row = self.resolve_origin_row(params.first().copied().unwrap_or(1));
-                let col = params.get(1).copied().unwrap_or(1).saturating_sub(1) as usize;
+                let row = self.resolve_origin_row(flat_params.first().copied().unwrap_or(1));
+                let col = flat_params.get(1).copied().unwrap_or(1).saturating_sub(1) as usize;
                 self.cursor.move_to(row, col);
             }
             'r' => {
@@ -934,8 +1018,8 @@ impl vte::Perform for Term {
                 // "ignorar").
                 // ponytail: convencion xterm, no VT510. Discrepancia documentada.
                 let rows_count = self.active_grid().rows_count;
-                let top = params.first().copied().unwrap_or(1).saturating_sub(1) as usize;
-                let bottom = params
+                let top = flat_params.first().copied().unwrap_or(1).saturating_sub(1) as usize;
+                let bottom = flat_params
                     .get(1)
                     .copied()
                     .unwrap_or(rows_count as u16)
@@ -954,7 +1038,7 @@ impl vte::Perform for Term {
                 // La fila final (rows_count-1) se pierde.
                 // ponytail: xterm NO respeta la scroll region en IL/DL.
                 // El cursor determina la fila, no la region.
-                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                let n = flat_params.first().copied().unwrap_or(1).max(1) as usize;
                 let row = self.cursor.row;
                 if row < self.cursor.rows_count {
                     for _ in 0..n {
@@ -968,7 +1052,7 @@ impl vte::Perform for Term {
                 // cursor, desplazando las lineas siguientes hacia arriba.
                 // La fila final queda en blanco.
                 // ponytail: xterm NO respeta la scroll region en IL/DL.
-                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                let n = flat_params.first().copied().unwrap_or(1).max(1) as usize;
                 let row = self.cursor.row;
                 if row < self.cursor.rows_count {
                     for _ in 0..n {
@@ -980,7 +1064,7 @@ impl vte::Perform for Term {
             '@' => {
                 // ICH (insert character): inserta n chars en blanco en la
                 // posicion del cursor, desplazando el resto a la derecha.
-                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                let n = flat_params.first().copied().unwrap_or(1).max(1) as usize;
                 let row = self.cursor.row;
                 let col = self.cursor.col;
                 self.active_grid_mut().insert_chars(row, col, n);
@@ -989,7 +1073,7 @@ impl vte::Perform for Term {
             'P' => {
                 // DCH (delete character): borra n chars desde la posicion
                 // del cursor, desplazando el resto a la izquierda.
-                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                let n = flat_params.first().copied().unwrap_or(1).max(1) as usize;
                 let row = self.cursor.row;
                 let col = self.cursor.col;
                 self.active_grid_mut().delete_chars(row, col, n);
@@ -997,7 +1081,7 @@ impl vte::Perform for Term {
             }
             'G' | '`' => {
                 self.pending_wrap = false;
-                let col = params
+                let col = flat_params
                     .first()
                     .copied()
                     .unwrap_or(1)
@@ -1007,47 +1091,47 @@ impl vte::Perform for Term {
             }
             'd' => {
                 self.pending_wrap = false;
-                let row = self.resolve_origin_row(params.first().copied().unwrap_or(1));
+                let row = self.resolve_origin_row(flat_params.first().copied().unwrap_or(1));
                 self.cursor.move_to(row, self.cursor.col);
             }
             'f' => {
                 self.pending_wrap = false;
-                let row = self.resolve_origin_row(params.first().copied().unwrap_or(1));
-                let col = params.get(1).copied().unwrap_or(1).saturating_sub(1) as usize;
+                let row = self.resolve_origin_row(flat_params.first().copied().unwrap_or(1));
+                let col = flat_params.get(1).copied().unwrap_or(1).saturating_sub(1) as usize;
                 self.cursor.move_to(row, col);
             }
             'E' => {
                 self.pending_wrap = false;
-                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                let n = flat_params.first().copied().unwrap_or(1).max(1) as usize;
                 self.cursor.move_down(n);
                 self.cursor.move_to(self.cursor.row, 0);
             }
             'F' => {
                 self.pending_wrap = false;
-                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                let n = flat_params.first().copied().unwrap_or(1).max(1) as usize;
                 self.cursor.move_up(n);
                 self.cursor.move_to(self.cursor.row, 0);
             }
             'X' => {
-                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                let n = flat_params.first().copied().unwrap_or(1).max(1) as usize;
                 let (row, col) = (self.cursor.row, self.cursor.col);
                 let end = (col + n).min(self.grid.cols_count);
                 self.active_grid_mut().clear_line(row, col, end);
                 self.pending_wrap = false;
             }
             'S' => {
-                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                let n = flat_params.first().copied().unwrap_or(1).max(1) as usize;
                 let (top, bottom) = self.scroll_region;
                 self.active_grid_mut().scroll_up_region(n, top, bottom);
             }
             'T' => {
-                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                let n = flat_params.first().copied().unwrap_or(1).max(1) as usize;
                 let (top, bottom) = self.scroll_region;
                 self.active_grid_mut().scroll_down_region(n, top, bottom);
             }
             'Z' => {
                 self.pending_wrap = false;
-                let n = params.first().copied().unwrap_or(1).max(1) as usize;
+                let n = flat_params.first().copied().unwrap_or(1).max(1) as usize;
                 let mut col = self.cursor.col;
                 for _ in 0..n {
                     let prev = self.tab_stops[..col].iter().rposition(|&s| s).unwrap_or(0);
@@ -1056,7 +1140,7 @@ impl vte::Perform for Term {
                 self.cursor.move_to(self.cursor.row, col);
             }
             'g' => {
-                let ps = params.first().copied().unwrap_or(0);
+                let ps = flat_params.first().copied().unwrap_or(0);
                 match ps {
                     0 => {
                         if self.cursor.col < self.tab_stops.len() {
@@ -1081,7 +1165,7 @@ impl vte::Perform for Term {
                 }
             }
             'n' => {
-                let ps = params.first().copied().unwrap_or(0);
+                let ps = flat_params.first().copied().unwrap_or(0);
                 match ps {
                     5 => self.respond(b"\x1b[0n"),
                     6 => {
@@ -1102,7 +1186,7 @@ impl vte::Perform for Term {
                 if intermediates == b">" {
                     self.respond(b"\x1bP>|baud\x1b\\");
                 } else {
-                    let style = params.first().copied().unwrap_or(0);
+                    let style = flat_params.first().copied().unwrap_or(0);
                     self.cursor_style = match style {
                         2 | 4 => CursorStyle::Underline,
                         6 => CursorStyle::Bar,
@@ -1298,6 +1382,25 @@ mod tests {
         feed(&mut term, b"\x1b[?1h");
         feed(&mut term, b"\x1b[?1$p");
         assert_eq!(term.take_pty_response(), b"\x1b[?1;1$y");
+    }
+
+    #[test]
+    fn test_sgr_strikethrough_y_reset() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[9mX");
+        assert!(term.grid.rows[0][0].attrs.strikethrough);
+        feed(&mut term, b"\x1b[29mY");
+        assert!(!term.grid.rows[0][1].attrs.strikethrough);
+    }
+
+    #[test]
+    fn test_sgr_underline_curly_subparam() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[4:3mX");
+        assert_eq!(
+            term.grid.rows[0][0].attrs.underline_style,
+            UnderlineStyle::Curly
+        );
     }
 
     #[test]
@@ -1577,12 +1680,11 @@ mod tests {
     #[test]
     fn test_bash_prompt_flow() {
         let mut term = Term::new();
-        feed(&mut term, b"\x1b[31mROJO\x1b[0m\n");
+        feed(&mut term, b"\x1b[31mROJO\x1b[0m\r\n");
         assert_eq!(term.grid.rows[0][0].ch, 'R');
         assert_eq!(term.grid.rows[0][1].ch, 'O');
         assert_eq!(term.grid.rows[0][2].ch, 'J');
         assert_eq!(term.grid.rows[0][3].ch, 'O');
-        // LF avanzo a fila 1 y resetea col a 0 (CR+LF implicito)
         assert_eq!(term.cursor.row, 1);
         assert_eq!(term.cursor.col, 0);
         assert_eq!(term.grid.rows[1][0].ch, ' ');
