@@ -118,6 +118,10 @@ fn u_form_mod_field(mods: Mods, event: KeyEventKind, report_events: bool) -> Str
 }
 
 /// Encoding CSI <codepoint> ; <mods> u. None => usar encode_key clasico.
+///
+/// ponytail: flechas, F-keys, PgUp/Del/Home/End no usan forma u; con report-events
+/// activo el subparametro de evento no se anexa al encoding clasico. Upgrade path:
+/// extender encode_cursor, encode_tilde y encode_fkey con subparametro :2/:3.
 pub fn encode_key_extended(
     key: Key,
     mods: Mods,
@@ -323,6 +327,38 @@ mod tests {
         assert_eq!(
             encode_key_extended(Key::Char('a'), Mods::NONE, modes, KeyEventKind::Press),
             None
+        );
+    }
+
+    #[test]
+    fn test_extended_ctrl_enter_disambiguate() {
+        let modes = KeyModes {
+            keyboard_flags: 1,
+            ..KeyModes::default()
+        };
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            encode_key_extended(Key::Enter, ctrl, modes, KeyEventKind::Press),
+            Some(b"\x1b[13;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_extended_repeat_con_report_events() {
+        let modes = KeyModes {
+            keyboard_flags: 3,
+            ..KeyModes::default()
+        };
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            encode_key_extended(Key::Char('a'), ctrl, modes, KeyEventKind::Repeat),
+            Some(b"\x1b[97;5:2u".to_vec())
         );
     }
 
