@@ -9,6 +9,8 @@
 //! 2. `./baud.toml` en el directorio de trabajo.
 //! 3. Valores por defecto (`Config::default()`).
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
@@ -32,6 +34,14 @@ pub struct Config {
     pub scrollback: ScrollbackConfig,
     #[serde(default)]
     pub cursor: CursorConfig,
+    #[serde(default)]
+    pub bold_is_bright: bool,
+    #[serde(default = "default_true")]
+    pub allow_osc52_read: bool,
+    #[serde(default)]
+    pub process: ProcessSection,
+    #[serde(default)]
+    pub keys: BTreeMap<String, String>,
 }
 
 /// Configuración de selección de texto.
@@ -231,6 +241,20 @@ impl Default for CursorConfig {
             blink_interval_ms: default_blink_ms(),
         }
     }
+}
+
+/// Proceso hijo del PTY (`[process]` en TOML).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProcessSection {
+    pub program: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub working_directory: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    pub startup_command: Option<String>,
+    #[serde(default)]
+    pub login: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -485,8 +509,36 @@ impl Config {
     /// Convierte [`Config`] en [`crate::pty::ProcessConfig`] (shell, args,
     /// directorio de arranque, variables de entorno y comando inicial).
     pub fn process_config(&self) -> crate::pty::ProcessConfig {
-        let _ = self;
-        crate::pty::ProcessConfig::default()
+        let shell = self
+            .process
+            .program
+            .clone()
+            .or_else(|| std::env::var("SHELL").ok())
+            .unwrap_or_else(|| "/bin/bash".into());
+        let env = self
+            .process
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        crate::pty::ProcessConfig {
+            shell,
+            args: self.process.args.clone(),
+            working_directory: self.process.working_directory.clone(),
+            env,
+            startup_command: self.process.startup_command.clone(),
+            login_shell: self.process.login,
+        }
+    }
+
+    /// Atajos de teclado: defaults del emulador + overrides de `[keys]`.
+    pub fn keybindings(&self) -> crate::input::actions::Keybindings {
+        let overrides: Vec<(String, String)> = self
+            .keys
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        crate::input::actions::Keybindings::from_overrides(&overrides)
     }
 
     /// Carga la configuración desde disco o devuelve los valores por defecto.
@@ -680,6 +732,43 @@ word_delimiters = " ,.;"
         assert_eq!(parse_hex("#ff00000"), (0, 0, 0)); // 8 caracteres
         assert_eq!(parse_hex("ff0000"), (0, 0, 0)); // sin #
         assert_eq!(parse_hex("#-10000"), (0, 0, 0)); // signo negativo
+    }
+
+    #[test]
+    fn test_toggles_process_keys() {
+        let toml = r#"
+bold_is_bright = true
+allow_osc52_read = false
+
+[process]
+program = "/usr/bin/zsh"
+args = ["-l"]
+login = true
+
+[keys]
+"ctrl+shift+v" = "paste_primary"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.bold_is_bright);
+        assert!(!cfg.allow_osc52_read);
+        assert_eq!(cfg.process.program.as_deref(), Some("/usr/bin/zsh"));
+        assert_eq!(cfg.process.args, vec!["-l"]);
+        assert!(cfg.process.login);
+        assert_eq!(
+            cfg.keys.get("ctrl+shift+v").map(String::as_str),
+            Some("paste_primary")
+        );
+        let kb = cfg.keybindings();
+        use crate::input::keymap::{Key, Mods};
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            kb.lookup(Key::Char('v'), cs),
+            Some(crate::input::actions::Action::PastePrimary)
+        );
     }
 
     #[test]
