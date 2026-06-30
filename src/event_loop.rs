@@ -10,8 +10,9 @@ use std::thread;
 use std::time::Duration;
 
 use crate::ansi::Term;
+use crate::config::Config;
 use crate::grid::{DEFAULT_COLS, DEFAULT_ROWS};
-use crate::pty::{self, ProcessConfig};
+use crate::pty;
 use crate::window::{App, UserEvent};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use winit::event_loop::EventLoop;
@@ -41,7 +42,8 @@ pub enum PtyEvent {
 /// Crea el PTY, lanza bash, y arranca los hilos necesarios.
 /// Retorna cuando se cierra la ventana (event_loop.exit()).
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let process_cfg = ProcessConfig::default();
+    let app_config = Config::load();
+    let process_cfg = app_config.process_config();
     let startup_command = process_cfg.startup_command.clone();
 
     let master = pty::spawn_with(&process_cfg)?;
@@ -146,7 +148,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let pty_tx = Arc::new(Mutex::new(Some(tx_gui_to_pty)));
 
-    let mut app = App::new(Arc::clone(&term), Arc::clone(&pty_tx));
+    let mut app = App::new(Arc::clone(&term), Arc::clone(&pty_tx), app_config);
 
     // Hilo PTY: lee del master, envía por tx_pty_to_gui.
     // También recibe comandos de rx_gui_to_pty (Input, Resize, Shutdown).

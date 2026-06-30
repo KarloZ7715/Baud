@@ -133,8 +133,8 @@ impl App {
     pub fn new(
         term: Arc<Mutex<Term>>,
         pty_tx: Arc<Mutex<Option<mpsc::Sender<PtyCommand>>>>,
+        config: Config,
     ) -> Self {
-        let config = Config::load();
         let font_size = config.font.size;
         Self {
             window: None,
@@ -1375,6 +1375,7 @@ mod tests {
         let app = App::new(
             Arc::new(Mutex::new(Term::new())),
             Arc::new(Mutex::new(None)),
+            Config::default(),
         );
         assert_eq!(
             app.mouse_x, 0.0,
@@ -1490,7 +1491,7 @@ mod tests {
         use crate::ansi::MouseReporting;
 
         let term = Arc::new(Mutex::new(Term::new()));
-        let app = App::new(term.clone(), Arc::new(Mutex::new(None)));
+        let app = App::new(term.clone(), Arc::new(Mutex::new(None)), Config::default());
         assert!(
             !app.should_forward_mouse_to_app(),
             "shell: no reenviar mouse al PTY (seleccion local)"
@@ -1502,7 +1503,7 @@ mod tests {
             any_motion: false,
             sgr: true,
         };
-        let app_vim = App::new(term, Arc::new(Mutex::new(None)));
+        let app_vim = App::new(term, Arc::new(Mutex::new(None)), Config::default());
         assert!(
             app_vim.should_forward_mouse_to_app(),
             "vim: app captura mouse sin modificadores"
