@@ -441,6 +441,18 @@ impl Config {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_config_process_config_usa_defaults() {
+        let config = Config::default();
+        let process = config.process_config();
+        assert!(process.args.is_empty());
+        assert!(process.working_directory.is_none());
+        assert!(process.env.is_empty());
+        assert!(process.startup_command.is_none());
+        assert!(!process.login_shell);
+        assert!(!process.shell.is_empty());
+    }
+
     /// Verifica que `Config::default()` use el tema oscuro.
     #[test]
     fn test_config_default_values() {

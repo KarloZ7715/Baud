@@ -151,12 +151,12 @@ pub fn spawn_with(cfg: &ProcessConfig) -> nix::Result<Pty> {
     if let Some(dir) = &cfg.working_directory {
         cmd.current_dir(dir);
     }
-    // ponytail: TERM necesario para que bash active readline.
-    // xterm-256color es el estandar y compatible con la mayoria de programas TUI.
-    cmd.env("TERM", "xterm-256color");
     for (key, value) in &cfg.env {
         cmd.env(key, value);
     }
+    // ponytail: TERM necesario para que bash active readline.
+    // xterm-256color es el estandar y compatible con la mayoria de programas TUI.
+    cmd.env("TERM", "xterm-256color");
     // Login shell: argv[0] con prefijo '-' (convencion POSIX, portable entre shells).
     if cfg.login_shell {
         let base_name = std::path::Path::new(&cfg.shell)
@@ -265,6 +265,24 @@ mod tests {
             output.contains("HELLO"),
             "Se esperaba 'HELLO' en output: {:?}",
             output
+        );
+    }
+
+    #[test]
+    fn test_spawn_login_shell_usa_arg0_con_prefijo() {
+        let cfg = ProcessConfig {
+            shell: "/bin/bash".into(),
+            args: vec!["-c".into(), "echo ARG0=$0".into()],
+            working_directory: None,
+            env: Vec::new(),
+            startup_command: None,
+            login_shell: true,
+        };
+        let mut master = spawn_with(&cfg).expect("spawn");
+        let out = read_to_string_until_eof(&mut master);
+        assert!(
+            out.contains("ARG0=-bash") || out.contains("ARG0=bash"),
+            "output: {out:?}"
         );
     }
 

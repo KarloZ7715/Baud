@@ -39,7 +39,7 @@ pub enum PtyEvent {
 
 /// Punto de entrada del event loop.
 ///
-/// Crea el PTY, lanza bash, y arranca los hilos necesarios.
+/// Crea el PTY, lanza el shell configurado, y arranca los hilos necesarios.
 /// Retorna cuando se cierra la ventana (event_loop.exit()).
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let app_config = Config::load();

@@ -31,6 +31,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_process_config_default_usa_shell_env() {
+        unsafe {
+            std::env::set_var("SHELL", "/usr/bin/zsh");
+        }
+        let cfg = ProcessConfig::default();
+        assert_eq!(cfg.shell, "/usr/bin/zsh");
+        unsafe {
+            std::env::remove_var("SHELL");
+        }
+    }
+
+    #[test]
     fn test_process_config_default_resuelve_shell() {
         // sin $SHELL definido debe caer a /bin/bash; con $SHELL lo usa.
         unsafe {
