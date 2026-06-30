@@ -255,6 +255,39 @@ mod tests {
     }
 
     #[test]
+    fn rasterize_double_line_mask_has_two_rows() {
+        let data = rasterize_line_mask(8, 3, LINE_DOUBLE_GLYPH_ID).expect("mask");
+        assert_eq!(data.len(), 24);
+        assert!(data[0..8].iter().all(|&b| b == 255), "fila superior");
+        assert!(data[8..16].iter().all(|&b| b == 0), "fila central vacia");
+        assert!(data[16..24].iter().all(|&b| b == 255), "fila inferior");
+    }
+
+    #[test]
+    fn rasterize_dotted_mask_alternates_pixels() {
+        let data = rasterize_line_mask(8, 1, LINE_DOTTED_GLYPH_ID).expect("mask");
+        assert_eq!(data, [255, 0, 255, 0, 255, 0, 255, 0]);
+    }
+
+    #[test]
+    fn rasterize_dashed_mask_has_gaps() {
+        let data = rasterize_line_mask(8, 1, LINE_DASHED_GLYPH_ID).expect("mask");
+        assert_eq!(data, [255, 255, 255, 255, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn rasterize_curly_mask_is_non_flat() {
+        let data = rasterize_line_mask(16, 3, LINE_CURLY_GLYPH_ID).expect("mask");
+        let rows_with_ink: Vec<usize> = (0..3)
+            .filter(|&row| data[row * 16..(row + 1) * 16].contains(&255))
+            .collect();
+        assert!(
+            rows_with_ink.len() > 1,
+            "curly debe ocupar mas de una fila de mascara"
+        );
+    }
+
+    #[test]
     fn cursor_glyph_maps_decscusr_styles() {
         let metrics = test_metrics();
         assert_eq!(cursor_glyph(CursorStyle::Block, &metrics), '\u{2588}');
