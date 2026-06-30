@@ -14,6 +14,25 @@ pub use palette::{ColorOverrides, Palette};
 
 use limits::{custom_pixels, MAX_CUSTOM_GLYPH_PIXELS};
 
+/// Alpha del clear de frame (0..=1), lineal con `window.opacity`.
+pub fn frame_clear_alpha(window_opacity: f32) -> f64 {
+    window_opacity.clamp(0.0, 1.0) as f64
+}
+
+/// Color de clear premultiplicado: fondo del tema con opacidad uniforme en toda la ventana.
+pub fn frame_clear_color(bg: (u8, u8, u8), window_opacity: f32) -> wgpu::Color {
+    let a = frame_clear_alpha(window_opacity);
+    let r = bg.0 as f64 / 255.0;
+    let g = bg.1 as f64 / 255.0;
+    let b = bg.2 as f64 / 255.0;
+    wgpu::Color {
+        r: r * a,
+        g: g * a,
+        b: b * a,
+        a,
+    }
+}
+
 /// En debug, detecta CustomGlyph con dimensiones que harian crecer el atlas a 256GB+.
 fn debug_assert_custom_glyphs_bounded(custom_glyphs: &[glyphon::CustomGlyph]) {
     for (i, g) in custom_glyphs.iter().enumerate() {
@@ -284,6 +303,7 @@ impl Renderer {
         term: &mut Term,
         theme: &ThemeConfig,
         bold_is_bright: bool,
+        window_opacity: f32,
     ) -> Result<(), String> {
         let t0 = Instant::now();
 
@@ -380,6 +400,7 @@ impl Renderer {
             rows_count,
             show_scrollback,
             default_fg_color,
+            window_opacity,
             t0,
             get_frame_us,
         )
@@ -401,6 +422,7 @@ impl Renderer {
         rows_count: usize,
         show_scrollback: bool,
         default_fg_color: glyphon::Color,
+        window_opacity: f32,
         t0: Instant,
         get_frame_us: f64,
     ) -> Result<(), String> {
@@ -544,12 +566,7 @@ impl Renderer {
 
         let t_gpu = Instant::now();
         let (bg_r, bg_g, bg_b) = palette.bg_rgb(Color::Default);
-        let clear_color = wgpu::Color {
-            r: bg_r as f64 / 255.0,
-            g: bg_g as f64 / 255.0,
-            b: bg_b as f64 / 255.0,
-            a: 1.0,
-        };
+        let clear_color = frame_clear_color((bg_r, bg_g, bg_b), window_opacity);
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cell renderer pass"),
@@ -754,6 +771,24 @@ mod tests {
     fn feed(term: &mut Term, data: &[u8]) {
         let mut parser = vte::Parser::new();
         parser.advance(term, data);
+    }
+
+    #[test]
+    fn test_frame_clear_alpha_clamps() {
+        assert!((frame_clear_alpha(0.99) - 0.99).abs() < 1e-6);
+        assert_eq!(frame_clear_alpha(1.0), 1.0);
+        assert_eq!(frame_clear_alpha(0.0), 0.0);
+    }
+
+    #[test]
+    fn test_frame_clear_color_escala_linealmente() {
+        let opaque = frame_clear_color((100, 50, 25), 1.0);
+        assert!((opaque.a - 1.0).abs() < 1e-6);
+        assert!((opaque.r - 100.0 / 255.0).abs() < 1e-6);
+
+        let half = frame_clear_color((200, 0, 0), 0.5);
+        assert!((half.a - 0.5).abs() < 1e-6);
+        assert!((half.r - 0.5 * 200.0 / 255.0).abs() < 1e-6);
     }
 
     // -----------------------------------------------------------------------

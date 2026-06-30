@@ -870,9 +870,10 @@ impl Term {
     pub fn visible_to_logical_row(&self, visible_row: usize) -> usize {
         if self.scrollback_offset > 0 && !self.alt_screen {
             let sb_len = self.grid.scrollback.len();
-            sb_len.saturating_sub(self.scrollback_offset as usize) + visible_row
+            let offset = self.scrollback_offset.max(0) as usize;
+            sb_len.saturating_sub(offset).saturating_add(visible_row)
         } else if !self.alt_screen {
-            self.grid.scrollback.len() + visible_row
+            self.grid.scrollback.len().saturating_add(visible_row)
         } else {
             visible_row
         }
@@ -881,7 +882,7 @@ impl Term {
         if self.alt_screen {
             self.cursor.row
         } else {
-            self.grid.scrollback.len() + self.cursor.row
+            self.grid.scrollback.len().saturating_add(self.cursor.row)
         }
     }
     pub fn logical_to_visible_row(&self, logical_row: usize) -> Option<usize> {
@@ -1829,6 +1830,14 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"\x1b]7;file://localhost/home/u/proj\x07");
         assert_eq!(term.cwd.as_deref(), Some("/home/u/proj"));
+    }
+
+    #[test]
+    fn test_osc_52_query_ignorada_si_lectura_desactivada() {
+        let mut term = Term::new();
+        term.allow_osc52_read = false;
+        feed(&mut term, b"\x1b]52;c;?\x07");
+        assert!(term.clipboard_read_pending.is_none());
     }
 
     #[test]
@@ -3560,6 +3569,23 @@ mod tests {
         term.selection = Some(sel2);
 
         assert_eq!(term.selected_text(), "abc\ndef\nghi\njkl");
+    }
+
+    #[test]
+    fn test_visible_to_logical_row_gran_scrollback_no_panic() {
+        let mut term = Term::new_with_scrollback(60_000);
+        for _ in 0..50_000 {
+            term.cursor.move_to(DEFAULT_ROWS - 1, 0);
+            feed(&mut term, b"x\n");
+        }
+        assert!(term.grid.scrollback.len() > 40_000);
+        let sb_len = term.grid.scrollback.len();
+        let logical = term.visible_to_logical_row(10);
+        assert_eq!(logical, sb_len.saturating_add(10));
+        assert_eq!(
+            term.cursor_logical_row(),
+            sb_len.saturating_add(term.cursor.row)
+        );
     }
 
     /// Regresion: mouse guarda filas logicas via visible_to_logical_row;

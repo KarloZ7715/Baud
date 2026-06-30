@@ -637,6 +637,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_grid_scrollback_zero_no_almacena() {
+        let mut grid = Grid::new_sized_with_scrollback(24, 80, 0);
+        for _ in 0..5 {
+            grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        }
+        assert_eq!(grid.scrollback.len(), 0);
+    }
+
+    #[test]
     fn test_grid_max_scrollback_configurable() {
         let mut grid = Grid::new_sized_with_scrollback(24, 80, 3);
         for _ in 0..10 {

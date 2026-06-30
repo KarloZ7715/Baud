@@ -56,6 +56,24 @@ pub fn compute_grid_dims(
     (rows, cols)
 }
 
+/// Mapea coordenadas de ventana (px) a (row, col) restando padding interior.
+#[inline]
+pub fn pixel_to_cell_coords(
+    x: f64,
+    y: f64,
+    pad_x: f32,
+    pad_y: f32,
+    cell_w: f32,
+    cell_h: f32,
+) -> (usize, usize) {
+    if x < 0.0 || y < 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
+        return (usize::MAX, usize::MAX);
+    }
+    let col = ((x as f32 - pad_x).max(0.0) / cell_w) as usize;
+    let row = ((y as f32 - pad_y).max(0.0) / cell_h) as usize;
+    (row, col)
+}
+
 #[inline]
 pub fn custom_pixels(width: f32, height: f32) -> u32 {
     let w = width.round().max(1.0) as u32;
@@ -66,6 +84,27 @@ pub fn custom_pixels(width: f32, height: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compute_grid_dims_respects_padding() {
+        let (rows_no_pad, cols_no_pad) = compute_grid_dims(800, 600, 10.0, 20.0, 0, 0);
+        let (rows_pad, cols_pad) = compute_grid_dims(800, 600, 10.0, 20.0, 8, 6);
+        assert!(cols_pad < cols_no_pad);
+        assert!(rows_pad < rows_no_pad);
+        assert_eq!(cols_no_pad, 80);
+        assert_eq!(rows_no_pad, 30);
+        assert_eq!(cols_pad, 78);
+        assert_eq!(rows_pad, 29);
+    }
+
+    #[test]
+    fn pixel_to_cell_coords_subtracts_padding() {
+        let (row, col) = pixel_to_cell_coords(28.0, 46.0, 8.0, 6.0, 10.0, 20.0);
+        assert_eq!(col, 2);
+        assert_eq!(row, 2);
+        let (row0, col0) = pixel_to_cell_coords(5.0, 3.0, 8.0, 6.0, 10.0, 20.0);
+        assert_eq!((row0, col0), (0, 0));
+    }
 
     #[test]
     fn zero_cell_w_does_not_explode_grid_dims() {

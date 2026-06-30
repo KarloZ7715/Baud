@@ -8,6 +8,9 @@
 //! 1. `$XDG_CONFIG_HOME/baud/config.toml` (o `~/.config/baud/config.toml` en Linux).
 //! 2. `./baud.toml` en el directorio de trabajo.
 //! 3. Valores por defecto (`Config::default()`).
+//!
+//! `bold_is_bright` puede declararse en la raíz del TOML o en `[theme]`; si
+//! cualquiera de los dos es `true`, el renderer aplica el mapeo bold→bright.
 
 use std::collections::BTreeMap;
 
@@ -163,6 +166,7 @@ pub enum StartupState {
 /// Configuración de la ventana (opacidad, padding, decoraciones, tamaño).
 #[derive(Debug, Clone, Deserialize)]
 pub struct WindowConfig {
+    /// 0..=1. Valores menores a 1 dejan ver el escritorio a través del fondo por defecto.
     #[serde(default = "default_opacity")]
     pub opacity: f32,
     #[serde(default)]
@@ -173,8 +177,10 @@ pub struct WindowConfig {
     pub decorations: bool,
     #[serde(default)]
     pub startup: StartupState,
+    /// Ancho inicial en píxeles lógicos. Solo aplica con `startup = "windowed"`.
     #[serde(default = "default_win_width")]
     pub width: u32,
+    /// Alto inicial en píxeles lógicos. Solo aplica con `startup = "windowed"`.
     #[serde(default = "default_win_height")]
     pub height: u32,
 }
@@ -190,6 +196,7 @@ fn default_win_height() -> u32 {
 /// Límite de líneas en scrollback (configurable; ver `unlimited`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScrollbackConfig {
+    /// Máximo de líneas guardadas. Con `0` no se almacena scrollback.
     #[serde(default = "default_scrollback_lines")]
     pub lines: usize,
     #[serde(default)]
@@ -220,6 +227,8 @@ pub struct CursorConfig {
     pub style: String,
     #[serde(default = "default_true")]
     pub blink: bool,
+    /// Intervalo de parpadeo en ms. El timer de render vive en Renderer 4; aquí
+    /// solo se parsea para cablearlo cuando exista.
     #[serde(default = "default_blink_ms")]
     pub blink_interval_ms: u64,
 }
@@ -541,6 +550,26 @@ impl Config {
         crate::input::actions::Keybindings::from_overrides(&overrides)
     }
 
+    /// Aplica al `Term` los campos de config que tienen efecto al arrancar.
+    pub fn apply_to_term(&self, term: &mut crate::ansi::Term) {
+        use crate::ansi::CursorStyle;
+
+        term.allow_osc52_read = self.allow_osc52_read;
+        term.cursor_style = match self.cursor.style.as_str() {
+            "bar" => CursorStyle::Bar,
+            "underline" => CursorStyle::Underline,
+            "block" => CursorStyle::Block,
+            other => {
+                tracing::warn!("cursor.style desconocido '{other}', usando block");
+                CursorStyle::Block
+            }
+        };
+        if let Some(ref color) = self.cursor.color {
+            let (r, g, b) = parse_hex(color);
+            term.cursor_color_override = Some((r, g, b));
+        }
+    }
+
     /// Carga la configuración desde disco o devuelve los valores por defecto.
     ///
     /// El orden de búsqueda es:
@@ -732,6 +761,74 @@ word_delimiters = " ,.;"
         assert_eq!(parse_hex("#ff00000"), (0, 0, 0)); // 8 caracteres
         assert_eq!(parse_hex("ff0000"), (0, 0, 0)); // sin #
         assert_eq!(parse_hex("#-10000"), (0, 0, 0)); // signo negativo
+    }
+
+    #[test]
+    fn test_scrollback_max_lines() {
+        let mut cfg = Config::default();
+        cfg.scrollback.lines = 500;
+        assert_eq!(cfg.scrollback_max_lines(), 500);
+
+        cfg.scrollback.unlimited = true;
+        assert_eq!(cfg.scrollback_max_lines(), usize::MAX);
+
+        cfg.scrollback.unlimited = false;
+        cfg.scrollback.lines = 0;
+        assert_eq!(cfg.scrollback_max_lines(), 0);
+    }
+
+    #[test]
+    fn test_process_config_overrides() {
+        let toml = r#"
+[process]
+program = "/usr/bin/zsh"
+args = ["-l"]
+working_directory = "/tmp/wd"
+login = true
+startup_command = "echo hi"
+
+[process.env]
+FOO = "bar"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let pc = cfg.process_config();
+        assert_eq!(pc.shell, "/usr/bin/zsh");
+        assert_eq!(pc.args, vec!["-l"]);
+        assert_eq!(pc.working_directory.as_deref(), Some("/tmp/wd"));
+        assert!(pc.login_shell);
+        assert_eq!(pc.startup_command.as_deref(), Some("echo hi"));
+        assert!(pc.env.iter().any(|(k, v)| k == "FOO" && v == "bar"));
+    }
+
+    #[test]
+    fn test_apply_to_term() {
+        use crate::ansi::{CursorStyle, Term};
+
+        let toml = r##"
+allow_osc52_read = false
+[cursor]
+color = "#aabbcc"
+style = "underline"
+"##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let mut term = Term::new();
+        cfg.apply_to_term(&mut term);
+        assert!(!term.allow_osc52_read);
+        assert_eq!(term.cursor_style, CursorStyle::Underline);
+        assert_eq!(term.cursor_color_override, Some((0xaa, 0xbb, 0xcc)));
+    }
+
+    #[test]
+    fn test_apply_to_term_estilo_invalido_usa_block() {
+        use crate::ansi::{CursorStyle, Term};
+
+        let toml = r#"[cursor]
+style = "hologram"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let mut term = Term::new();
+        cfg.apply_to_term(&mut term);
+        assert_eq!(term.cursor_style, CursorStyle::Block);
     }
 
     #[test]

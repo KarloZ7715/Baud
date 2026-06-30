@@ -644,14 +644,14 @@ impl App {
     /// Mapea píxeles de ventana a (row, col); resta el padding del renderer.
     fn pixel_to_cell(&self, x: f64, y: f64, renderer: &Renderer) -> (usize, usize) {
         let (pad_x, pad_y) = renderer.content_padding();
-        let cell_w = renderer.cell_w();
-        let cell_h = renderer.cell_h();
-        if cell_w <= 0.0 || cell_h <= 0.0 {
-            return (usize::MAX, usize::MAX);
-        }
-        let col = ((x as f32 - pad_x).max(0.0) / cell_w) as usize;
-        let row = ((y as f32 - pad_y).max(0.0) / cell_h) as usize;
-        (row, col)
+        crate::renderer::limits::pixel_to_cell_coords(
+            x,
+            y,
+            pad_x,
+            pad_y,
+            renderer.cell_w(),
+            renderer.cell_h(),
+        )
     }
 
     /// Coordenadas de celda (row, col) desde la ultima posicion del mouse.
@@ -752,8 +752,12 @@ impl ApplicationHandler<UserEvent> for App {
             .with_inner_size(winit::dpi::LogicalSize::new(wcfg.width, wcfg.height))
             .with_decorations(wcfg.decorations);
         match wcfg.startup {
-            StartupState::Maximized => attrs = attrs.with_maximized(true),
+            StartupState::Maximized => {
+                tracing::info!("window: width/height del config no aplican con startup=maximized");
+                attrs = attrs.with_maximized(true);
+            }
             StartupState::Fullscreen => {
+                tracing::info!("window: width/height del config no aplican con startup=fullscreen");
                 attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
             }
             StartupState::Windowed => {}
@@ -812,7 +816,7 @@ impl ApplicationHandler<UserEvent> for App {
             .expect("no se encontro formato de surface compatible");
         // Si hay transparencia, asegurar que el alpha mode sea compatible
         if opacity < 1.0 {
-            config.alpha_mode = wgpu::CompositeAlphaMode::Auto;
+            config.alpha_mode = wgpu::CompositeAlphaMode::PreMultiplied;
             config.view_formats = vec![config.format.add_srgb_suffix()];
         }
         surface.configure(&device, &config);
@@ -952,7 +956,12 @@ impl ApplicationHandler<UserEvent> for App {
                 term_guard.take_dirty();
                 tracing::debug!("RedrawRequested: renderizando frame");
                 let bold = self.config.bold_is_bright || self.config.theme.bold_is_bright;
-                if let Err(e) = renderer.render(&mut term_guard, &self.config.theme, bold) {
+                if let Err(e) = renderer.render(
+                    &mut term_guard,
+                    &self.config.theme,
+                    bold,
+                    self.config.window.opacity,
+                ) {
                     tracing::warn!("error al renderizar: {e}");
                 }
             }
@@ -1423,6 +1432,7 @@ static VTABLE: RawWakerVTable = RawWakerVTable::new(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer::limits::pixel_to_cell_coords;
 
     #[test]
     fn test_font_zoom_clamp() {
@@ -1432,13 +1442,15 @@ mod tests {
     }
 
     fn coords_to_cell(x: f64, y: f64, cell_w: f32, cell_h: f32) -> (usize, usize) {
-        // Bugfix: coordenadas negativas o cell_w/cell_h invalidos retornan sentinel
-        if x < 0.0 || y < 0.0 || cell_w <= 0.0 || cell_h <= 0.0 {
-            return (usize::MAX, usize::MAX);
-        }
-        let col = (x as f32 / cell_w) as usize;
-        let row = (y as f32 / cell_h) as usize;
-        (row, col)
+        pixel_to_cell_coords(x, y, 0.0, 0.0, cell_w, cell_h)
+    }
+
+    #[test]
+    fn test_pixel_to_cell_con_padding() {
+        let (row, col) = pixel_to_cell_coords(28.0, 46.0, 8.0, 6.0, 10.0, 20.0);
+        assert_eq!((row, col), (2, 2));
+        let (r0, c0) = pixel_to_cell_coords(8.0, 6.0, 8.0, 6.0, 10.0, 20.0);
+        assert_eq!((r0, c0), (0, 0));
     }
 
     // =====================================================================
