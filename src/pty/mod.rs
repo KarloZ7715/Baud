@@ -106,6 +106,18 @@ pub fn open() -> nix::Result<(Pty, Pty)> {
 /// Retorna el extremo master para comunicarse con el proceso.
 /// El slave se cierra en el padre despues del spawn.
 pub fn spawn(shell: &str, args: &[&str]) -> nix::Result<Pty> {
+    spawn_with(&ProcessConfig {
+        shell: shell.into(),
+        args: args.iter().map(|s| (*s).to_string()).collect(),
+        working_directory: None,
+        env: Vec::new(),
+        startup_command: None,
+        login_shell: false,
+    })
+}
+
+/// Lanza un proceso según [`ProcessConfig`].
+pub fn spawn_with(cfg: &ProcessConfig) -> nix::Result<Pty> {
     let result = nix::pty::openpty(None, None)?;
 
     // ponytail: configurar slave en raw mode para que el child reciba
@@ -134,11 +146,25 @@ pub fn spawn(shell: &str, args: &[&str]) -> nix::Result<Pty> {
     let slave_stdin = nix::unistd::dup(&result.slave)?;
     let slave_stdout = nix::unistd::dup(&result.slave)?;
 
-    let mut cmd = std::process::Command::new(shell);
-    cmd.args(args);
+    let mut cmd = std::process::Command::new(&cfg.shell);
+    cmd.args(&cfg.args);
+    if let Some(dir) = &cfg.working_directory {
+        cmd.current_dir(dir);
+    }
     // ponytail: TERM necesario para que bash active readline.
     // xterm-256color es el estandar y compatible con la mayoria de programas TUI.
     cmd.env("TERM", "xterm-256color");
+    for (key, value) in &cfg.env {
+        cmd.env(key, value);
+    }
+    // Login shell: argv[0] con prefijo '-' (convencion POSIX, portable entre shells).
+    if cfg.login_shell {
+        let base_name = std::path::Path::new(&cfg.shell)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&cfg.shell);
+        cmd.arg0(format!("-{base_name}"));
+    }
     cmd.stdin(Stdio::from(std::fs::File::from(slave_stdin)));
     cmd.stdout(Stdio::from(std::fs::File::from(slave_stdout)));
     cmd.stderr(Stdio::from(std::fs::File::from(result.slave)));
@@ -179,6 +205,35 @@ mod tests {
     use std::os::fd::AsRawFd;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    fn read_to_string_until_eof(master: &mut Pty) -> String {
+        let mut output = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match master.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => output.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&output).into_owned()
+    }
+
+    #[test]
+    fn test_spawn_aplica_cwd_y_env() {
+        let cfg = ProcessConfig {
+            shell: "/bin/bash".into(),
+            args: vec!["-c".into(), "echo CWD=$PWD VAR=$BAUD_TEST".into()],
+            working_directory: Some("/tmp".into()),
+            env: vec![("BAUD_TEST".into(), "ok".into())],
+            startup_command: None,
+            login_shell: false,
+        };
+        let mut master = spawn_with(&cfg).expect("spawn");
+        let out = read_to_string_until_eof(&mut master);
+        assert!(out.contains("CWD=/tmp"), "output: {out:?}");
+        assert!(out.contains("VAR=ok"), "output: {out:?}");
+    }
 
     #[test]
     fn test_open_returns_valid_fds() {
