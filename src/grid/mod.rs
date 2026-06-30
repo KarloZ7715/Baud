@@ -10,9 +10,11 @@ pub const DEFAULT_ROWS: usize = 24;
 /// Número de columnas por defecto del grid virtual.
 pub const DEFAULT_COLS: usize = 80;
 
-/// Máximo número de líneas guardadas en el scrollback (MVP).
-// ponytail: 100 lineas fijas, sin configuracion.
-pub const MAX_SCROLLBACK: usize = 100;
+/// Límite por defecto de líneas en scrollback.
+pub const DEFAULT_MAX_SCROLLBACK: usize = 10_000;
+
+/// Alias histórico para tests y benches que fijaban el límite anterior.
+pub const MAX_SCROLLBACK: usize = DEFAULT_MAX_SCROLLBACK;
 
 /// Celda individual del terminal: un carácter con sus atributos y ancho.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -40,6 +42,8 @@ pub struct Grid {
     pub rows_count: usize,
     /// Número actual de columnas del grid.
     pub cols_count: usize,
+    /// Máximo de líneas en scrollback para este grid.
+    pub max_scrollback: usize,
     /// Indica si cada fila es continuación de la anterior por soft-wrap (true)
     /// o por hard break / Enter explícito (false).
     /// Usado por reflow para decidir si insertar un newline marker entre filas.
@@ -74,11 +78,18 @@ impl Grid {
 
     /// Crea un grid vacío con el tamaño especificado.
     pub fn new_sized(rows: usize, cols: usize) -> Self {
+        Self::new_sized_with_scrollback(rows, cols, DEFAULT_MAX_SCROLLBACK)
+    }
+
+    /// Crea un grid vacío con tamaño y límite de scrollback.
+    pub fn new_sized_with_scrollback(rows: usize, cols: usize, max_scrollback: usize) -> Self {
+        let cap = max_scrollback.min(1024);
         Self {
             rows: vec![vec![Cell::default(); cols]; rows],
-            scrollback: VecDeque::with_capacity(MAX_SCROLLBACK),
+            scrollback: VecDeque::with_capacity(cap),
             rows_count: rows,
             cols_count: cols,
+            max_scrollback,
             row_continuations: vec![false; rows],
             damage: GridDamage::new(rows, cols),
         }
@@ -307,7 +318,10 @@ impl Grid {
 
     /// Guarda una fila en el scrollback cuando sale por arriba de la pantalla.
     fn push_scrollback(&mut self, row: Vec<Cell>) {
-        if self.scrollback.len() >= MAX_SCROLLBACK {
+        if self.max_scrollback == 0 {
+            return;
+        }
+        if self.scrollback.len() >= self.max_scrollback {
             self.scrollback.pop_front();
         }
         self.scrollback.push_back(row);
@@ -623,6 +637,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_grid_max_scrollback_configurable() {
+        let mut grid = Grid::new_sized_with_scrollback(24, 80, 3);
+        for _ in 0..10 {
+            grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        }
+        assert_eq!(grid.scrollback.len(), 3);
+    }
+
+    #[test]
     fn test_scrollback_pushes_on_scroll_up() {
         let mut grid = Grid::new();
         grid.scroll_up_region(1, 0, grid.rows_count - 1);
@@ -631,11 +654,11 @@ mod tests {
 
     #[test]
     fn test_scrollback_drops_oldest_when_full() {
-        let mut grid = Grid::new();
-        for _ in 0..=MAX_SCROLLBACK {
+        let mut grid = Grid::new_sized_with_scrollback(24, 80, 100);
+        for _ in 0..=100 {
             grid.scroll_up_region(1, 0, grid.rows_count - 1);
         }
-        assert_eq!(grid.scrollback.len(), MAX_SCROLLBACK);
+        assert_eq!(grid.scrollback.len(), 100);
     }
 
     #[test]
@@ -934,13 +957,12 @@ mod tests {
 
     #[test]
     fn test_scrollback_1000_lines() {
-        let mut grid = Grid::new();
+        let mut grid = Grid::new_sized_with_scrollback(24, 80, 100);
         for i in 0..1000 {
-            // Escribir una linea de texto identificable en la primera fila y hacer scroll
             grid.rows[0][0].ch = char::from_digit((i % 10) as u32, 10).unwrap();
             grid.scroll_up_region(1, 0, grid.rows_count - 1);
         }
-        assert_eq!(grid.scrollback.len(), MAX_SCROLLBACK);
+        assert_eq!(grid.scrollback.len(), 100);
         // Verificar que la linea mas reciente en scrollback corresponde a i=999
         let last = grid.scrollback.back().unwrap();
         assert_eq!(last[0].ch, '9');

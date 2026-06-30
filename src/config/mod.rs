@@ -28,6 +28,8 @@ pub struct Config {
     pub selection: SelectionConfig,
     #[serde(default)]
     pub copy_mode: CopyModeConfig,
+    #[serde(default)]
+    pub scrollback: ScrollbackConfig,
 }
 
 /// Configuración de selección de texto.
@@ -171,6 +173,28 @@ fn default_win_width() -> u32 {
 
 fn default_win_height() -> u32 {
     600
+}
+
+/// Límite de líneas en scrollback (configurable; ver `unlimited`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScrollbackConfig {
+    #[serde(default = "default_scrollback_lines")]
+    pub lines: usize,
+    #[serde(default)]
+    pub unlimited: bool,
+}
+
+fn default_scrollback_lines() -> usize {
+    10_000
+}
+
+impl Default for ScrollbackConfig {
+    fn default() -> Self {
+        Self {
+            lines: default_scrollback_lines(),
+            unlimited: false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +435,15 @@ pub fn parse_hex(s: &str) -> (u8, u8, u8) {
 // ---------------------------------------------------------------------------
 
 impl Config {
+    /// Límite efectivo de scrollback en líneas (`usize::MAX` si `unlimited`).
+    pub fn scrollback_max_lines(&self) -> usize {
+        if self.scrollback.unlimited {
+            usize::MAX
+        } else {
+            self.scrollback.lines
+        }
+    }
+
     /// Construye la configuración del proceso hijo del PTY.
     ///
     /// Convierte [`Config`] en [`crate::pty::ProcessConfig`] (shell, args,
@@ -611,6 +644,18 @@ word_delimiters = " ,.;"
         assert_eq!(parse_hex("#ff00000"), (0, 0, 0)); // 8 caracteres
         assert_eq!(parse_hex("ff0000"), (0, 0, 0)); // sin #
         assert_eq!(parse_hex("#-10000"), (0, 0, 0)); // signo negativo
+    }
+
+    #[test]
+    fn test_scrollback_config() {
+        let cfg = Config::default();
+        assert_eq!(cfg.scrollback.lines, 10000);
+        assert!(!cfg.scrollback.unlimited);
+
+        let toml = "[scrollback]\nlines = 5000\nunlimited = true\n";
+        let parsed: Config = toml::from_str(toml).unwrap();
+        assert_eq!(parsed.scrollback.lines, 5000);
+        assert!(parsed.scrollback.unlimited);
     }
 
     #[test]
