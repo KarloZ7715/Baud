@@ -1,30 +1,39 @@
 //! Display list celda-determinista: fondos y glifos por coordenada de grid.
 
-use crate::ansi::{Color, CursorStyle, Term};
-use crate::config::{parse_hex, ThemeConfig};
+use crate::ansi::{Color, CursorStyle, Term, UnderlineStyle};
 use crate::grid::{Cell, DamageSnapshot};
 
 use super::decorations::cursor_glyph;
 use super::glyph::{is_wide_continuation, resolve_glyph_key, GlyphKey};
 use super::metrics::CellMetrics;
-use super::{color_to_glyphon, color_to_glyphon_bg, selection_bg_glyphon};
+use super::palette::Palette;
+use super::selection_bg_glyphon;
 
-/// Factor de atenuacion RGB para SGR dim (2).
+/// Factor de atenuacion RGB para SGR dim (2) cuando `dim_alpha` esta desactivado.
 pub const DIM_FACTOR: f32 = 0.6;
+
+/// Tipo de linea decorativa en una celda.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineKind {
+    Under,
+    Strike,
+    Over,
+}
+
+/// Linea decorativa (subrayado, tachado, overline).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LineQuad {
+    pub row: usize,
+    pub col: usize,
+    pub width_cells: u8,
+    pub kind: LineKind,
+    pub style: UnderlineStyle,
+    pub color: glyphon::Color,
+}
 
 /// Rectangulo de fondo en coordenadas de celda.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BgQuad {
-    pub row: usize,
-    pub col: usize,
-    /// Ancho en columnas de grid (1 normal, 2 para glifos anchos en col inicial).
-    pub width_cells: u8,
-    pub color: glyphon::Color,
-}
-
-/// Subrayado de 1px bajo la baseline.
-#[derive(Debug, Clone, PartialEq)]
-pub struct UnderlineQuad {
     pub row: usize,
     pub col: usize,
     pub width_cells: u8,
@@ -48,9 +57,9 @@ pub struct TextGlyph {
     pub width_cells: u8,
     pub glyph_key: GlyphKey,
     pub fg: Color,
+    pub bold: bool,
     pub dim: bool,
     pub custom_id: u16,
-    /// Celda dentro de la seleccion activa (fg via `selection_fg` del tema).
     pub selected: bool,
 }
 
@@ -58,22 +67,34 @@ pub struct TextGlyph {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct DisplayList {
     pub bg_quads: Vec<BgQuad>,
-    pub underline_quads: Vec<UnderlineQuad>,
+    pub line_quads: Vec<LineQuad>,
     pub text_glyphs: Vec<TextGlyph>,
     pub cursor: Option<CursorGlyph>,
-    /// Celdas con cursor estilo bar (row, col).
     pub cursor_bars: Vec<(usize, usize)>,
 }
 
 impl DisplayList {
-    /// Vacia las primitivas conservando capacidad de los `Vec`.
     pub fn clear(&mut self) {
         self.bg_quads.clear();
-        self.underline_quads.clear();
+        self.line_quads.clear();
         self.text_glyphs.clear();
         self.cursor = None;
         self.cursor_bars.clear();
     }
+}
+
+/// Elige negro o blanco para texto sobre un fondo RGB dado (luminancia).
+pub fn contrast_text_color(bg: (u8, u8, u8)) -> (u8, u8, u8) {
+    let lum = 0.299 * f64::from(bg.0) + 0.587 * f64::from(bg.1) + 0.114 * f64::from(bg.2);
+    if lum >= 128.0 {
+        (0, 0, 0)
+    } else {
+        (255, 255, 255)
+    }
+}
+
+fn rgb_to_glyphon(rgb: (u8, u8, u8)) -> glyphon::Color {
+    glyphon::Color::rgb(rgb.0, rgb.1, rgb.2)
 }
 
 /// Atenua un color RGB multiplicando por `DIM_FACTOR`.
@@ -87,13 +108,53 @@ pub fn attenuate_glyphon(color: glyphon::Color) -> glyphon::Color {
 }
 
 /// Resuelve fg a glyphon::Color, aplicando dim si corresponde.
-pub fn resolve_fg_glyphon(fg: Color, dim: bool, theme: &ThemeConfig) -> glyphon::Color {
-    let color = color_to_glyphon(fg, theme);
-    if dim {
-        attenuate_glyphon(color)
-    } else {
-        color
+pub fn resolve_fg_glyphon(
+    fg: Color,
+    dim: bool,
+    bold: bool,
+    palette: &Palette<'_>,
+    dim_alpha: bool,
+) -> glyphon::Color {
+    let rgb = palette.rgb(fg, bold);
+    let color = rgb_to_glyphon(rgb);
+    if !dim {
+        return color;
     }
+    if dim_alpha {
+        glyphon::Color::rgba(color.r(), color.g(), color.b(), (DIM_FACTOR * 255.0) as u8)
+    } else {
+        attenuate_glyphon(color)
+    }
+}
+
+fn resolve_bg_glyphon(bg: Color, palette: &Palette<'_>) -> glyphon::Color {
+    let (r, g, b) = palette.bg_rgb(bg);
+    glyphon::Color::rgba(r, g, b, 255)
+}
+
+fn effective_underline_style(cell: &Cell) -> UnderlineStyle {
+    if cell.attrs.underline_style != UnderlineStyle::None {
+        cell.attrs.underline_style
+    } else if cell.hyperlink.is_some() || cell.attrs.underline {
+        UnderlineStyle::Single
+    } else {
+        UnderlineStyle::None
+    }
+}
+
+fn underline_color_for_cell(
+    fg: Color,
+    bold: bool,
+    cell: &Cell,
+    palette: &Palette<'_>,
+    dim_alpha: bool,
+) -> glyphon::Color {
+    let color = if cell.attrs.underline_color == Color::Default {
+        fg
+    } else {
+        cell.attrs.underline_color
+    };
+    resolve_fg_glyphon(color, cell.attrs.dim, bold, palette, dim_alpha)
 }
 
 /// Construye o actualiza la display list recorriendo celdas visibles.
@@ -108,7 +169,8 @@ impl DisplayListBuilder {
         list: &mut DisplayList,
         term: &Term,
         metrics: &CellMetrics,
-        theme: &ThemeConfig,
+        palette: &Palette<'_>,
+        dim_alpha: bool,
         row_sources: &[&[Cell]],
         cols: usize,
         rows: usize,
@@ -121,7 +183,8 @@ impl DisplayListBuilder {
                 Self::build_row(
                     list,
                     term,
-                    theme,
+                    palette,
+                    dim_alpha,
                     row_sources,
                     cols,
                     row,
@@ -138,7 +201,8 @@ impl DisplayListBuilder {
                 Self::build_row(
                     list,
                     term,
-                    theme,
+                    palette,
+                    dim_alpha,
                     row_sources,
                     cols,
                     row,
@@ -152,7 +216,7 @@ impl DisplayListBuilder {
             list,
             term,
             metrics,
-            theme,
+            palette,
             cols,
             rows,
             font_family,
@@ -160,14 +224,8 @@ impl DisplayListBuilder {
         );
     }
 
-    fn cursor_color(theme: &ThemeConfig) -> glyphon::Color {
-        let (r, g, b) = parse_hex(&theme.cursor);
-        glyphon::Color::rgb(r, g, b)
-    }
-
-    fn cursor_contrast_fg(theme: &ThemeConfig) -> glyphon::Color {
-        let (r, g, b) = parse_hex(&theme.background);
-        glyphon::Color::rgb(r, g, b)
+    fn cursor_color(palette: &Palette<'_>) -> glyphon::Color {
+        rgb_to_glyphon(palette.cursor_rgb())
     }
 
     fn shell_cursor_here(term: &Term, row: usize, col: usize, show_scrollback: bool) -> bool {
@@ -183,22 +241,23 @@ impl DisplayListBuilder {
         list: &mut DisplayList,
         term: &Term,
         metrics: &CellMetrics,
-        theme: &ThemeConfig,
+        palette: &Palette<'_>,
         cols: usize,
         rows: usize,
         font_family: &str,
         show_scrollback: bool,
     ) {
         list.cursor = None;
-        // Copy mode: underline en la posicion logica (fallback glyph si falla raster).
         if let Some(ref cm) = term.copy_mode {
             if let Some(vis_row) = crate::copy_mode::logical_to_visible_row(term, cm.row) {
                 if vis_row < rows && cm.col < cols {
-                    let color = Self::cursor_color(theme);
-                    list.underline_quads.push(UnderlineQuad {
+                    let color = Self::cursor_color(palette);
+                    list.line_quads.push(LineQuad {
                         row: vis_row,
                         col: cm.col,
                         width_cells: 1,
+                        kind: LineKind::Under,
+                        style: UnderlineStyle::Single,
                         color,
                     });
                     let style = CursorStyle::Underline;
@@ -223,7 +282,7 @@ impl DisplayListBuilder {
 
     fn clear_row(list: &mut DisplayList, row: usize) {
         list.bg_quads.retain(|q| q.row != row);
-        list.underline_quads.retain(|q| q.row != row);
+        list.line_quads.retain(|q| q.row != row);
         list.text_glyphs.retain(|g| g.row != row);
         list.cursor_bars.retain(|(r, _)| *r != row);
     }
@@ -232,7 +291,8 @@ impl DisplayListBuilder {
     fn build_row(
         list: &mut DisplayList,
         term: &Term,
-        theme: &ThemeConfig,
+        palette: &Palette<'_>,
+        dim_alpha: bool,
         row_sources: &[&[Cell]],
         cols: usize,
         row: usize,
@@ -263,6 +323,7 @@ impl DisplayListBuilder {
             let cell = source_row.get(col).unwrap_or(&default_cell);
             let is_sel = term.is_selected(row, col);
             let is_cursor = Self::shell_cursor_here(term, row, col, show_scrollback);
+            let bold = cell.attrs.bold;
 
             if is_cursor && matches!(term.cursor_style, CursorStyle::Bar) {
                 list.cursor_bars.push((row, col));
@@ -278,47 +339,82 @@ impl DisplayListBuilder {
                     row,
                     col,
                     width_cells: cell.width.max(1),
-                    color: selection_bg_glyphon(theme),
+                    color: selection_bg_glyphon(palette.theme),
                 });
             } else if is_cursor && matches!(term.cursor_style, CursorStyle::Block) {
                 list.bg_quads.push(BgQuad {
                     row,
                     col,
                     width_cells: cell.width.max(1),
-                    color: Self::cursor_color(theme),
+                    color: Self::cursor_color(palette),
                 });
             } else if bg != Color::Default {
-                let bg_color = color_to_glyphon_bg(bg, theme);
                 list.bg_quads.push(BgQuad {
                     row,
                     col,
                     width_cells: cell.width.max(1),
-                    color: glyphon::Color::rgba(bg_color.r(), bg_color.g(), bg_color.b(), 255),
+                    color: resolve_bg_glyphon(bg, palette),
                 });
             }
 
             if is_cursor && matches!(term.cursor_style, CursorStyle::Underline) {
-                list.underline_quads.push(UnderlineQuad {
+                list.line_quads.push(LineQuad {
                     row,
                     col,
                     width_cells: cell.width.max(1),
-                    color: Self::cursor_color(theme),
+                    kind: LineKind::Under,
+                    style: UnderlineStyle::Single,
+                    color: Self::cursor_color(palette),
                 });
-            } else if cell.attrs.underline && cell.ch != ' ' {
-                let underline_color = resolve_fg_glyphon(fg, cell.attrs.dim, theme);
-                list.underline_quads.push(UnderlineQuad {
+            } else {
+                let underline_style = effective_underline_style(cell);
+                if underline_style != UnderlineStyle::None && cell.ch != ' ' {
+                    list.line_quads.push(LineQuad {
+                        row,
+                        col,
+                        width_cells: cell.width.max(1),
+                        kind: LineKind::Under,
+                        style: underline_style,
+                        color: underline_color_for_cell(fg, bold, cell, palette, dim_alpha),
+                    });
+                }
+            }
+
+            if cell.attrs.strikethrough && cell.ch != ' ' {
+                list.line_quads.push(LineQuad {
                     row,
                     col,
                     width_cells: cell.width.max(1),
-                    color: underline_color,
+                    kind: LineKind::Strike,
+                    style: UnderlineStyle::Single,
+                    color: resolve_fg_glyphon(fg, cell.attrs.dim, bold, palette, dim_alpha),
                 });
             }
 
-            let emit_text = should_emit_text_glyph(cell)
-                || (is_cursor && matches!(term.cursor_style, CursorStyle::Block));
+            if cell.attrs.overline && cell.ch != ' ' {
+                list.line_quads.push(LineQuad {
+                    row,
+                    col,
+                    width_cells: cell.width.max(1),
+                    kind: LineKind::Over,
+                    style: UnderlineStyle::Single,
+                    color: resolve_fg_glyphon(fg, cell.attrs.dim, bold, palette, dim_alpha),
+                });
+            }
+
+            let emit_text = !cell.attrs.invisible
+                && (should_emit_text_glyph(cell)
+                    || (is_cursor && matches!(term.cursor_style, CursorStyle::Block)));
             if !emit_text {
                 continue;
             }
+
+            let cursor_fg = if is_cursor && matches!(term.cursor_style, CursorStyle::Block) {
+                let (r, g, b) = contrast_text_color(palette.cursor_rgb());
+                Color::Rgb(r, g, b)
+            } else {
+                fg
+            };
 
             let Some(glyph_key) = resolve_glyph_key(source_row, col, font_family) else {
                 if is_cursor && cell.ch == ' ' {
@@ -329,7 +425,7 @@ impl DisplayListBuilder {
                         dim: false,
                         family: font_family.to_string(),
                     };
-                    if cell.attrs.bold {
+                    if bold {
                         space_key.bold = true;
                     }
                     list.text_glyphs.push(TextGlyph {
@@ -337,15 +433,8 @@ impl DisplayListBuilder {
                         col,
                         width_cells: 1,
                         glyph_key: space_key,
-                        fg: if is_cursor {
-                            Color::Rgb(
-                                Self::cursor_contrast_fg(theme).r(),
-                                Self::cursor_contrast_fg(theme).g(),
-                                Self::cursor_contrast_fg(theme).b(),
-                            )
-                        } else {
-                            fg
-                        },
+                        fg: cursor_fg,
+                        bold,
                         dim: cell.attrs.dim,
                         custom_id: 0,
                         selected: is_sel,
@@ -359,15 +448,8 @@ impl DisplayListBuilder {
                 col,
                 width_cells: cell.width.max(1),
                 glyph_key,
-                fg: if is_cursor && matches!(term.cursor_style, CursorStyle::Block) {
-                    Color::Rgb(
-                        Self::cursor_contrast_fg(theme).r(),
-                        Self::cursor_contrast_fg(theme).g(),
-                        Self::cursor_contrast_fg(theme).b(),
-                    )
-                } else {
-                    fg
-                },
+                fg: cursor_fg,
+                bold,
                 dim: cell.attrs.dim,
                 custom_id: 0,
                 selected: is_sel,
@@ -376,8 +458,10 @@ impl DisplayListBuilder {
     }
 }
 
-/// Espacio invisible salvo que tenga attrs fuera de lo normal.
 fn should_emit_text_glyph(cell: &Cell) -> bool {
+    if cell.attrs.invisible {
+        return false;
+    }
     if cell.width == 0 {
         return false;
     }
@@ -393,6 +477,11 @@ mod tests {
     use crate::ansi::CursorStyle;
     use crate::config::{FontConfig, ThemeConfig};
     use crate::grid::GridDamage;
+    use crate::renderer::color_to_glyphon;
+
+    fn test_palette(theme: &ThemeConfig) -> Palette<'_> {
+        Palette::from_theme(theme)
+    }
 
     fn test_metrics() -> CellMetrics {
         let mut font_system = super::super::terminal_fallback::create_font_system();
@@ -415,12 +504,14 @@ mod tests {
         rows: usize,
         family: &str,
     ) -> DisplayList {
+        let palette = test_palette(theme);
         let mut list = DisplayList::default();
         DisplayListBuilder::build(
             &mut list,
             term,
             metrics,
-            theme,
+            &palette,
+            theme.dim_alpha,
             row_sources,
             cols,
             rows,
@@ -447,21 +538,16 @@ mod tests {
         let family = FontConfig::default().family;
         let row = row_with_box_top();
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
-        let mut term = Term::default();
+        let term = Term::default();
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 4, 1, &family);
 
-        assert_eq!(
-            list.text_glyphs.len(),
-            4,
-            "fila ┌──┐ debe producir 4 glifos de texto"
-        );
+        assert_eq!(list.text_glyphs.len(), 4);
         for (i, glyph) in list.text_glyphs.iter().enumerate() {
             assert_eq!(glyph.col, i);
             assert_eq!(glyph.row, 0);
             assert_eq!(glyph.width_cells, 1);
         }
-        let _ = &mut term;
     }
 
     #[test]
@@ -479,10 +565,7 @@ mod tests {
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 5, 1, &family);
 
-        assert!(
-            list.bg_quads.iter().any(|q| q.row == 0 && q.col == 3),
-            "block cursor debe pintar fondo en la celda activa"
-        );
+        assert!(list.bg_quads.iter().any(|q| q.row == 0 && q.col == 3));
     }
 
     #[test]
@@ -498,7 +581,7 @@ mod tests {
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 4, 1, &family);
 
-        assert_eq!(list.text_glyphs.len(), 1, "un solo glifo en col 0");
+        assert_eq!(list.text_glyphs.len(), 1);
         assert_eq!(list.text_glyphs[0].col, 0);
         assert_eq!(list.text_glyphs[0].width_cells, 2);
     }
@@ -517,11 +600,18 @@ mod tests {
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let mut term = Term::new();
         term.cursor_visible = false;
+        let palette = test_palette(&theme);
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
 
         let expected = attenuate_glyphon(color_to_glyphon(Color::Blue, &theme));
-        let actual = resolve_fg_glyphon(list.text_glyphs[0].fg, list.text_glyphs[0].dim, &theme);
+        let actual = resolve_fg_glyphon(
+            list.text_glyphs[0].fg,
+            list.text_glyphs[0].dim,
+            list.text_glyphs[0].bold,
+            &palette,
+            theme.dim_alpha,
+        );
         assert_eq!(actual, expected);
         assert_eq!(list.text_glyphs[0].fg, Color::Blue);
     }
@@ -538,12 +628,14 @@ mod tests {
         row[0].attrs.dim = true;
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let term = Term::default();
+        let palette = test_palette(&theme);
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
 
-        assert_eq!(list.underline_quads.len(), 1);
+        assert_eq!(list.line_quads.len(), 1);
         let expected = attenuate_glyphon(color_to_glyphon(Color::Green, &theme));
-        assert_eq!(list.underline_quads[0].color, expected);
+        assert_eq!(list.line_quads[0].color, expected);
+        let _ = palette;
     }
 
     #[test]
@@ -560,13 +652,15 @@ mod tests {
             .collect();
         let row_sources: Vec<&[Cell]> = vec![row0.as_slice(), row1.as_slice()];
         let term = Term::default();
+        let palette = test_palette(&theme);
         let mut list = DisplayList::default();
 
         DisplayListBuilder::build(
             &mut list,
             &term,
             &metrics,
-            &theme,
+            &palette,
+            theme.dim_alpha,
             &row_sources,
             4,
             2,
@@ -586,7 +680,8 @@ mod tests {
             &mut list,
             &term,
             &metrics,
-            &theme,
+            &palette,
+            theme.dim_alpha,
             &row_sources,
             4,
             2,
@@ -597,5 +692,74 @@ mod tests {
 
         assert_eq!(list.text_glyphs.len(), full_glyphs);
         assert_eq!(list.text_glyphs.iter().filter(|g| g.row == 0).count(), 4);
+    }
+
+    #[test]
+    fn invisible_no_emite_glifo_de_texto() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 1];
+        row[0].ch = 'x';
+        row[0].attrs.invisible = true;
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let term = Term::default();
+
+        let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
+
+        assert!(list.text_glyphs.is_empty(), "invisible no dibuja glifo");
+    }
+
+    #[test]
+    fn contrast_fg_elige_negro_o_blanco() {
+        assert_eq!(contrast_text_color((255, 255, 255)), (0, 0, 0));
+        assert_eq!(contrast_text_color((0, 0, 0)), (255, 255, 255));
+    }
+
+    #[test]
+    fn undercurl_usa_underline_color() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 1];
+        row[0].ch = 'a';
+        row[0].attrs.underline_style = UnderlineStyle::Curly;
+        row[0].attrs.underline_color = Color::Red;
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let term = Term::default();
+        let palette = test_palette(&theme);
+
+        let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
+
+        let under = list
+            .line_quads
+            .iter()
+            .find(|q| q.kind == LineKind::Under)
+            .expect("underline quad");
+        assert_eq!(under.style, UnderlineStyle::Curly);
+        let expected = resolve_fg_glyphon(Color::Red, false, false, &palette, theme.dim_alpha);
+        assert_eq!(under.color, expected);
+    }
+
+    #[test]
+    fn celda_con_hyperlink_emite_underline() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 1];
+        row[0].ch = 'L';
+        row[0].hyperlink = Some(0);
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let term = Term::default();
+
+        let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
+
+        assert_eq!(
+            list.line_quads
+                .iter()
+                .filter(|q| q.kind == LineKind::Under)
+                .count(),
+            1
+        );
     }
 }

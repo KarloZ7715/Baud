@@ -106,6 +106,12 @@ pub struct ThemeConfig {
     pub bright_cyan: String,
     #[serde(default = "default_bright_white")]
     pub bright_white: String,
+    /// Bold ANSI 0-7 se mapea a bright 8-15.
+    #[serde(default)]
+    pub bold_is_bright: bool,
+    /// SGR dim atenua alpha del glifo en vez de oscurecer RGB.
+    #[serde(default)]
+    pub dim_alpha: bool,
 }
 
 /// Configuración de la fuente (tipografía y tamaño).
@@ -167,6 +173,8 @@ impl Default for ThemeConfig {
             bright_magenta: default_bright_magenta(),
             bright_cyan: default_bright_cyan(),
             bright_white: default_bright_white(),
+            bold_is_bright: false,
+            dim_alpha: false,
         }
     }
 }

@@ -7,7 +7,10 @@ mod glyph;
 mod glyph_cache;
 pub mod limits;
 mod metrics;
+mod palette;
 mod terminal_fallback;
+
+pub use palette::{ColorOverrides, Palette};
 
 use limits::{custom_pixels, MAX_CUSTOM_GLYPH_PIXELS};
 
@@ -290,7 +293,13 @@ impl Renderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-        let (fg_r, fg_g, fg_b) = parse_hex(&theme.foreground);
+        let overrides = ColorOverrides::from_term(term);
+        let palette = Palette {
+            theme,
+            overrides: &overrides,
+            bold_is_bright: theme.bold_is_bright,
+        };
+        let (fg_r, fg_g, fg_b) = palette.rgb(Color::Default, false);
         let default_fg_color = glyphon::Color::rgb(fg_r, fg_g, fg_b);
         let grid_damage = term.take_active_grid_damage();
         let active = term.active_grid();
@@ -343,6 +352,7 @@ impl Renderer {
             term,
             grid_damage,
             theme,
+            &palette,
             frame,
             &view,
             encoder,
@@ -363,6 +373,7 @@ impl Renderer {
         term: &Term,
         mut damage: DamageSnapshot,
         theme: &ThemeConfig,
+        palette: &Palette<'_>,
         frame: wgpu::SurfaceTexture,
         view: &wgpu::TextureView,
         mut encoder: wgpu::CommandEncoder,
@@ -412,7 +423,7 @@ impl Renderer {
 
         let t_build = Instant::now();
         let bg_cap = self.display_list.bg_quads.capacity();
-        let underline_cap = self.display_list.underline_quads.capacity();
+        let line_cap = self.display_list.line_quads.capacity();
         let glyph_cap = self.display_list.text_glyphs.capacity();
         if damage.is_full() {
             self.display_list.clear();
@@ -421,8 +432,8 @@ impl Renderer {
             .bg_quads
             .reserve(bg_cap.min(limits::MAX_GRID_DIM * limits::MAX_GRID_DIM));
         self.display_list
-            .underline_quads
-            .reserve(underline_cap.min(limits::MAX_GRID_DIM * limits::MAX_GRID_DIM));
+            .line_quads
+            .reserve(line_cap.min(limits::MAX_GRID_DIM * limits::MAX_GRID_DIM));
         self.display_list
             .text_glyphs
             .reserve(glyph_cap.min(limits::MAX_GRID_DIM * limits::MAX_GRID_DIM));
@@ -431,7 +442,8 @@ impl Renderer {
             &mut self.display_list,
             term,
             &self.cell_metrics,
-            theme,
+            palette,
+            theme.dim_alpha,
             row_sources,
             cols_count,
             rows_count,
@@ -444,7 +456,8 @@ impl Renderer {
         CellRenderer::build_custom_glyphs(
             &self.display_list,
             &self.cell_metrics,
-            theme,
+            palette,
+            theme.dim_alpha,
             &self.font_family,
             &mut self.glyph_cache,
             &mut self.font_system,
@@ -511,7 +524,7 @@ impl Renderer {
         let prepare_us = t_prepare.elapsed().as_secs_f64() * 1_000_000.0;
 
         let t_gpu = Instant::now();
-        let (bg_r, bg_g, bg_b) = parse_hex(&theme.background);
+        let (bg_r, bg_g, bg_b) = palette.bg_rgb(Color::Default);
         let clear_color = wgpu::Color {
             r: bg_r as f64 / 255.0,
             g: bg_g as f64 / 255.0,
@@ -606,9 +619,9 @@ impl Renderer {
     }
 }
 
-/// Convierte un Color ANSI a `glyphon::Color` usando los valores del tema.
-pub(crate) fn color_to_glyphon(color: Color, theme: &ThemeConfig) -> glyphon::Color {
-    let (r, g, b) = match color {
+/// Mapea un `Color` a RGB usando solo el tema (sin overrides runtime).
+pub(crate) fn color_rgb_from_theme(color: Color, theme: &ThemeConfig) -> (u8, u8, u8) {
+    match color {
         Color::Default => parse_hex(&theme.foreground),
         Color::Black => parse_hex(&theme.black),
         Color::Red => parse_hex(&theme.red),
@@ -628,36 +641,24 @@ pub(crate) fn color_to_glyphon(color: Color, theme: &ThemeConfig) -> glyphon::Co
         Color::BrightWhite => parse_hex(&theme.bright_white),
         Color::Indexed(n) => ansi_256_to_rgb(n, theme),
         Color::Rgb(r, g, b) => (r, g, b),
-    };
+    }
+}
+
+/// Convierte un Color ANSI a `glyphon::Color` usando los valores del tema.
+#[cfg_attr(not(test), expect(dead_code, reason = "usado en tests del renderer"))]
+pub(crate) fn color_to_glyphon(color: Color, theme: &ThemeConfig) -> glyphon::Color {
+    let (r, g, b) = color_rgb_from_theme(color, theme);
     glyphon::Color::rgb(r, g, b)
 }
 
 /// Convierte un Color ANSI a `glyphon::Color` usando los valores del tema,
 /// pero mapea `Color::Default` al color de BACKGROUND del tema (no foreground).
-///
-/// Esto permite dibujar rectangulos de fondo con `Color::Default` que sean
-/// del mismo color que el fondo limpiado por `Clear`.
+#[cfg_attr(not(test), expect(dead_code, reason = "usado en tests del renderer"))]
 pub(crate) fn color_to_glyphon_bg(color: Color, theme: &ThemeConfig) -> glyphon::Color {
-    let (r, g, b) = match color {
-        Color::Default => parse_hex(&theme.background),
-        Color::Black => parse_hex(&theme.black),
-        Color::Red => parse_hex(&theme.red),
-        Color::Green => parse_hex(&theme.green),
-        Color::Yellow => parse_hex(&theme.yellow),
-        Color::Blue => parse_hex(&theme.blue),
-        Color::Magenta => parse_hex(&theme.magenta),
-        Color::Cyan => parse_hex(&theme.cyan),
-        Color::White => parse_hex(&theme.white),
-        Color::BrightBlack => parse_hex(&theme.bright_black),
-        Color::BrightRed => parse_hex(&theme.bright_red),
-        Color::BrightGreen => parse_hex(&theme.bright_green),
-        Color::BrightYellow => parse_hex(&theme.bright_yellow),
-        Color::BrightBlue => parse_hex(&theme.bright_blue),
-        Color::BrightMagenta => parse_hex(&theme.bright_magenta),
-        Color::BrightCyan => parse_hex(&theme.bright_cyan),
-        Color::BrightWhite => parse_hex(&theme.bright_white),
-        Color::Indexed(n) => ansi_256_to_rgb(n, theme),
-        Color::Rgb(r, g, b) => (r, g, b),
+    let (r, g, b) = if let Color::Default = color {
+        parse_hex(&theme.background)
+    } else {
+        color_rgb_from_theme(color, theme)
     };
     glyphon::Color::rgb(r, g, b)
 }

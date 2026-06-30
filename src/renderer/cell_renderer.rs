@@ -5,28 +5,33 @@ use glyphon::{
     TextBounds, TextRenderer,
 };
 
-use crate::config::{parse_hex, ThemeConfig};
-
-fn parse_hex_color(hex: &str) -> glyphon::Color {
-    let (r, g, b) = parse_hex(hex);
-    glyphon::Color::rgb(r, g, b)
-}
-
-use super::decorations::{cursor_anchor_offset, underline_quad};
-use super::display_list::{resolve_fg_glyphon, CursorGlyph, DisplayList, TextGlyph, UnderlineQuad};
+use super::decorations::{
+    cursor_anchor_offset, line_quad, rasterize_line_mask, LINE_CURLY_GLYPH_ID,
+    LINE_DASHED_GLYPH_ID, LINE_DOTTED_GLYPH_ID, LINE_DOUBLE_GLYPH_ID, SOLID_MASK_GLYPH_ID,
+};
+use super::display_list::{resolve_fg_glyphon, CursorGlyph, DisplayList, LineQuad, TextGlyph};
 use super::glyph_cache::GlyphCache;
 use super::limits::{self, MAX_CUSTOM_GLYPH_PIXELS};
 use super::metrics::CellMetrics;
+use super::palette::Palette;
 use super::selection_fg_glyphon;
 
-/// Id reservado para quads de fondo solido (mascara llena + color en CustomGlyph).
-pub const BG_SOLID_GLYPH_ID: u16 = 0;
+fn line_quad_to_custom(line: &LineQuad, metrics: &CellMetrics) -> CustomGlyph {
+    line_quad(
+        line.row,
+        line.col,
+        line.width_cells,
+        line.kind,
+        line.style,
+        metrics,
+        line.color,
+    )
+}
 
 /// Convierte una display list en `CustomGlyph` y prepara el frame.
 pub struct CellRenderer;
 
 impl CellRenderer {
-    /// Rellena `out` con los CustomGlyph del grid (fondos + texto).
     #[expect(
         clippy::too_many_arguments,
         reason = "GPU glyph build needs font + cache handles"
@@ -34,7 +39,8 @@ impl CellRenderer {
     pub fn build_custom_glyphs(
         display_list: &DisplayList,
         metrics: &CellMetrics,
-        theme: &ThemeConfig,
+        palette: &Palette<'_>,
+        dim_alpha: bool,
         font_family: &str,
         glyph_cache: &mut GlyphCache,
         font_system: &mut glyphon::FontSystem,
@@ -44,7 +50,7 @@ impl CellRenderer {
         out.clear();
         out.reserve(
             display_list.bg_quads.len()
-                + display_list.underline_quads.len()
+                + display_list.line_quads.len()
                 + display_list.text_glyphs.len()
                 + usize::from(display_list.cursor.is_some()),
         );
@@ -56,16 +62,20 @@ impl CellRenderer {
             }
         }
 
-        for underline in &display_list.underline_quads {
-            out.push(underline_quad_to_custom(underline, metrics));
+        for line in &display_list.line_quads {
+            out.push(line_quad_to_custom(line, metrics));
         }
 
+        let cursor_color = {
+            let (r, g, b) = palette.cursor_rgb();
+            glyphon::Color::rgb(r, g, b)
+        };
         for &(row, col) in &display_list.cursor_bars {
             out.push(super::decorations::bar_quad(
                 row,
                 col,
                 metrics,
-                parse_hex_color(&theme.cursor),
+                cursor_color,
             ));
         }
 
@@ -73,7 +83,8 @@ impl CellRenderer {
             if let Some(glyph) = text_glyph_to_custom(
                 text,
                 metrics,
-                theme,
+                palette,
+                dim_alpha,
                 font_family,
                 glyph_cache,
                 font_system,
@@ -89,7 +100,7 @@ impl CellRenderer {
             if let Some(glyph) = cursor_glyph_to_custom(
                 cursor,
                 metrics,
-                theme,
+                palette,
                 font_family,
                 glyph_cache,
                 font_system,
@@ -102,7 +113,6 @@ impl CellRenderer {
         Ok(())
     }
 
-    /// Prepara text areas (grid custom glyphs + overlays) para GPU.
     #[expect(
         clippy::too_many_arguments,
         reason = "glyphon prepare mirrors wgpu resource bundle"
@@ -167,7 +177,7 @@ fn bg_quad_to_custom(bg: &super::display_list::BgQuad, metrics: &CellMetrics) ->
     );
     let height = limits::clamp_custom_dimension(metrics.cell_h, metrics.cell_h, 1);
     CustomGlyph {
-        id: BG_SOLID_GLYPH_ID,
+        id: SOLID_MASK_GLYPH_ID,
         left: bg.col as f32 * metrics.cell_w,
         top: bg.row as f32 * metrics.cell_h,
         width,
@@ -178,20 +188,15 @@ fn bg_quad_to_custom(bg: &super::display_list::BgQuad, metrics: &CellMetrics) ->
     }
 }
 
-fn underline_quad_to_custom(underline: &UnderlineQuad, metrics: &CellMetrics) -> CustomGlyph {
-    underline_quad(
-        underline.row,
-        underline.col,
-        underline.width_cells,
-        metrics,
-        underline.color,
-    )
-}
-
+#[expect(
+    clippy::too_many_arguments,
+    reason = "GPU glyph build needs palette + cache handles"
+)]
 fn text_glyph_to_custom(
     text: &TextGlyph,
     metrics: &CellMetrics,
-    theme: &ThemeConfig,
+    palette: &Palette<'_>,
+    dim_alpha: bool,
     font_family: &str,
     glyph_cache: &mut GlyphCache,
     font_system: &mut glyphon::FontSystem,
@@ -218,7 +223,6 @@ fn text_glyph_to_custom(
     let left = text.col as f32 * metrics.cell_w
         + metrics.glyph_offset_x
         + cached.raster.placement_left as f32;
-    // Misma formula que glyphon: round(line_y) + anchor_y - placement.top
     let top = text.row as f32 * metrics.cell_h
         + metrics.glyph_offset_y
         + cached.shaped.line_y.round()
@@ -226,9 +230,9 @@ fn text_glyph_to_custom(
         - cached.raster.placement_top as f32;
 
     let fg_color = if text.selected {
-        selection_fg_glyphon(theme)
+        selection_fg_glyphon(palette.theme)
     } else {
-        resolve_fg_glyphon(text.fg, text.dim, theme)
+        resolve_fg_glyphon(text.fg, text.dim, text.bold, palette, dim_alpha)
     };
 
     Ok(Some(CustomGlyph {
@@ -237,12 +241,7 @@ fn text_glyph_to_custom(
         top,
         width,
         height,
-        color: Some(glyphon::Color::rgba(
-            fg_color.r(),
-            fg_color.g(),
-            fg_color.b(),
-            255,
-        )),
+        color: Some(fg_color),
         snap_to_physical_pixel: true,
         metadata: 0,
     }))
@@ -251,7 +250,7 @@ fn text_glyph_to_custom(
 fn cursor_glyph_to_custom(
     cursor: &CursorGlyph,
     metrics: &CellMetrics,
-    theme: &ThemeConfig,
+    palette: &Palette<'_>,
     font_family: &str,
     glyph_cache: &mut GlyphCache,
     font_system: &mut glyphon::FontSystem,
@@ -287,8 +286,8 @@ fn cursor_glyph_to_custom(
         + cached.shaped.top
         - cached.raster.placement_top as f32;
 
-    let (cur_r, cur_g, cur_b) = parse_hex(&theme.cursor);
-    let fg_color = glyphon::Color::rgb(cur_r, cur_g, cur_b);
+    let (r, g, b) = palette.cursor_rgb();
+    let fg_color = glyphon::Color::rgb(r, g, b);
 
     Ok(Some(CustomGlyph {
         id: cached.custom_glyph_id,
@@ -306,13 +305,31 @@ fn rasterize_custom_glyph(
     request: RasterizeCustomGlyphRequest,
     glyph_cache: &GlyphCache,
 ) -> Option<RasterizedCustomGlyph> {
-    if request.id == BG_SOLID_GLYPH_ID {
+    if request.id == SOLID_MASK_GLYPH_ID {
         if request.width == 0 || request.height == 0 {
             return None;
+        }
+        if request.height <= 4 {
+            let data = rasterize_line_mask(request.width, request.height, SOLID_MASK_GLYPH_ID)?;
+            return Some(RasterizedCustomGlyph {
+                data,
+                content_type: ContentType::Mask,
+            });
         }
         let len = limits::safe_mask_len(request.width, request.height)?;
         return Some(RasterizedCustomGlyph {
             data: vec![255u8; len],
+            content_type: ContentType::Mask,
+        });
+    }
+
+    if matches!(
+        request.id,
+        LINE_DOUBLE_GLYPH_ID | LINE_DOTTED_GLYPH_ID | LINE_DASHED_GLYPH_ID | LINE_CURLY_GLYPH_ID
+    ) {
+        let data = rasterize_line_mask(request.width, request.height, request.id)?;
+        return Some(RasterizedCustomGlyph {
+            data,
             content_type: ContentType::Mask,
         });
     }
@@ -386,7 +403,7 @@ mod tests {
             color: glyphon::Color::rgb(255, 0, 0),
         };
         let cg = bg_quad_to_custom(&bg, &metrics);
-        assert_eq!(cg.id, BG_SOLID_GLYPH_ID);
+        assert_eq!(cg.id, SOLID_MASK_GLYPH_ID);
         assert_eq!(cg.left, 20.0);
         assert_eq!(cg.top, 20.0);
         assert_eq!(cg.width, 10.0);
@@ -396,9 +413,9 @@ mod tests {
     #[test]
     fn rasterize_solid_bg_produces_mask() {
         let request = RasterizeCustomGlyphRequest {
-            id: BG_SOLID_GLYPH_ID,
+            id: SOLID_MASK_GLYPH_ID,
             width: 4,
-            height: 2,
+            height: 20,
             x_bin: glyphon::SubpixelBin::Zero,
             y_bin: glyphon::SubpixelBin::Zero,
             scale: 1.0,
@@ -406,7 +423,7 @@ mod tests {
         let cache = GlyphCache::new();
         let out = rasterize_custom_glyph(request, &cache).expect("solid bg");
         assert_eq!(out.content_type, ContentType::Mask);
-        assert_eq!(out.data.len(), 8);
+        assert_eq!(out.data.len(), 80);
         assert!(out.data.iter().all(|&b| b == 255));
     }
 
@@ -416,7 +433,8 @@ mod tests {
         let mut swash_cache = glyphon::SwashCache::new();
         let font_config = FontConfig::default();
         let mut cache = GlyphCache::new();
-        let theme = ThemeConfig::default();
+        let theme = crate::config::ThemeConfig::default();
+        let palette = Palette::from_theme(&theme);
 
         let text = TextGlyph {
             row: 0,
@@ -430,6 +448,7 @@ mod tests {
                 family: font_config.family.clone(),
             },
             fg: Color::Default,
+            bold: false,
             dim: false,
             custom_id: 0,
             selected: false,
@@ -438,7 +457,8 @@ mod tests {
         let cg = text_glyph_to_custom(
             &text,
             &metrics,
-            &theme,
+            &palette,
+            theme.dim_alpha,
             &font_config.family,
             &mut cache,
             &mut font_system,
@@ -448,8 +468,8 @@ mod tests {
         .expect("Some glyph");
 
         assert!(
-            cg.id >= 1,
-            "ids de texto empiezan en 1 (0 reservado para bg)"
+            cg.id >= 8,
+            "ids de texto empiezan en 8 (0-7 reservados para decoracion)"
         );
         assert!(cg.width >= 1.0);
         assert!(cg.height >= 1.0);

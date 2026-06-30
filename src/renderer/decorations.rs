@@ -2,14 +2,70 @@
 
 use glyphon::CustomGlyph;
 
-use crate::ansi::CursorStyle;
+use crate::ansi::{CursorStyle, UnderlineStyle};
 
+use super::display_list::LineKind;
 use super::metrics::CellMetrics;
 
-/// Id compartido con fondos solidos (mascara llena).
-const SOLID_MASK_GLYPH_ID: u16 = 0;
+/// Id compartido con fondos solidos (mascara generada en rasterize).
+pub const SOLID_MASK_GLYPH_ID: u16 = 0;
+/// Ids reservados para patrones de linea (no colisionan con glifos de texto).
+pub const LINE_DOUBLE_GLYPH_ID: u16 = 1;
+pub const LINE_DOTTED_GLYPH_ID: u16 = 2;
+pub const LINE_DASHED_GLYPH_ID: u16 = 3;
+pub const LINE_CURLY_GLYPH_ID: u16 = 4;
+
+pub fn underline_style_glyph_id(style: UnderlineStyle) -> u16 {
+    match style {
+        UnderlineStyle::None | UnderlineStyle::Single => SOLID_MASK_GLYPH_ID,
+        UnderlineStyle::Double => LINE_DOUBLE_GLYPH_ID,
+        UnderlineStyle::Dotted => LINE_DOTTED_GLYPH_ID,
+        UnderlineStyle::Dashed => LINE_DASHED_GLYPH_ID,
+        UnderlineStyle::Curly => LINE_CURLY_GLYPH_ID,
+    }
+}
+
+fn line_height_for_style(style: UnderlineStyle) -> f32 {
+    if style == UnderlineStyle::Double {
+        3.0
+    } else {
+        1.0
+    }
+}
+
+/// Quad de linea decorativa en una celda.
+pub fn line_quad(
+    row: usize,
+    col: usize,
+    width_cells: u8,
+    kind: LineKind,
+    style: UnderlineStyle,
+    metrics: &CellMetrics,
+    color: glyphon::Color,
+) -> CustomGlyph {
+    let row_top = row as f32 * metrics.cell_h;
+    let (top, height) = match kind {
+        LineKind::Under => (
+            row_top + metrics.baseline_y + 1.0,
+            line_height_for_style(style),
+        ),
+        LineKind::Strike => (row_top + metrics.cell_h * 0.5, 1.0),
+        LineKind::Over => (row_top + 1.0, 1.0),
+    };
+    CustomGlyph {
+        id: underline_style_glyph_id(style),
+        left: col as f32 * metrics.cell_w,
+        top,
+        width: metrics.cell_w * width_cells as f32,
+        height,
+        color: Some(color),
+        snap_to_physical_pixel: true,
+        metadata: 0,
+    }
+}
 
 /// Quad de subrayado de 1px justo bajo la baseline de la celda.
+#[cfg_attr(not(test), expect(dead_code, reason = "usado en tests de decorations"))]
 pub fn underline_quad(
     row: usize,
     col: usize,
@@ -17,16 +73,53 @@ pub fn underline_quad(
     metrics: &CellMetrics,
     color: glyphon::Color,
 ) -> CustomGlyph {
-    CustomGlyph {
-        id: SOLID_MASK_GLYPH_ID,
-        left: col as f32 * metrics.cell_w,
-        top: row as f32 * metrics.cell_h + metrics.baseline_y + 1.0,
-        width: metrics.cell_w * width_cells as f32,
-        height: 1.0,
-        color: Some(color),
-        snap_to_physical_pixel: true,
-        metadata: 0,
-    }
+    line_quad(
+        row,
+        col,
+        width_cells,
+        LineKind::Under,
+        UnderlineStyle::Single,
+        metrics,
+        color,
+    )
+}
+
+#[cfg_attr(not(test), expect(dead_code, reason = "usado en tests de decorations"))]
+pub fn strikethrough_quad(
+    row: usize,
+    col: usize,
+    width_cells: u8,
+    metrics: &CellMetrics,
+    color: glyphon::Color,
+) -> CustomGlyph {
+    line_quad(
+        row,
+        col,
+        width_cells,
+        LineKind::Strike,
+        UnderlineStyle::Single,
+        metrics,
+        color,
+    )
+}
+
+#[cfg_attr(not(test), expect(dead_code, reason = "usado en tests de decorations"))]
+pub fn overline_quad(
+    row: usize,
+    col: usize,
+    width_cells: u8,
+    metrics: &CellMetrics,
+    color: glyphon::Color,
+) -> CustomGlyph {
+    line_quad(
+        row,
+        col,
+        width_cells,
+        LineKind::Over,
+        UnderlineStyle::Single,
+        metrics,
+        color,
+    )
 }
 
 /// Barra vertical DECSCUSR (estilo bar) en el borde izquierdo de la celda.
@@ -72,6 +165,56 @@ pub fn cursor_anchor_offset(
     }
 }
 
+/// Genera mascara de linea segun id de glifo reservado.
+pub fn rasterize_line_mask(width: u16, height: u16, id: u16) -> Option<Vec<u8>> {
+    let w = width as usize;
+    let h = height as usize;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let mut data = vec![0u8; w * h];
+    match id {
+        LINE_DOUBLE_GLYPH_ID => {
+            if h >= 1 {
+                data[..w].fill(255);
+            }
+            if h >= 3 {
+                data[2 * w..2 * w + w].fill(255);
+            }
+        }
+        LINE_DOTTED_GLYPH_ID => {
+            let y = h.saturating_sub(1);
+            for x in (0..w).step_by(2) {
+                data[y * w + x] = 255;
+            }
+        }
+        LINE_DASHED_GLYPH_ID => {
+            let y = h.saturating_sub(1);
+            for x in 0..w {
+                if (x / 4) % 2 == 0 {
+                    data[y * w + x] = 255;
+                }
+            }
+        }
+        LINE_CURLY_GLYPH_ID => {
+            for x in 0..w {
+                let wave = (x as f32 * 0.5).sin() * 1.0;
+                let y = ((h as f32 / 2.0) + wave).round() as usize;
+                if y < h {
+                    data[y * w + x] = 255;
+                }
+            }
+        }
+        _ => {
+            let y = h.saturating_sub(1);
+            for x in 0..w {
+                data[y * w + x] = 255;
+            }
+        }
+    }
+    Some(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,6 +238,20 @@ mod tests {
         assert_eq!(quad.top, 2.0 * 20.0 + 16.0 + 1.0);
         assert_eq!(quad.width, 10.0);
         assert_eq!(quad.height, 1.0);
+    }
+
+    #[test]
+    fn strikethrough_quad_sits_mid_cell() {
+        let m = test_metrics();
+        let q = strikethrough_quad(1, 2, 1, &m, glyphon::Color::rgb(0, 0, 0));
+        assert!((q.top - (1.0 * 20.0 + 20.0 * 0.5)).abs() < 2.0);
+    }
+
+    #[test]
+    fn overline_quad_sits_near_top() {
+        let m = test_metrics();
+        let q = overline_quad(1, 2, 1, &m, glyphon::Color::rgb(0, 0, 0));
+        assert!((q.top - (1.0 * 20.0 + 1.0)).abs() < 2.0);
     }
 
     #[test]

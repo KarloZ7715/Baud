@@ -47,8 +47,8 @@ impl Default for GlyphCache {
 }
 
 impl GlyphCache {
-    /// Id reservado para quads de fondo; los glifos de texto empiezan en 1.
-    const FIRST_TEXT_ID: u16 = 1;
+    /// Ids 0-7 reservados para mascaras de decoracion; texto empieza en 8.
+    const FIRST_TEXT_ID: u16 = 8;
 
     pub fn new() -> Self {
         Self {
@@ -284,7 +284,7 @@ mod tests {
             )
             .custom_glyph_id;
         assert_eq!(cache.len(), 1);
-        assert_eq!(first_id, 1);
+        assert_eq!(first_id, 8);
 
         let second_id = cache
             .get_or_insert(

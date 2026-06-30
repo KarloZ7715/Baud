@@ -1,7 +1,7 @@
 use baud::ansi::Term;
 use baud::config::ThemeConfig;
 use baud::grid::{Cell, DamageSnapshot, Grid};
-use baud::renderer::{CellMetrics, DisplayList, DisplayListBuilder};
+use baud::renderer::{CellMetrics, DisplayList, DisplayListBuilder, Palette};
 use criterion::{criterion_group, criterion_main, Criterion};
 
 fn dummy_metrics() -> CellMetrics {
@@ -84,13 +84,15 @@ fn bench_display_list_build(c: &mut Criterion) {
         let row_sources: Vec<&[Cell]> = grid_rows.iter().map(|r| r.as_slice()).collect();
 
         c.bench_function(name, |b| {
+            let palette = Palette::from_theme(&theme);
             b.iter(|| {
                 let mut list = DisplayList::default();
                 DisplayListBuilder::build(
                     &mut list,
                     &term,
                     &metrics,
-                    &theme,
+                    &palette,
+                    theme.dim_alpha,
                     &row_sources,
                     cols,
                     rows,
