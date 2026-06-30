@@ -43,7 +43,8 @@ pub fn line_quad(
     metrics: &CellMetrics,
     color: glyphon::Color,
 ) -> CustomGlyph {
-    let row_top = row as f32 * metrics.cell_h;
+    let row_top = row as f32 * metrics.cell_h + metrics.padding_y;
+    let col_left = col as f32 * metrics.cell_w + metrics.padding_x;
     let (top, height) = match kind {
         LineKind::Under => (
             row_top + metrics.baseline_y + 1.0,
@@ -54,7 +55,7 @@ pub fn line_quad(
     };
     CustomGlyph {
         id: underline_style_glyph_id(style),
-        left: col as f32 * metrics.cell_w,
+        left: col_left,
         top,
         width: metrics.cell_w * width_cells as f32,
         height,
@@ -132,8 +133,8 @@ pub fn bar_quad(
     let bar_w = (metrics.cell_w * 0.2).max(2.0);
     CustomGlyph {
         id: SOLID_MASK_GLYPH_ID,
-        left: col as f32 * metrics.cell_w,
-        top: row as f32 * metrics.cell_h,
+        left: col as f32 * metrics.cell_w + metrics.padding_x,
+        top: row as f32 * metrics.cell_h + metrics.padding_y,
         width: bar_w,
         height: metrics.cell_h,
         color: Some(color),
@@ -227,6 +228,8 @@ mod tests {
             baseline_y: 16.0,
             glyph_offset_x: 0.0,
             glyph_offset_y: 2.0,
+            padding_x: 0.0,
+            padding_y: 0.0,
         }
     }
 

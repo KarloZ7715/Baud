@@ -11,8 +11,8 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::ansi::Term;
-use crate::config::Config;
+use crate::ansi::{CursorStyle, Term};
+use crate::config::{parse_hex, Config};
 use crate::grid::{DEFAULT_COLS, DEFAULT_ROWS};
 use crate::pty;
 use crate::window::{App, UserEvent};
@@ -273,6 +273,21 @@ fn handle_non_output_pty_event(
     }
 }
 
+fn apply_startup_config(term: &mut Term, config: &Config) {
+    term.allow_osc52_read = config.allow_osc52_read;
+    term.cursor_style = match config.cursor.style.as_str() {
+        "bar" => CursorStyle::Bar,
+        "underline" => CursorStyle::Underline,
+        _ => CursorStyle::Block,
+    };
+    if let Some(ref color) = config.cursor.color {
+        let (r, g, b) = parse_hex(color);
+        term.cursor_color_override = Some((r, g, b));
+    }
+    // ponytail: blink/blink_interval_ms cuando el renderer exponga timer de parpadeo
+    let _ = (config.cursor.blink, config.cursor.blink_interval_ms);
+}
+
 /// Punto de entrada del event loop.
 ///
 /// Crea el PTY, lanza el shell configurado, y arranca los hilos necesarios.
@@ -295,7 +310,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let tx_response = cmd_sender.clone();
 
-    let term = Arc::new(Mutex::new(Term::new()));
+    let term = Arc::new(Mutex::new({
+        let mut t = Term::new_with_scrollback(app_config.scrollback_max_lines());
+        apply_startup_config(&mut t, &app_config);
+        t
+    }));
 
     let term_drain = Arc::clone(&term);
     let proxy_for_drain = Arc::new(Mutex::new(

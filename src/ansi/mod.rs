@@ -160,6 +160,8 @@ pub struct Term {
     current_link: Option<usize>,
     /// OSC 52 query pendiente: target (`c`/`p`/`s`) y terminador del request.
     pub(crate) clipboard_read_pending: Option<(u8, bool)>,
+    /// Si false, ignora peticiones de lectura OSC 52 (`?`).
+    pub allow_osc52_read: bool,
     pub runtime_palette: [Option<(u8, u8, u8)>; 256],
     pub fg_override: Option<(u8, u8, u8)>,
     pub bg_override: Option<(u8, u8, u8)>,
@@ -216,10 +218,14 @@ impl Default for Term {
 impl Term {
     /// Crea un terminal nuevo: grid vacio, cursor en (0,0), atributos por defecto.
     pub fn new() -> Self {
+        Self::new_with_scrollback(crate::grid::DEFAULT_MAX_SCROLLBACK)
+    }
+
+    /// Crea un terminal con límite de scrollback configurable.
+    pub fn new_with_scrollback(max_scrollback: usize) -> Self {
         Self {
-            grid: Grid::new(),
-            // ponytail: alt_grid siempre inicializado, no se recrea al entrar
-            alt_grid: Grid::new(),
+            grid: Grid::new_sized_with_scrollback(DEFAULT_ROWS, DEFAULT_COLS, max_scrollback),
+            alt_grid: Grid::new_sized_with_scrollback(DEFAULT_ROWS, DEFAULT_COLS, max_scrollback),
             alt_screen: false,
             scroll_region: (0, DEFAULT_ROWS - 1),
             auto_wrap: true,
@@ -239,6 +245,7 @@ impl Term {
             hyperlinks: Vec::new(),
             current_link: None,
             clipboard_read_pending: None,
+            allow_osc52_read: true,
             runtime_palette: [None; 256],
             fg_override: None,
             bg_override: None,
@@ -1598,7 +1605,9 @@ impl vte::Perform for Term {
                 let target = params.get(1).copied().unwrap_or(b"c");
                 let data = params.get(2).copied().unwrap_or(b"");
                 if data == b"?" {
-                    self.clipboard_read_pending = Some((target[0], bell_terminated));
+                    if self.allow_osc52_read {
+                        self.clipboard_read_pending = Some((target[0], bell_terminated));
+                    }
                 } else if let Some(bytes) = crate::base64::decode(data) {
                     const MAX_CLIP: usize = 512 * 1024;
                     let slice = if bytes.len() > MAX_CLIP {

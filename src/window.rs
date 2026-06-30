@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::ansi::Term;
 use crate::clipboard::{self, CopyTarget};
-use crate::config::Config;
+use crate::config::{Config, StartupState};
 use crate::copy_mode::CopyModeState;
 use crate::event_loop::{PtyCommand, PtyCommandSender};
 use crate::grid::Cell;
@@ -29,7 +29,7 @@ use winit::event::MouseScrollDelta;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Fullscreen, Window, WindowId};
 
 /// Eventos enviados desde el hilo drain al hilo GUI.
 #[derive(Debug)]
@@ -186,6 +186,9 @@ impl App {
         config: Config,
     ) -> Self {
         let font_size = config.font.size;
+        let window_width = config.window.width as f32;
+        let window_height = config.window.height as f32;
+        let keybindings = config.keybindings();
         Self {
             window: None,
             renderer: None,
@@ -198,11 +201,11 @@ impl App {
             mouse_start: None,
             mouse_x: 0.0,
             mouse_y: 0.0,
-            window_width: 800.0,
-            window_height: 600.0,
+            window_width,
+            window_height,
             last_click_time: None,
             last_reported_cell: None,
-            keybindings: Keybindings::default(),
+            keybindings,
             last_gui_redraw: None,
             gui_redraw_metrics: GuiRedrawMetrics::new(),
         }
@@ -224,8 +227,14 @@ impl App {
         preserve_scrollback: bool,
         reflow: bool,
     ) -> (usize, usize, usize, usize) {
-        let (new_rows, new_cols) =
-            crate::renderer::limits::compute_grid_dims(width, height, cell_w, cell_h);
+        let (new_rows, new_cols) = crate::renderer::limits::compute_grid_dims(
+            width,
+            height,
+            cell_w,
+            cell_h,
+            self.config.window.padding_x,
+            self.config.window.padding_y,
+        );
         let (old_rows, old_cols) = if let Ok(guard) = self.term.lock() {
             let active = guard.active_grid();
             (active.rows_count, active.cols_count)
@@ -632,11 +641,22 @@ impl App {
         }
     }
 
+    /// Mapea píxeles de ventana a (row, col); resta el padding del renderer.
+    fn pixel_to_cell(&self, x: f64, y: f64, renderer: &Renderer) -> (usize, usize) {
+        let (pad_x, pad_y) = renderer.content_padding();
+        let cell_w = renderer.cell_w();
+        let cell_h = renderer.cell_h();
+        if cell_w <= 0.0 || cell_h <= 0.0 {
+            return (usize::MAX, usize::MAX);
+        }
+        let col = ((x as f32 - pad_x).max(0.0) / cell_w) as usize;
+        let row = ((y as f32 - pad_y).max(0.0) / cell_h) as usize;
+        (row, col)
+    }
+
     /// Coordenadas de celda (row, col) desde la ultima posicion del mouse.
     fn mouse_cell_coords(&self, renderer: &Renderer) -> (usize, usize) {
-        let col = (self.mouse_x.max(0.0) as f32 / renderer.cell_w) as usize;
-        let row = (self.mouse_y.max(0.0) as f32 / renderer.cell_h) as usize;
-        (row, col)
+        self.pixel_to_cell(self.mouse_x, self.mouse_y, renderer)
     }
 
     /// Baud maneja seleccion local; si la app pidio mouse reporting, forward al PTY.
@@ -726,9 +746,18 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         // 1. Crear ventana.
-        let attrs = Window::default_attributes()
+        let wcfg = &self.config.window;
+        let mut attrs = Window::default_attributes()
             .with_title("baud")
-            .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0));
+            .with_inner_size(winit::dpi::LogicalSize::new(wcfg.width, wcfg.height))
+            .with_decorations(wcfg.decorations);
+        match wcfg.startup {
+            StartupState::Maximized => attrs = attrs.with_maximized(true),
+            StartupState::Fullscreen => {
+                attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
+            }
+            StartupState::Windowed => {}
+        }
         // Solo activar transparencia si la opacidad es < 1.0
         let opacity = self.config.window.opacity;
         let attrs = if opacity < 1.0 {
@@ -797,6 +826,9 @@ impl ApplicationHandler<UserEvent> for App {
             config,
             &self.config.font,
         ));
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_content_padding(wcfg.padding_x, wcfg.padding_y);
+        }
         tracing::info!("renderer inicializado");
 
         let size = window.inner_size();
@@ -919,7 +951,8 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 term_guard.take_dirty();
                 tracing::debug!("RedrawRequested: renderizando frame");
-                if let Err(e) = renderer.render(&mut term_guard, &self.config.theme) {
+                let bold = self.config.bold_is_bright || self.config.theme.bold_is_bright;
+                if let Err(e) = renderer.render(&mut term_guard, &self.config.theme, bold) {
                     tracing::warn!("error al renderizar: {e}");
                 }
             }
@@ -976,23 +1009,18 @@ impl ApplicationHandler<UserEvent> for App {
                 }
 
                 if self.mouse_down.load(Ordering::Relaxed) {
-                    let visible_rows = (self.window_height / renderer.cell_h) as usize;
-                    // Determinar si el mouse esta fuera del viewport
-                    let (visible_row, col, needs_scroll_up, needs_scroll_down) = if position.y < 0.0
-                    {
-                        // Mouse arriba del viewport → scroll up, seleccion en row 0
-                        (0usize, 0usize, true, false)
-                    } else if position.y as f32 >= self.window_height {
-                        // Mouse debajo del viewport → scroll down, seleccion en ultima fila
-                        (visible_rows.saturating_sub(1), 0usize, false, true)
-                    } else {
-                        // Mouse dentro del viewport
-                        let c = (position.x.max(0.0) as f32 / renderer.cell_w) as usize;
-                        let r = (position.y as f32 / renderer.cell_h) as usize;
-                        // Si esta en el borde superior (row 0) → scroll up
-                        // Si esta en el borde inferior (row == visible_rows-1) → scroll down
-                        (r, c, r == 0, r >= visible_rows.saturating_sub(1))
-                    };
+                    let (_pad_x, pad_y) = renderer.content_padding();
+                    let inner_h = (self.window_height - pad_y * 2.0).max(renderer.cell_h());
+                    let visible_rows = (inner_h / renderer.cell_h()) as usize;
+                    let (visible_row, col, needs_scroll_up, needs_scroll_down) =
+                        if position.y < pad_y as f64 {
+                            (0usize, 0usize, true, false)
+                        } else if position.y as f32 >= self.window_height - pad_y {
+                            (visible_rows.saturating_sub(1), 0usize, false, true)
+                        } else {
+                            let (r, c) = self.pixel_to_cell(position.x, position.y, renderer);
+                            (r, c, r == 0, r >= visible_rows.saturating_sub(1))
+                        };
 
                     if let Ok(mut guard) = self.term.lock() {
                         if !guard.alt_screen {
@@ -1103,8 +1131,8 @@ impl ApplicationHandler<UserEvent> for App {
                             if self.mouse_x < 0.0 || self.mouse_y < 0.0 {
                                 return;
                             }
-                            let col = (self.mouse_x as f32 / renderer.cell_w) as usize;
-                            let visible_row = (self.mouse_y as f32 / renderer.cell_h) as usize;
+                            let (visible_row, col) =
+                                self.pixel_to_cell(self.mouse_x, self.mouse_y, renderer);
                             let shift = self.modifiers.state().shift_key();
                             let block = self.block_selection_active();
                             let now = Instant::now();

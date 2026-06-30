@@ -16,6 +16,10 @@ pub struct CellMetrics {
     pub baseline_y: f32,
     pub glyph_offset_x: f32,
     pub glyph_offset_y: f32,
+    /// Margen interior izquierdo del área de celdas (px).
+    pub padding_x: f32,
+    /// Margen interior superior del área de celdas (px).
+    pub padding_y: f32,
 }
 
 impl CellMetrics {
@@ -39,6 +43,8 @@ impl CellMetrics {
             baseline_y,
             glyph_offset_x: glyph_offset.x,
             glyph_offset_y: glyph_offset.y,
+            padding_x: 0.0,
+            padding_y: 0.0,
         }
     }
 }

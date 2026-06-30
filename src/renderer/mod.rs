@@ -203,6 +203,8 @@ impl Renderer {
     }
 
     fn refresh_cell_metrics(&mut self) {
+        let pad_x = self.cell_metrics.padding_x;
+        let pad_y = self.cell_metrics.padding_y;
         self.cell_metrics = CellMetrics::measure(
             &mut self.font_system,
             &self.font_family,
@@ -210,8 +212,20 @@ impl Renderer {
             self.line_height,
             self.glyph_offset,
         );
+        self.cell_metrics.padding_x = pad_x;
+        self.cell_metrics.padding_y = pad_y;
         self.cell_w = self.cell_metrics.cell_w;
         self.cell_h = self.cell_metrics.cell_h;
+    }
+
+    /// Margen interior del área de celdas (único origen del offset de render).
+    pub fn set_content_padding(&mut self, padding_x: u16, padding_y: u16) {
+        self.cell_metrics.padding_x = padding_x as f32;
+        self.cell_metrics.padding_y = padding_y as f32;
+    }
+
+    pub fn content_padding(&self) -> (f32, f32) {
+        (self.cell_metrics.padding_x, self.cell_metrics.padding_y)
     }
 
     /// Aplica un nuevo tamano de fuente y recalcula metricas de celda.
@@ -265,7 +279,12 @@ impl Renderer {
 
     /// Renderiza el estado del `term` en la surface.
     #[tracing::instrument(skip(self, term))]
-    pub fn render(&mut self, term: &mut Term, theme: &ThemeConfig) -> Result<(), String> {
+    pub fn render(
+        &mut self,
+        term: &mut Term,
+        theme: &ThemeConfig,
+        bold_is_bright: bool,
+    ) -> Result<(), String> {
         let t0 = Instant::now();
 
         // 1. Obtener frame de la surface
@@ -297,7 +316,7 @@ impl Renderer {
         let palette = Palette {
             theme,
             overrides: &overrides,
-            bold_is_bright: theme.bold_is_bright,
+            bold_is_bright: bold_is_bright || theme.bold_is_bright,
         };
         let (fg_r, fg_g, fg_b) = palette.rgb(Color::Default, false);
         let default_fg_color = glyphon::Color::rgb(fg_r, fg_g, fg_b);

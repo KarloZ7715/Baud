@@ -178,8 +178,8 @@ fn bg_quad_to_custom(bg: &super::display_list::BgQuad, metrics: &CellMetrics) ->
     let height = limits::clamp_custom_dimension(metrics.cell_h, metrics.cell_h, 1);
     CustomGlyph {
         id: SOLID_MASK_GLYPH_ID,
-        left: bg.col as f32 * metrics.cell_w,
-        top: bg.row as f32 * metrics.cell_h,
+        left: bg.col as f32 * metrics.cell_w + metrics.padding_x,
+        top: bg.row as f32 * metrics.cell_h + metrics.padding_y,
         width,
         height,
         color: Some(bg.color),
@@ -221,9 +221,11 @@ fn text_glyph_to_custom(
     }
 
     let left = text.col as f32 * metrics.cell_w
+        + metrics.padding_x
         + metrics.glyph_offset_x
         + cached.raster.placement_left as f32;
     let top = text.row as f32 * metrics.cell_h
+        + metrics.padding_y
         + metrics.glyph_offset_y
         + cached.shaped.line_y.round()
         + cached.shaped.top
@@ -276,10 +278,12 @@ fn cursor_glyph_to_custom(
 
     let (anchor_dx, anchor_dy) = cursor_anchor_offset(cursor.style, metrics, width, height);
     let left = cursor.col as f32 * metrics.cell_w
+        + metrics.padding_x
         + anchor_dx
         + metrics.glyph_offset_x
         + cached.raster.placement_left as f32;
     let top = cursor.row as f32 * metrics.cell_h
+        + metrics.padding_y
         + anchor_dy
         + metrics.glyph_offset_y
         + cached.shaped.line_y.round()
@@ -395,6 +399,8 @@ mod tests {
             baseline_y: 14.0,
             glyph_offset_x: 0.0,
             glyph_offset_y: 0.0,
+            padding_x: 0.0,
+            padding_y: 0.0,
         };
         let bg = BgQuad {
             row: 1,

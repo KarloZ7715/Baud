@@ -12,6 +12,8 @@ fn dummy_metrics() -> CellMetrics {
         baseline_y: 14.0,
         glyph_offset_x: 0.0,
         glyph_offset_y: 0.0,
+        padding_x: 0.0,
+        padding_y: 0.0,
     }
 }
 

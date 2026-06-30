@@ -39,11 +39,20 @@ pub fn clamp_grid_dimension(value: usize) -> usize {
 
 /// Calcula filas/columnas del grid de forma segura (cell_w/h nunca 0).
 #[inline]
-pub fn compute_grid_dims(win_w: u32, win_h: u32, cell_w: f32, cell_h: f32) -> (usize, usize) {
+pub fn compute_grid_dims(
+    win_w: u32,
+    win_h: u32,
+    cell_w: f32,
+    cell_h: f32,
+    padding_x: u16,
+    padding_y: u16,
+) -> (usize, usize) {
+    let inner_w = win_w.saturating_sub(2 * u32::from(padding_x)).max(1);
+    let inner_h = win_h.saturating_sub(2 * u32::from(padding_y)).max(1);
     let cw = cell_w.max(1.0);
     let ch = cell_h.max(1.0);
-    let cols = clamp_grid_dimension((win_w as f32 / cw).max(1.0) as usize);
-    let rows = clamp_grid_dimension((win_h as f32 / ch).max(1.0) as usize);
+    let cols = clamp_grid_dimension((inner_w as f32 / cw).max(1.0) as usize);
+    let rows = clamp_grid_dimension((inner_h as f32 / ch).max(1.0) as usize);
     (rows, cols)
 }
 
@@ -60,7 +69,7 @@ mod tests {
 
     #[test]
     fn zero_cell_w_does_not_explode_grid_dims() {
-        let (rows, cols) = compute_grid_dims(3840, 2160, 0.0, 0.0);
+        let (rows, cols) = compute_grid_dims(3840, 2160, 0.0, 0.0, 0, 0);
         assert!(cols <= MAX_GRID_DIM);
         assert!(rows <= MAX_GRID_DIM);
         assert!(cols > 0);
