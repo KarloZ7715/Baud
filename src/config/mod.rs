@@ -379,7 +379,8 @@ pub fn parse_hex(s: &str) -> (u8, u8, u8) {
 impl Config {
     /// Construye la configuración del proceso hijo del PTY.
     ///
-    /// Los campos TOML de `[process]` se conectarán en el plan de Personalización.
+    /// La sección TOML `[process]` (plan Personalización 1, struct `ProcessSection`)
+    /// se mapeará aquí a [`crate::pty::ProcessConfig`].
     pub fn process_config(&self) -> crate::pty::ProcessConfig {
         let _ = self;
         crate::pty::ProcessConfig::default()
