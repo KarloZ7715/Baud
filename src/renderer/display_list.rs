@@ -154,7 +154,12 @@ fn underline_color_for_cell(
     } else {
         cell.attrs.underline_color
     };
-    resolve_fg_glyphon(color, cell.attrs.dim, bold, palette, dim_alpha)
+    let mut resolved = resolve_fg_glyphon(color, cell.attrs.dim, bold, palette, dim_alpha);
+    // ponytail: hover lo provee window.rs (mouse cell) en el plan de UX
+    if cell.hyperlink.is_some() && cell.attrs.underline_color == Color::Default {
+        resolved = attenuate_glyphon(resolved);
+    }
+    resolved
 }
 
 /// Construye o actualiza la display list recorriendo celdas visibles.
@@ -739,6 +744,36 @@ mod tests {
         assert_eq!(under.style, UnderlineStyle::Curly);
         let expected = resolve_fg_glyphon(Color::Red, false, false, &palette, theme.dim_alpha);
         assert_eq!(under.color, expected);
+    }
+
+    #[test]
+    fn dim_alpha_attenuates_via_alpha_channel() {
+        let theme = ThemeConfig {
+            dim_alpha: true,
+            ..ThemeConfig::default()
+        };
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 1];
+        row[0].ch = 'a';
+        row[0].attrs.fg = Color::Red;
+        row[0].attrs.dim = true;
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let mut term = Term::default();
+        term.cursor_visible = false;
+        let palette = test_palette(&theme);
+
+        let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
+
+        let actual = resolve_fg_glyphon(
+            list.text_glyphs[0].fg,
+            list.text_glyphs[0].dim,
+            list.text_glyphs[0].bold,
+            &palette,
+            theme.dim_alpha,
+        );
+        assert_eq!(actual.a(), (DIM_FACTOR * 255.0) as u8);
+        assert_eq!(actual.r(), palette.rgb(Color::Red, false).0);
     }
 
     #[test]
