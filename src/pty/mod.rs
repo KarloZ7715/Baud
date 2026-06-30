@@ -1,3 +1,7 @@
+pub mod config;
+
+pub use config::ProcessConfig;
+
 use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
