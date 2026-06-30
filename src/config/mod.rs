@@ -136,11 +136,41 @@ pub struct GlyphOffset {
     pub y: f32,
 }
 
-/// Configuración de la ventana (opacidad, etc.).
+/// Estado inicial de la ventana al arrancar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StartupState {
+    #[default]
+    Windowed,
+    Maximized,
+    Fullscreen,
+}
+
+/// Configuración de la ventana (opacidad, padding, decoraciones, tamaño).
 #[derive(Debug, Clone, Deserialize)]
 pub struct WindowConfig {
     #[serde(default = "default_opacity")]
     pub opacity: f32,
+    #[serde(default)]
+    pub padding_x: u16,
+    #[serde(default)]
+    pub padding_y: u16,
+    #[serde(default = "default_true")]
+    pub decorations: bool,
+    #[serde(default)]
+    pub startup: StartupState,
+    #[serde(default = "default_win_width")]
+    pub width: u32,
+    #[serde(default = "default_win_height")]
+    pub height: u32,
+}
+
+fn default_win_width() -> u32 {
+    800
+}
+
+fn default_win_height() -> u32 {
+    600
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +222,12 @@ impl Default for WindowConfig {
     fn default() -> Self {
         Self {
             opacity: default_opacity(),
+            padding_x: 0,
+            padding_y: 0,
+            decorations: true,
+            startup: StartupState::Windowed,
+            width: default_win_width(),
+            height: default_win_height(),
         }
     }
 }
@@ -575,6 +611,36 @@ word_delimiters = " ,.;"
         assert_eq!(parse_hex("#ff00000"), (0, 0, 0)); // 8 caracteres
         assert_eq!(parse_hex("ff0000"), (0, 0, 0)); // sin #
         assert_eq!(parse_hex("#-10000"), (0, 0, 0)); // signo negativo
+    }
+
+    #[test]
+    fn test_window_config_extendido() {
+        let toml = r#"
+[window]
+opacity = 0.9
+padding_x = 8
+padding_y = 6
+decorations = false
+startup = "maximized"
+width = 1200
+height = 800
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!((cfg.window.opacity - 0.9).abs() < f32::EPSILON);
+        assert_eq!(cfg.window.padding_x, 8);
+        assert_eq!(cfg.window.padding_y, 6);
+        assert!(!cfg.window.decorations);
+        assert_eq!(cfg.window.startup, StartupState::Maximized);
+        assert_eq!(cfg.window.width, 1200);
+        assert_eq!(cfg.window.height, 800);
+    }
+
+    #[test]
+    fn test_window_config_defaults() {
+        let cfg = Config::default();
+        assert_eq!(cfg.window.padding_x, 0);
+        assert!(cfg.window.decorations);
+        assert_eq!(cfg.window.startup, StartupState::Windowed);
     }
 
     /// Verifica que un TOML parcial usa defaults para los campos faltantes.
