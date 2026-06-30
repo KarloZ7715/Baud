@@ -7,7 +7,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,7 @@ use crate::ansi::Term;
 use crate::clipboard::{self, CopyTarget};
 use crate::config::Config;
 use crate::copy_mode::CopyModeState;
-use crate::event_loop::PtyCommand;
+use crate::event_loop::{PtyCommand, PtyCommandSender};
 use crate::grid::Cell;
 use crate::input::actions::{normalize_binding_key, Action, Keybindings};
 use crate::input::keymap::{self, Key as KKey, KeyEventKind, KeyModes, Mods};
@@ -151,7 +151,7 @@ pub struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     term: Arc<Mutex<Term>>,
-    pty_tx: Arc<Mutex<Option<mpsc::Sender<PtyCommand>>>>,
+    pty_tx: Arc<Mutex<Option<PtyCommandSender>>>,
     config: Config,
     /// Tamano de fuente efectivo en runtime (puede diferir del config tras zoom).
     font_size: u16,
@@ -182,7 +182,7 @@ impl App {
     /// Crea una nueva instancia de App con el term compartido.
     pub fn new(
         term: Arc<Mutex<Term>>,
-        pty_tx: Arc<Mutex<Option<mpsc::Sender<PtyCommand>>>>,
+        pty_tx: Arc<Mutex<Option<PtyCommandSender>>>,
         config: Config,
     ) -> Self {
         let font_size = config.font.size;
