@@ -7,7 +7,7 @@
 use std::io::{ErrorKind, Read, Write};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::ansi::Term;
 use crate::config::Config;
@@ -16,6 +16,11 @@ use crate::pty;
 use crate::window::{App, UserEvent};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use winit::event_loop::EventLoop;
+
+// ponytail: throttle a 16ms (~60fps); bajar intervalo si se quiere 120Hz.
+const REDRAW_MIN_INTERVAL: Duration = Duration::from_millis(16);
+
+const METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Comandos del GUI al hilo PTY.
 pub enum PtyCommand {
@@ -37,10 +42,109 @@ pub enum PtyEvent {
     IoError(String),
 }
 
+/// Retorna true si paso el intervalo minimo desde el ultimo redraw.
+pub(crate) fn should_redraw(last: Instant, now: Instant) -> bool {
+    now.duration_since(last) >= REDRAW_MIN_INTERVAL
+}
+
+struct DrainMetrics {
+    redraws: u64,
+    bytes: u64,
+    period_start: Instant,
+}
+
+impl DrainMetrics {
+    fn new() -> Self {
+        Self {
+            redraws: 0,
+            bytes: 0,
+            period_start: Instant::now(),
+        }
+    }
+
+    fn record_bytes(&mut self, n: usize) {
+        self.bytes += n as u64;
+    }
+
+    fn record_redraw(&mut self) {
+        self.redraws += 1;
+    }
+
+    fn maybe_log(&mut self) {
+        let elapsed = self.period_start.elapsed();
+        if elapsed < METRICS_LOG_INTERVAL {
+            return;
+        }
+        let secs = elapsed.as_secs_f64();
+        tracing::debug!(
+            target: "baud::pipeline",
+            "drain: {:.0} redraws/s, {:.0} bytes/s",
+            self.redraws as f64 / secs,
+            self.bytes as f64 / secs,
+        );
+        *self = Self::new();
+    }
+}
+
+fn send_redraw(proxy_slot: &Arc<Mutex<Option<winit::event_loop::EventLoopProxy<UserEvent>>>>) {
+    if let Some(proxy) = proxy_slot
+        .lock()
+        .expect("proxy mutex poisoned en drain")
+        .as_ref()
+    {
+        let _ = proxy.send_event(UserEvent::RedrawNeeded);
+    }
+}
+
+fn send_title_and_clipboard(
+    proxy_slot: &Arc<Mutex<Option<winit::event_loop::EventLoopProxy<UserEvent>>>>,
+    title: Option<String>,
+    clipboard_pending: Option<(u8, bool)>,
+) {
+    if let Some(proxy) = proxy_slot
+        .lock()
+        .expect("proxy mutex poisoned en drain")
+        .as_ref()
+    {
+        if let Some(t) = title {
+            let _ = proxy.send_event(UserEvent::SetTitle(t));
+        }
+        if let Some((target, bell)) = clipboard_pending {
+            let _ = proxy.send_event(UserEvent::ReadClipboard(target, bell));
+        }
+    }
+}
+
+fn handle_non_output_pty_event(
+    event: PtyEvent,
+    proxy_slot: &Arc<Mutex<Option<winit::event_loop::EventLoopProxy<UserEvent>>>>,
+) {
+    match event {
+        PtyEvent::Exited(code) => {
+            tracing::info!("child termino con codigo {code}");
+            if let Some(proxy) = proxy_slot
+                .lock()
+                .expect("proxy mutex poisoned en drain")
+                .as_ref()
+            {
+                let _ = proxy.send_event(UserEvent::PtyExited(code));
+            }
+        }
+        PtyEvent::IoError(msg) => {
+            tracing::warn!("error de I/O del PTY: {msg}");
+            if let Some(proxy) = proxy_slot
+                .lock()
+                .expect("proxy mutex poisoned en drain")
+                .as_ref()
+            {
+                let _ = proxy.send_event(UserEvent::PtyError(msg));
+            }
+        }
+        PtyEvent::Output(_) => unreachable!("Output se maneja en el match principal"),
+    }
+}
+
 /// Punto de entrada del event loop.
-///
-/// Crea el PTY, lanza el shell configurado, y arranca los hilos necesarios.
-/// Retorna cuando se cierra la ventana (event_loop.exit()).
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let app_config = Config::load();
     let process_cfg = app_config.process_config();
@@ -49,16 +153,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let master = pty::spawn_with(&process_cfg)?;
     master.set_winsize(DEFAULT_ROWS as u16, DEFAULT_COLS as u16)?;
 
-    // Dos canales separados: PTY->drain y GUI->PTY
     let (tx_pty_to_gui, rx_pty_to_gui) = mpsc::channel::<PtyEvent>();
     let (tx_gui_to_pty, rx_gui_to_pty) = mpsc::channel::<PtyCommand>();
     let tx_response = tx_gui_to_pty.clone();
 
-    // Term compartido entre hilo drain y App (GUI).
     let term = Arc::new(Mutex::new(Term::new()));
 
-    // Hilo drain: alimenta el parser, comparte el term via Arc<Mutex<Term>>,
-    // envía tick al GUI loop por event_loop_proxy.
     let term_drain = Arc::clone(&term);
     let proxy_for_drain = Arc::new(Mutex::new(
         None::<winit::event_loop::EventLoopProxy<UserEvent>>,
@@ -67,19 +167,60 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let drain_handle = thread::spawn(move || {
         let mut parser = vte::Parser::new();
-        while let Ok(event) = rx_pty_to_gui.recv() {
+        let mut metrics = DrainMetrics::new();
+        let mut last_redraw = Instant::now();
+        let mut pending_redraw = false;
+
+        loop {
+            if pending_redraw && should_redraw(last_redraw, Instant::now()) {
+                send_redraw(&proxy_for_drain_clone);
+                metrics.record_redraw();
+                last_redraw = Instant::now();
+                pending_redraw = false;
+            }
+
+            let timeout = if pending_redraw {
+                REDRAW_MIN_INTERVAL.saturating_sub(last_redraw.elapsed())
+            } else {
+                Duration::from_secs(3600)
+            };
+
+            let event = match rx_pty_to_gui.recv_timeout(timeout) {
+                Ok(event) => event,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    metrics.maybe_log();
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+
             match event {
-                PtyEvent::Output(bytes) => {
-                    let (response, title, clipboard_pending) = {
+                PtyEvent::Output(first) => {
+                    let mut chunks = vec![first];
+                    let mut deferred: Vec<PtyEvent> = Vec::new();
+                    while let Ok(more) = rx_pty_to_gui.try_recv() {
+                        match more {
+                            PtyEvent::Output(bytes) => chunks.push(bytes),
+                            other => deferred.push(other),
+                        }
+                    }
+
+                    let (response, title, clipboard_pending, total_bytes) = {
                         let mut term_guard =
                             term_drain.lock().expect("term mutex poisoned en drain");
-                        parser.advance(&mut *term_guard, &bytes);
+                        let mut total_bytes = 0usize;
+                        for bytes in &chunks {
+                            parser.advance(&mut *term_guard, bytes);
+                            total_bytes += bytes.len();
+                        }
                         term_guard.mark_dirty();
                         let response = term_guard.take_pty_response();
                         let title = term_guard.take_title_if_dirty();
                         let clipboard_pending = term_guard.take_clipboard_read_pending();
-                        (response, title, clipboard_pending)
+                        (response, title, clipboard_pending, total_bytes)
                     };
+                    metrics.record_bytes(total_bytes);
+
                     if !response.is_empty() {
                         if let Err(e) = tx_response.send(PtyCommand::Input(response)) {
                             tracing::warn!(
@@ -87,61 +228,31 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
                     }
-                    if let Some(proxy) = proxy_for_drain_clone
-                        .lock()
-                        .expect("proxy mutex poisoned en drain")
-                        .as_ref()
-                    {
-                        if let Some(t) = title {
-                            let _ = proxy.send_event(UserEvent::SetTitle(t));
-                        }
-                        if let Some((target, bell)) = clipboard_pending {
-                            let _ = proxy.send_event(UserEvent::ReadClipboard(target, bell));
-                        }
+                    send_title_and_clipboard(&proxy_for_drain_clone, title, clipboard_pending);
+
+                    if should_redraw(last_redraw, Instant::now()) {
+                        send_redraw(&proxy_for_drain_clone);
+                        metrics.record_redraw();
+                        last_redraw = Instant::now();
+                        pending_redraw = false;
+                    } else {
+                        pending_redraw = true;
                     }
-                    tracing::trace!(
-                        "drain: processed {} bytes: {:02x?}, sending RedrawNeeded",
-                        bytes.len(),
-                        &bytes[..bytes.len().min(40)]
-                    );
-                    // Envia tick al GUI loop para que redibuje.
-                    if let Some(proxy) = proxy_for_drain_clone
-                        .lock()
-                        .expect("proxy mutex poisoned en drain")
-                        .as_ref()
-                    {
-                        let _ = proxy.send_event(UserEvent::RedrawNeeded);
+
+                    for deferred_event in deferred {
+                        handle_non_output_pty_event(deferred_event, &proxy_for_drain_clone);
                     }
                 }
-                PtyEvent::Exited(code) => {
-                    tracing::info!("child termino con codigo {code}");
-                    if let Some(proxy) = proxy_for_drain_clone
-                        .lock()
-                        .expect("proxy mutex poisoned en drain")
-                        .as_ref()
-                    {
-                        let _ = proxy.send_event(UserEvent::PtyExited(code));
-                    }
-                }
-                PtyEvent::IoError(msg) => {
-                    tracing::warn!("error de I/O del PTY: {msg}");
-                    if let Some(proxy) = proxy_for_drain_clone
-                        .lock()
-                        .expect("proxy mutex poisoned en drain")
-                        .as_ref()
-                    {
-                        let _ = proxy.send_event(UserEvent::PtyError(msg));
-                    }
-                }
+                other => handle_non_output_pty_event(other, &proxy_for_drain_clone),
             }
+
+            metrics.maybe_log();
         }
     });
 
-    // Crear event loop con soporte para UserEvent.
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
 
-    // Guardar el proxy en el slot compartido para que el drain lo use.
     *proxy_for_drain
         .lock()
         .expect("proxy mutex poisoned al setear") = Some(proxy);
@@ -150,16 +261,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut app = App::new(Arc::clone(&term), Arc::clone(&pty_tx), app_config);
 
-    // Hilo PTY: lee del master, envía por tx_pty_to_gui.
-    // También recibe comandos de rx_gui_to_pty (Input, Resize, Shutdown).
     let pty_thread = thread::spawn(move || {
         let mut master = master;
         let mut buf = [0u8; 4096];
 
-        // Configurar el master fd como no-bloqueante para evitar deadlock:
-        // el hilo PTY debe poder procesar comandos del GUI incluso cuando
-        // no hay datos disponibles del master (bash esperando input).
-        // ponytail: non-blocking + sleep(1ms) es mas simple que poll/mio.
         if let Ok(flags) = fcntl(master.fd(), FcntlArg::F_GETFL) {
             let nonblock = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
             let _ = fcntl(master.fd(), FcntlArg::F_SETFL(nonblock));
@@ -168,23 +273,22 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         loop {
             let mut had_activity = false;
 
-            // Leer todos los datos disponibles del master (no-bloqueante).
             loop {
                 match master.read(&mut buf) {
                     Ok(0) => {
-                        // EOF: child termino.
                         let _ = tx_pty_to_gui.send(PtyEvent::Exited(-1));
                         return;
                     }
                     Ok(n) => {
                         had_activity = true;
-                        let data = PtyEvent::Output(buf[..n].to_vec());
-                        tracing::trace!("pty_thread: read {} bytes: {:02x?}", n, &buf[..n.min(40)]);
-                        if tx_pty_to_gui.send(data).is_err() {
-                            return; // drain cerro el canal
+                        if tx_pty_to_gui
+                            .send(PtyEvent::Output(buf[..n].to_vec()))
+                            .is_err()
+                        {
+                            return;
                         }
                     }
-                    Err(e) if e.kind() == ErrorKind::WouldBlock => break, // no more data
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
                     Err(e) => {
                         tracing::warn!("error de I/O en PTY: {e}");
                         let _ = tx_pty_to_gui.send(PtyEvent::IoError(e.to_string()));
@@ -193,12 +297,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Procesar comandos pendientes del GUI (Input, Resize, Shutdown).
             while let Ok(cmd) = rx_gui_to_pty.try_recv() {
                 had_activity = true;
                 match cmd {
                     PtyCommand::Input(bytes) => {
-                        tracing::trace!("pty_thread: write {} bytes: {:02x?}", bytes.len(), bytes);
                         let _ = master.write_all(&bytes);
                     }
                     PtyCommand::Resize { rows, cols } => {
@@ -216,7 +318,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Si no hubo actividad, dormir 1ms para evitar spin-loop.
             if !had_activity {
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -231,10 +332,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("event loop iniciado, shell corriendo en PTY");
 
-    // Lanzar GUI loop (bloqueante hasta cerrar ventana).
     event_loop.run_app(&mut app)?;
 
-    // Al salir del event loop, deja que pty_thread y drain terminen.
     drop(pty_tx);
     drop(term);
     let _ = pty_thread.join();
@@ -248,20 +347,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_should_redraw_respeta_16ms() {
+        let t0 = Instant::now();
+        assert!(!should_redraw(t0, t0 + Duration::from_millis(5)));
+        assert!(should_redraw(t0, t0 + Duration::from_millis(20)));
+    }
+
+    #[test]
     fn test_set_winsize_after_spawn() {
-        // verificar que set_winsize funciona inmediatamente despues de spawn.
-        // Sin el fix, el PTY se crea con winsize={0,0,0,0} y bash usa fallback de 80 cols.
         let master = pty::spawn("bash", &["-c", "exit"]).expect("spawn fallo");
         assert!(master.set_winsize(24, 80).is_ok());
     }
 
     #[test]
     fn test_pty_eof_no_panic() {
-        // Spawn bash que termina inmediatamente. La lectura del master
-        // debe retornar Ok(0) (EOF) sin panic.
         let mut master = pty::spawn("bash", &["-c", "exit"]).expect("spawn fallo");
         let mut buf = [0u8; 4096];
-        // Leer hasta EOF. bash termina rapido, asi que read retorna Ok(0).
         loop {
             match master.read(&mut buf) {
                 Ok(0) => break,

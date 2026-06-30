@@ -98,6 +98,54 @@ fn clamp_font_size(current: u16, dir: i8) -> u16 {
     next.clamp(6, 72) as u16
 }
 
+const GUI_METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+struct GuiRedrawMetrics {
+    redraws: u64,
+    interval_sum_ms: f64,
+    interval_samples: u64,
+    period_start: Instant,
+}
+
+impl GuiRedrawMetrics {
+    fn new() -> Self {
+        Self {
+            redraws: 0,
+            interval_sum_ms: 0.0,
+            interval_samples: 0,
+            period_start: Instant::now(),
+        }
+    }
+
+    fn record_redraw(&mut self, since_last: Option<Duration>) {
+        self.redraws += 1;
+        if let Some(dt) = since_last {
+            self.interval_sum_ms += dt.as_secs_f64() * 1000.0;
+            self.interval_samples += 1;
+        }
+    }
+
+    fn maybe_log(&mut self) {
+        let elapsed = self.period_start.elapsed();
+        if elapsed < GUI_METRICS_LOG_INTERVAL {
+            return;
+        }
+        let secs = elapsed.as_secs_f64();
+        let avg_ms = if self.interval_samples > 0 {
+            self.interval_sum_ms / self.interval_samples as f64
+        } else {
+            0.0
+        };
+        tracing::debug!(
+            target: "baud::pipeline",
+            "gui: {:.0} redraws/s, intervalo medio {:.1}ms",
+            self.redraws as f64 / secs,
+            avg_ms,
+        );
+        *self = Self::new();
+    }
+}
+
 /// Estado de la aplicación GUI.
 pub struct App {
     window: Option<Arc<Window>>,
@@ -126,6 +174,8 @@ pub struct App {
     last_reported_cell: Option<(usize, usize)>,
     /// Mapa de atajos de teclado (defaults + overrides de config).
     keybindings: Keybindings,
+    last_gui_redraw: Option<Instant>,
+    gui_redraw_metrics: GuiRedrawMetrics,
 }
 
 impl App {
@@ -153,6 +203,8 @@ impl App {
             last_click_time: None,
             last_reported_cell: None,
             keybindings: Keybindings::default(),
+            last_gui_redraw: None,
+            gui_redraw_metrics: GuiRedrawMetrics::new(),
         }
     }
 
@@ -1268,7 +1320,10 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::RedrawNeeded => {
-                // Solicitar un redraw para actualizar la pantalla.
+                let since_last = self.last_gui_redraw.map(|t| t.elapsed());
+                self.gui_redraw_metrics.record_redraw(since_last);
+                self.last_gui_redraw = Some(Instant::now());
+                self.gui_redraw_metrics.maybe_log();
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
