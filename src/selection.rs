@@ -317,7 +317,7 @@ mod tests {
     }
 
     // =====================================================================
-    // TESTS ADVERSARIALES — Sprint 7 Fase 4
+    // TESTS ADVERSARIALES
     // Asumen que TODO está roto. Buscan bugs, edge cases, situaciones extremas.
     // =====================================================================
 

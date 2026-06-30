@@ -137,8 +137,6 @@ pub struct GlyphOffset {
 }
 
 /// Configuración de la ventana (opacidad, etc.).
-///
-/// La opacidad real se implementará en sprints posteriores.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WindowConfig {
     #[serde(default = "default_opacity")]
@@ -379,8 +377,8 @@ pub fn parse_hex(s: &str) -> (u8, u8, u8) {
 impl Config {
     /// Construye la configuración del proceso hijo del PTY.
     ///
-    /// Los campos de la sección TOML `[process]` se mapean a
-    /// [`crate::pty::ProcessConfig`].
+    /// Convierte [`Config`] en [`crate::pty::ProcessConfig`] (shell, args,
+    /// directorio de arranque, variables de entorno y comando inicial).
     pub fn process_config(&self) -> crate::pty::ProcessConfig {
         let _ = self;
         crate::pty::ProcessConfig::default()

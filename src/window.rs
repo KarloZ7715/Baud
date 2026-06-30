@@ -152,7 +152,6 @@ impl App {
             window_height: 600.0,
             last_click_time: None,
             last_reported_cell: None,
-            // ponytail: overrides TOML [keys] se conectan en el plan de Personalizacion.
             keybindings: Keybindings::default(),
         }
     }
@@ -1333,7 +1332,7 @@ static VTABLE: RawWakerVTable = RawWakerVTable::new(
 );
 
 // ---------------------------------------------------------------------------
-// Tests adversariales — Sprint 7 Fase 4: eventos de mouse y teclado
+// Tests adversariales
 // ---------------------------------------------------------------------------
 // NO se puede testear el event loop de winit (requiere GPU), pero se puede
 // testear la lógica de coordenadas de celda, edge cases de división, y
