@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use crate::ansi::Term;
 use crate::grid::{DEFAULT_COLS, DEFAULT_ROWS};
-use crate::pty;
+use crate::pty::{self, ProcessConfig};
 use crate::window::{App, UserEvent};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use winit::event_loop::EventLoop;
@@ -41,8 +41,10 @@ pub enum PtyEvent {
 /// Crea el PTY, lanza bash, y arranca los hilos necesarios.
 /// Retorna cuando se cierra la ventana (event_loop.exit()).
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    // ponytail: spawn bash interactivo. -i fuerza prompt interactivo.
-    let master = pty::spawn("bash", &["-i"])?;
+    let process_cfg = ProcessConfig::default();
+    let startup_command = process_cfg.startup_command.clone();
+
+    let master = pty::spawn_with(&process_cfg)?;
     master.set_winsize(DEFAULT_ROWS as u16, DEFAULT_COLS as u16)?;
 
     // Dos canales separados: PTY->drain y GUI->PTY
@@ -219,7 +221,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    tracing::info!("event loop iniciado, bash corriendo en PTY");
+    if let Some(cmd) = startup_command {
+        if let Some(tx) = pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
+            let _ = tx.send(PtyCommand::Input(format!("{cmd}\n").into_bytes()));
+        }
+    }
+
+    tracing::info!("event loop iniciado, shell corriendo en PTY");
 
     // Lanzar GUI loop (bloqueante hasta cerrar ventana).
     event_loop.run_app(&mut app)?;

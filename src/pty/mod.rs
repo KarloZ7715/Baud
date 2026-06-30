@@ -220,6 +220,55 @@ mod tests {
     }
 
     #[test]
+    fn test_startup_command_se_escribe_al_pty() {
+        let cfg = ProcessConfig {
+            shell: "/bin/bash".into(),
+            args: Vec::new(),
+            working_directory: None,
+            env: Vec::new(),
+            startup_command: Some("echo HELLO".into()),
+            login_shell: false,
+        };
+        let mut master = spawn_with(&ProcessConfig {
+            startup_command: None,
+            ..cfg.clone()
+        })
+        .expect("spawn");
+
+        let cmd = cfg.startup_command.as_ref().expect("startup_command");
+        nix::unistd::write(master.fd(), format!("{cmd}\n").as_bytes()).expect("write");
+
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(1);
+        std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match master.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        output.extend_from_slice(&buf[..n]);
+                        if output.windows(5).any(|w| w == b"HELLO") {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = tx.send(output);
+        });
+
+        let result = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("timeout leyendo del PTY");
+        let output = String::from_utf8_lossy(&result);
+        assert!(
+            output.contains("HELLO"),
+            "Se esperaba 'HELLO' en output: {:?}",
+            output
+        );
+    }
+
+    #[test]
     fn test_spawn_aplica_cwd_y_env() {
         let cfg = ProcessConfig {
             shell: "/bin/bash".into(),
