@@ -4,6 +4,7 @@
 //! El Term se comparte entre el hilo drain y la GUI via Arc<Mutex<Term>>.
 //! El hilo drain envía UserEvent::RedrawNeeded al GUI vía EventLoopProxy.
 
+use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
 use std::os::fd::AsFd;
 use std::sync::{mpsc, Arc, Mutex};
@@ -24,6 +25,9 @@ use winit::event_loop::EventLoop;
 const REDRAW_MIN_INTERVAL: Duration = Duration::from_millis(16);
 
 const METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+// ponytail: tope de bytes por pasada del drain; suelta el mutex del Term para la GUI.
+const DRAIN_MAX_BYTES_PER_PASS: usize = 256 * 1024;
 
 /// Comandos del GUI al hilo PTY.
 pub enum PtyCommand {
@@ -112,6 +116,39 @@ fn send_redraw(proxy_slot: &Arc<Mutex<Option<winit::event_loop::EventLoopProxy<U
     {
         let _ = proxy.send_event(UserEvent::RedrawNeeded);
     }
+}
+
+/// Agrupa `Output` del canal hasta `max_bytes`; el sobrante va en el vector devuelto.
+fn coalesce_output_chunks(
+    first: Vec<u8>,
+    rx: &mpsc::Receiver<PtyEvent>,
+    max_bytes: usize,
+) -> (Vec<Vec<u8>>, Vec<PtyEvent>) {
+    let mut chunks = vec![first];
+    let mut total = chunks[0].len();
+    let mut deferred: Vec<PtyEvent> = Vec::new();
+
+    while let Ok(more) = rx.try_recv() {
+        match more {
+            PtyEvent::Output(bytes) => {
+                if total + bytes.len() > max_bytes {
+                    deferred.push(PtyEvent::Output(bytes));
+                    while let Ok(rest) = rx.try_recv() {
+                        match rest {
+                            PtyEvent::Output(b) => deferred.push(PtyEvent::Output(b)),
+                            other => deferred.push(other),
+                        }
+                    }
+                    break;
+                }
+                total += bytes.len();
+                chunks.push(bytes);
+            }
+            other => deferred.push(other),
+        }
+    }
+
+    (chunks, deferred)
 }
 
 fn send_title_and_clipboard(
@@ -271,6 +308,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let mut metrics = DrainMetrics::new();
         let mut last_redraw = Instant::now();
         let mut pending_redraw = false;
+        let mut output_backlog: VecDeque<Vec<u8>> = VecDeque::new();
 
         loop {
             if pending_redraw && should_redraw(last_redraw, Instant::now()) {
@@ -282,69 +320,71 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             let timeout = if pending_redraw {
                 REDRAW_MIN_INTERVAL.saturating_sub(last_redraw.elapsed())
-            } else {
+            } else if output_backlog.is_empty() {
                 Duration::from_secs(3600)
+            } else {
+                Duration::ZERO
             };
 
-            let event = match rx_pty_to_gui.recv_timeout(timeout) {
-                Ok(event) => event,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    metrics.maybe_log();
-                    continue;
+            let first = if let Some(chunk) = output_backlog.pop_front() {
+                chunk
+            } else {
+                match rx_pty_to_gui.recv_timeout(timeout) {
+                    Ok(PtyEvent::Output(bytes)) => bytes,
+                    Ok(other) => {
+                        handle_non_output_pty_event(other, &proxy_for_drain_clone);
+                        metrics.maybe_log();
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        metrics.maybe_log();
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
 
-            match event {
-                PtyEvent::Output(first) => {
-                    let mut chunks = vec![first];
-                    let mut deferred: Vec<PtyEvent> = Vec::new();
-                    while let Ok(more) = rx_pty_to_gui.try_recv() {
-                        match more {
-                            PtyEvent::Output(bytes) => chunks.push(bytes),
-                            other => deferred.push(other),
-                        }
-                    }
+            let (chunks, deferred) =
+                coalesce_output_chunks(first, &rx_pty_to_gui, DRAIN_MAX_BYTES_PER_PASS);
 
-                    let (response, title, clipboard_pending, total_bytes) = {
-                        let mut term_guard =
-                            term_drain.lock().expect("term mutex poisoned en drain");
-                        let mut total_bytes = 0usize;
-                        for bytes in &chunks {
-                            parser.advance(&mut *term_guard, bytes);
-                            total_bytes += bytes.len();
-                        }
-                        term_guard.mark_dirty();
-                        let response = term_guard.take_pty_response();
-                        let title = term_guard.take_title_if_dirty();
-                        let clipboard_pending = term_guard.take_clipboard_read_pending();
-                        (response, title, clipboard_pending, total_bytes)
-                    };
-                    metrics.record_bytes(total_bytes);
-
-                    if !response.is_empty() {
-                        if let Err(e) = tx_response.send(PtyCommand::Input(response)) {
-                            tracing::warn!(
-                                "drain: no se pudo reenviar respuesta PTY ({e}); query descartada"
-                            );
-                        }
-                    }
-                    send_title_and_clipboard(&proxy_for_drain_clone, title, clipboard_pending);
-
-                    if should_redraw(last_redraw, Instant::now()) {
-                        send_redraw(&proxy_for_drain_clone);
-                        metrics.record_redraw();
-                        last_redraw = Instant::now();
-                        pending_redraw = false;
-                    } else {
-                        pending_redraw = true;
-                    }
-
-                    for deferred_event in deferred {
-                        handle_non_output_pty_event(deferred_event, &proxy_for_drain_clone);
-                    }
+            let (response, title, clipboard_pending, total_bytes) = {
+                let mut term_guard = term_drain.lock().expect("term mutex poisoned en drain");
+                let mut total_bytes = 0usize;
+                for bytes in &chunks {
+                    parser.advance(&mut *term_guard, bytes);
+                    total_bytes += bytes.len();
                 }
-                other => handle_non_output_pty_event(other, &proxy_for_drain_clone),
+                term_guard.mark_dirty();
+                let response = term_guard.take_pty_response();
+                let title = term_guard.take_title_if_dirty();
+                let clipboard_pending = term_guard.take_clipboard_read_pending();
+                (response, title, clipboard_pending, total_bytes)
+            };
+            metrics.record_bytes(total_bytes);
+
+            if !response.is_empty() {
+                if let Err(e) = tx_response.send(PtyCommand::Input(response)) {
+                    tracing::warn!(
+                        "drain: no se pudo reenviar respuesta PTY ({e}); query descartada"
+                    );
+                }
+            }
+            send_title_and_clipboard(&proxy_for_drain_clone, title, clipboard_pending);
+
+            if should_redraw(last_redraw, Instant::now()) {
+                send_redraw(&proxy_for_drain_clone);
+                metrics.record_redraw();
+                last_redraw = Instant::now();
+                pending_redraw = false;
+            } else {
+                pending_redraw = true;
+            }
+
+            for event in deferred {
+                match event {
+                    PtyEvent::Output(bytes) => output_backlog.push_back(bytes),
+                    other => handle_non_output_pty_event(other, &proxy_for_drain_clone),
+                }
             }
 
             metrics.maybe_log();
@@ -443,6 +483,18 @@ mod tests {
     use nix::poll::PollTimeout;
     use nix::poll::{poll, PollFd, PollFlags};
     use nix::sys::eventfd::{EfdFlags, EventFd};
+
+    #[test]
+    fn test_coalesce_respeta_tope_bytes() {
+        let (tx, rx) = mpsc::channel::<PtyEvent>();
+        tx.send(PtyEvent::Output(vec![0u8; 100])).unwrap();
+        tx.send(PtyEvent::Output(vec![0u8; 100])).unwrap();
+
+        let (chunks, deferred) = coalesce_output_chunks(vec![0u8; 150], &rx, 200);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), 150);
+        assert_eq!(deferred.len(), 2);
+    }
 
     #[test]
     fn test_should_redraw_respeta_16ms() {
