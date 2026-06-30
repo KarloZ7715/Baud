@@ -574,6 +574,123 @@ mod tests {
     }
 
     #[test]
+    fn block_cursor_text_uses_contrast_fg() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 5];
+        row[3].ch = 'X';
+        row[3].attrs.fg = Color::Red;
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let mut term = Term::default();
+        term.cursor.move_to(0, 3);
+        term.cursor_visible = true;
+        term.cursor_style = CursorStyle::Block;
+
+        let list = build_full(&term, &metrics, &theme, &row_sources, 5, 1, &family);
+        let palette = test_palette(&theme);
+        let expected = contrast_text_color(palette.cursor_rgb());
+
+        let glyph = list
+            .text_glyphs
+            .iter()
+            .find(|g| g.row == 0 && g.col == 3)
+            .expect("glifo bajo cursor block");
+        assert_eq!(glyph.fg, Color::Rgb(expected.0, expected.1, expected.2));
+    }
+
+    #[test]
+    fn strikethrough_emits_strike_line_quad() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 1];
+        row[0].ch = 'z';
+        row[0].attrs.strikethrough = true;
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let mut term = Term::default();
+        term.cursor_visible = false;
+
+        let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
+
+        assert!(
+            list.line_quads
+                .iter()
+                .any(|q| q.kind == LineKind::Strike && q.row == 0 && q.col == 0),
+            "strikethrough debe emitir LineKind::Strike"
+        );
+    }
+
+    #[test]
+    fn overline_emits_over_line_quad() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 1];
+        row[0].ch = 'z';
+        row[0].attrs.overline = true;
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let mut term = Term::default();
+        term.cursor_visible = false;
+
+        let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
+
+        assert!(
+            list.line_quads
+                .iter()
+                .any(|q| q.kind == LineKind::Over && q.row == 0 && q.col == 0),
+            "overline debe emitir LineKind::Over"
+        );
+    }
+
+    #[test]
+    fn hyperlink_underline_es_mas_tenue_que_sgr() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let palette = test_palette(&theme);
+
+        let mut link_row = vec![Cell::default(); 1];
+        link_row[0].ch = 'L';
+        link_row[0].attrs.fg = Color::Green;
+        link_row[0].hyperlink = Some(0);
+
+        let mut sgr_row = vec![Cell::default(); 1];
+        sgr_row[0].ch = 'L';
+        sgr_row[0].attrs.fg = Color::Green;
+        sgr_row[0].attrs.underline = true;
+
+        let mut term = Term::default();
+        term.cursor_visible = false;
+
+        let link_list = build_full(
+            &term,
+            &metrics,
+            &theme,
+            &[link_row.as_slice()],
+            1,
+            1,
+            &family,
+        );
+        let sgr_list = build_full(
+            &term,
+            &metrics,
+            &theme,
+            &[sgr_row.as_slice()],
+            1,
+            1,
+            &family,
+        );
+
+        let link_color = link_list.line_quads[0].color;
+        let sgr_color = sgr_list.line_quads[0].color;
+        let full = resolve_fg_glyphon(Color::Green, false, false, &palette, theme.dim_alpha);
+
+        assert_eq!(sgr_color, full);
+        assert_eq!(link_color, attenuate_glyphon(full));
+    }
+
+    #[test]
     fn wide_emoji_row_one_glyph_skips_continuation() {
         let theme = ThemeConfig::default();
         let metrics = test_metrics();
