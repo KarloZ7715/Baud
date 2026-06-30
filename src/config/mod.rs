@@ -30,6 +30,8 @@ pub struct Config {
     pub copy_mode: CopyModeConfig,
     #[serde(default)]
     pub scrollback: ScrollbackConfig,
+    #[serde(default)]
+    pub cursor: CursorConfig,
 }
 
 /// Configuración de selección de texto.
@@ -193,6 +195,40 @@ impl Default for ScrollbackConfig {
         Self {
             lines: default_scrollback_lines(),
             unlimited: false,
+        }
+    }
+}
+
+/// Apariencia del cursor (color, forma, parpadeo).
+#[derive(Debug, Clone, Deserialize)]
+pub struct CursorConfig {
+    /// `None` usa `theme.cursor`.
+    #[serde(default)]
+    pub color: Option<String>,
+    /// `"block"` | `"bar"` | `"underline"`.
+    #[serde(default = "default_cursor_style")]
+    pub style: String,
+    #[serde(default = "default_true")]
+    pub blink: bool,
+    #[serde(default = "default_blink_ms")]
+    pub blink_interval_ms: u64,
+}
+
+fn default_cursor_style() -> String {
+    "block".into()
+}
+
+fn default_blink_ms() -> u64 {
+    530
+}
+
+impl Default for CursorConfig {
+    fn default() -> Self {
+        Self {
+            color: None,
+            style: default_cursor_style(),
+            blink: true,
+            blink_interval_ms: default_blink_ms(),
         }
     }
 }
@@ -644,6 +680,19 @@ word_delimiters = " ,.;"
         assert_eq!(parse_hex("#ff00000"), (0, 0, 0)); // 8 caracteres
         assert_eq!(parse_hex("ff0000"), (0, 0, 0)); // sin #
         assert_eq!(parse_hex("#-10000"), (0, 0, 0)); // signo negativo
+    }
+
+    #[test]
+    fn test_cursor_config() {
+        let cfg = Config::default();
+        assert!(cfg.cursor.blink);
+        assert_eq!(cfg.cursor.style, "block");
+
+        let toml = "[cursor]\ncolor = \"#ff8800\"\nstyle = \"bar\"\nblink = false\n";
+        let p: Config = toml::from_str(toml).unwrap();
+        assert_eq!(p.cursor.color.as_deref(), Some("#ff8800"));
+        assert_eq!(p.cursor.style, "bar");
+        assert!(!p.cursor.blink);
     }
 
     #[test]
