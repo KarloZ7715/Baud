@@ -37,6 +37,7 @@ pub fn frame_clear_color(bg: (u8, u8, u8), window_opacity: f32) -> wgpu::Color {
 /// En debug, detecta CustomGlyph con dimensiones que harian crecer el atlas a 256GB+.
 fn debug_assert_custom_glyphs_bounded(custom_glyphs: &[glyphon::CustomGlyph]) {
     debug_assert!(!boxdraw::is_box_glyph('A'));
+    debug_assert!(boxdraw::box_mask('\u{2500}', 8, 16).is_some());
     for (i, g) in custom_glyphs.iter().enumerate() {
         let px = custom_pixels(g.width, g.height);
         if px > MAX_CUSTOM_GLYPH_PIXELS {
