@@ -760,6 +760,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requiere fuente CJK (no disponible en CI)"]
     fn rasterize_cjk_usa_dimensiones_del_bitmap() {
         let (mut font_system, metrics) = test_metrics();
         let mut swash_cache = glyphon::SwashCache::new();
