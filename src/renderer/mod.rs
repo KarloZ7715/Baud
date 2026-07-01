@@ -1,5 +1,6 @@
 //! Modulo de render GPU del grid dinamico.
 
+mod boxdraw;
 mod cell_renderer;
 mod decorations;
 mod display_list;
@@ -35,6 +36,7 @@ pub fn frame_clear_color(bg: (u8, u8, u8), window_opacity: f32) -> wgpu::Color {
 
 /// En debug, detecta CustomGlyph con dimensiones que harian crecer el atlas a 256GB+.
 fn debug_assert_custom_glyphs_bounded(custom_glyphs: &[glyphon::CustomGlyph]) {
+    debug_assert!(!boxdraw::is_box_glyph('A'));
     for (i, g) in custom_glyphs.iter().enumerate() {
         let px = custom_pixels(g.width, g.height);
         if px > MAX_CUSTOM_GLYPH_PIXELS {
