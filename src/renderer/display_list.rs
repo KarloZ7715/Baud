@@ -1038,7 +1038,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Parpadeo (Renderer 4): cursor y texto SGR 5 se ocultan en fase off.
+    // Parpadeo: cursor y texto SGR 5 se ocultan en fase off.
     // -----------------------------------------------------------------
 
     /// Cursor block emitido en fase on; suprimido en fase off (blink activado).

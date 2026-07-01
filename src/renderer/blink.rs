@@ -1,4 +1,4 @@
-//! Fase de parpadeo del cursor y texto SGR 5.
+//! Parpadeo del cursor y texto SGR 5.
 //!
 //! El cursor y las celdas con SGR 5 (blink) se muestran durante la primera
 //! mitad del intervalo y se ocultan durante la segunda mitad, como en xterm.
