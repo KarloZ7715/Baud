@@ -74,6 +74,15 @@ pub fn pixel_to_cell_coords(
     (row, col)
 }
 
+/// Coordenadas 1-based para reportes CSI de mouse (xterm).
+/// Devuelve `None` si `pixel_to_cell_coords` uso sentinel (`usize::MAX`).
+pub fn mouse_report_coords(col: usize, row: usize) -> Option<(usize, usize)> {
+    if row == usize::MAX || col == usize::MAX {
+        return None;
+    }
+    Some((col.saturating_add(1), row.saturating_add(1)))
+}
+
 #[inline]
 pub fn custom_pixels(width: f32, height: f32) -> u32 {
     let w = width.round().max(1.0) as u32;
@@ -104,6 +113,14 @@ mod tests {
         assert_eq!(row, 2);
         let (row0, col0) = pixel_to_cell_coords(5.0, 3.0, 8.0, 6.0, 10.0, 20.0);
         assert_eq!((row0, col0), (0, 0));
+    }
+
+    #[test]
+    fn mouse_report_coords_rechaza_sentinel() {
+        assert!(mouse_report_coords(usize::MAX, 0).is_none());
+        assert!(mouse_report_coords(0, usize::MAX).is_none());
+        assert_eq!(mouse_report_coords(0, 0), Some((1, 1)));
+        assert_eq!(mouse_report_coords(79, 29), Some((80, 30)));
     }
 
     #[test]

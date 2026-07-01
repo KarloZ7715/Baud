@@ -533,7 +533,16 @@ impl App {
             let (cell_w, cell_h) = renderer.set_font_size(self.font_size);
             if let Some(window) = &self.window {
                 let size = window.inner_size();
-                self.sync_grid_to_window(size.width, size.height, cell_w, cell_h, true, false);
+                let (old_rows, _, new_rows, _) =
+                    self.sync_grid_to_window(size.width, size.height, cell_w, cell_h, true, false);
+                // Al reducir filas, anclar el borde inferior visible (evita que el contenido "suba").
+                if old_rows > new_rows {
+                    if let Ok(mut guard) = self.term.lock() {
+                        let delta = (old_rows - new_rows) as isize;
+                        guard.scrollback_offset = (guard.scrollback_offset - delta).max(0);
+                        guard.mark_dirty();
+                    }
+                }
             }
         }
     }
@@ -687,21 +696,34 @@ impl App {
         false
     }
 
+    fn clamp_mouse_to_grid(
+        row: usize,
+        col: usize,
+        rows: usize,
+        cols: usize,
+    ) -> Option<(usize, usize)> {
+        if row == usize::MAX || col == usize::MAX {
+            return None;
+        }
+        let r = row.min(rows.saturating_sub(1));
+        let c = col.min(cols.saturating_sub(1));
+        Some((r, c))
+    }
+
     fn encode_mouse_report(
         reporting: &crate::ansi::MouseReporting,
         button: u8,
         col: usize,
         row: usize,
         release: bool,
-    ) -> Vec<u8> {
-        let x = col + 1;
-        let y = row + 1;
+    ) -> Option<Vec<u8>> {
+        let (x, y) = crate::renderer::limits::mouse_report_coords(col, row)?;
         if reporting.sgr {
             let suffix = if release { 'm' } else { 'M' };
-            format!("\x1b[<{};{};{}{}", button, x, y, suffix).into_bytes()
+            Some(format!("\x1b[<{};{};{}{}", button, x, y, suffix).into_bytes())
         } else {
             let b = if release { button + 3 } else { button } + 0x20;
-            vec![0x1b, b'M', b, (x + 0x20) as u8, (y + 0x20) as u8]
+            Some(vec![0x1b, b'M', b, (x + 0x20) as u8, (y + 0x20) as u8])
         }
     }
 
@@ -714,8 +736,17 @@ impl App {
             if !guard.mouse_reporting.is_active() {
                 return;
             }
-            let bytes =
-                Self::encode_mouse_report(&guard.mouse_reporting, button, col, row, release);
+            let active = guard.active_grid();
+            let Some((row, col)) =
+                Self::clamp_mouse_to_grid(row, col, active.rows_count, active.cols_count)
+            else {
+                return;
+            };
+            let Some(bytes) =
+                Self::encode_mouse_report(&guard.mouse_reporting, button, col, row, release)
+            else {
+                return;
+            };
             drop(guard);
             self.send_pty_bytes(bytes);
         }
@@ -727,10 +758,20 @@ impl App {
         };
         let (row, col) = self.mouse_cell_coords(renderer);
         if let Ok(guard) = self.term.lock() {
-            if !guard.mouse_reporting.reports_motion() {
+            if !guard.mouse_reporting.is_active() {
                 return;
             }
-            let bytes = Self::encode_mouse_report(&guard.mouse_reporting, button, col, row, false);
+            let active = guard.active_grid();
+            let Some((row, col)) =
+                Self::clamp_mouse_to_grid(row, col, active.rows_count, active.cols_count)
+            else {
+                return;
+            };
+            let Some(bytes) =
+                Self::encode_mouse_report(&guard.mouse_reporting, button, col, row, false)
+            else {
+                return;
+            };
             drop(guard);
             self.send_pty_bytes(bytes);
         }
