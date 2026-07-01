@@ -12,7 +12,7 @@ const COMMON: &[&str] = &[
     "Symbols Nerd Font Mono",
     "MesloLGS Nerd Font Mono",
     "Noto Sans Symbols",
-    "Noto Sans Symbols2",
+    "Noto Sans Symbols 2",
     "Noto Color Emoji",
     "DejaVu Sans Mono",
     "Liberation Mono",
@@ -56,15 +56,24 @@ fn build_common_fallback(
     user_fallback: &[String],
 ) -> Vec<&'static str> {
     let mut common = Vec::with_capacity(user_fallback.len() + COMMON.len());
+    let mut seen = std::collections::HashSet::new();
     for family in user_fallback {
-        if family_in_db(db, family) {
-            let leaked: &'static str = Box::leak(family.clone().into_boxed_str());
-            common.push(leaked);
-        } else {
+        if !family_in_db(db, family) {
             tracing::warn!("fuente de fallback no encontrada: '{family}'");
+            continue;
+        }
+        if !seen.insert(family.as_str()) {
+            continue;
+        }
+        // ponytail: Box::leak — el FontSystem vive todo el proceso; el trait Fallback exige &'static str.
+        let leaked: &'static str = Box::leak(family.clone().into_boxed_str());
+        common.push(leaked);
+    }
+    for &name in COMMON {
+        if seen.insert(name) {
+            common.push(name);
         }
     }
-    common.extend_from_slice(COMMON);
     common
 }
 
@@ -82,4 +91,36 @@ pub fn create_font_system_with_fallback(user_fallback: &[String]) -> glyphon::Fo
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn create_font_system() -> glyphon::FontSystem {
     create_font_system_with_fallback(&[])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_common_fallback_omite_fuentes_ausentes() {
+        let db = glyphon::fontdb::Database::new();
+        let chain = build_common_fallback(&db, &["Fuente Inexistente XYZ".into()]);
+        assert_eq!(chain.len(), COMMON.len());
+    }
+
+    #[test]
+    fn build_common_fallback_antepone_usuario_y_deduplica_common() {
+        let mut db = glyphon::fontdb::Database::new();
+        db.load_system_fonts();
+        let known = db
+            .faces()
+            .find_map(|face| face.families.first().map(|(name, _)| name.clone()))
+            .expect("se requiere al menos una fuente del sistema");
+        let in_common = COMMON.contains(&known.as_str());
+        let chain = build_common_fallback(&db, &[known.clone(), known.clone()]);
+        assert_eq!(chain.first().copied(), Some(known.as_str()));
+        let count = chain.iter().filter(|&&n| n == known.as_str()).count();
+        assert_eq!(count, 1, "familia duplicada en la cadena");
+        if in_common {
+            assert_eq!(chain.len(), COMMON.len());
+        } else {
+            assert_eq!(chain.len(), COMMON.len() + 1);
+        }
+    }
 }

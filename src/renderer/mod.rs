@@ -990,6 +990,7 @@ mod tests {
         assert_eq!(c.b(), 0xec, "Default B debe ser foreground del tema");
     }
 
+    /// Invariante de metricas que usa `Renderer::set_font_size` (sin GPU).
     #[test]
     fn set_font_size_aumenta_celda() {
         let mut fs = terminal_fallback::create_font_system();

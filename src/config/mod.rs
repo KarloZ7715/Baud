@@ -930,7 +930,7 @@ height = 800
     #[test]
     fn test_font_fallback_default_y_parse() {
         let cfg = FontConfig::default();
-        assert!(cfg.fallback.is_empty());
+        assert!(cfg.fallback.is_empty(), "sin fallback por defecto");
 
         let toml = r#"
 [font]

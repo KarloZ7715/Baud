@@ -368,6 +368,49 @@ mod tests {
     }
 
     #[test]
+    fn emoji_y_cjk_rasterizan_con_fallback() {
+        let mut font_system = super::super::terminal_fallback::create_font_system();
+        let mut swash_cache = SwashCache::new();
+        let font_config = FontConfig::default();
+        let metrics = CellMetrics::measure(
+            &mut font_system,
+            &font_config.family,
+            font_config.size as f32,
+            font_config.line_height,
+            font_config.glyph_offset,
+        );
+        let mut cache = GlyphCache::new();
+        for ch in ['😀', '中'] {
+            let key = GlyphKey {
+                ch,
+                bold: false,
+                italic: false,
+                dim: false,
+                family: font_config.family.clone(),
+            };
+            let cached = cache.get_or_insert(
+                &mut font_system,
+                &mut swash_cache,
+                &metrics,
+                &font_config.family,
+                key,
+            );
+            assert!(
+                !cached.raster.missing,
+                "char {:?} debe rasterizar (fallback emoji/CJK)",
+                ch
+            );
+            if ch == '😀' {
+                assert_eq!(
+                    cached.raster.content_type,
+                    ContentType::Color,
+                    "emoji debe rasterizar como bitmap a color"
+                );
+            }
+        }
+    }
+
+    #[test]
     #[ignore = "requiere Nerd Font instalada (no disponible en CI)"]
     fn box_drawing_and_nerd_icons_rasterize() {
         let mut font_system = create_font_system();

@@ -214,8 +214,9 @@ fn text_glyph_to_custom(
         return Ok(None);
     }
 
-    let width = limits::clamp_custom_dimension(f32::from(cached.raster.width), metrics.cell_w, 2);
-    let height = limits::clamp_custom_dimension(f32::from(cached.raster.height), metrics.cell_h, 1);
+    // Usar dimensiones del bitmap; deben coincidir con lo que rasterize_custom_glyph devuelve.
+    let width = f32::from(cached.raster.width).max(1.0);
+    let height = f32::from(cached.raster.height).max(1.0);
     if limits::custom_pixels(width, height) > MAX_CUSTOM_GLYPH_PIXELS {
         return Ok(None);
     }
@@ -237,13 +238,20 @@ fn text_glyph_to_custom(
         resolve_fg_glyphon(text.fg, text.dim, text.bold, palette, dim_alpha)
     };
 
+    // glyphon: bitmaps a color (emoji) no deben llevar tinte de foreground.
+    let glyph_color = if cached.raster.content_type == ContentType::Color {
+        None
+    } else {
+        Some(fg_color)
+    };
+
     Ok(Some(CustomGlyph {
         id: cached.custom_glyph_id,
         left,
         top,
         width,
         height,
-        color: Some(fg_color),
+        color: glyph_color,
         snap_to_physical_pixel: true,
         metadata: 0,
     }))
@@ -352,15 +360,30 @@ fn rasterize_custom_glyph(
     }
 
     let content_type = cached.raster.content_type;
-    let (data, _, _) = super::glyph_cache::normalize_raster_bytes(
+    let rw = cached.raster.width;
+    let rh = cached.raster.height;
+    let (data, norm_w, norm_h) = super::glyph_cache::normalize_raster_bytes(
         &cached.raster.data,
-        request.width as u32,
-        request.height as u32,
+        rw as u32,
+        rh as u32,
         content_type,
     );
-    let expected =
-        request.width as usize * request.height as usize * content_type.bytes_per_pixel();
+    let expected = norm_w as usize * norm_h as usize * content_type.bytes_per_pixel();
     if expected == 0 || data.len() != expected {
+        return None;
+    }
+
+    let req_w = request.width as usize;
+    let req_h = request.height as usize;
+    if norm_w as usize != req_w || norm_h as usize != req_h {
+        tracing::debug!(
+            id = request.id,
+            req_w,
+            req_h,
+            norm_w,
+            norm_h,
+            "CustomGlyph y bitmap raster tienen dimensiones distintas"
+        );
         return None;
     }
 
@@ -479,5 +502,142 @@ mod tests {
         );
         assert!(cg.width >= 1.0);
         assert!(cg.height >= 1.0);
+        assert!(cg.color.is_some(), "glifo mask lleva tinte de foreground");
+    }
+
+    #[test]
+    fn emoji_custom_glyph_sin_tinte_de_foreground() {
+        let (mut font_system, metrics) = test_metrics();
+        let mut swash_cache = glyphon::SwashCache::new();
+        let font_config = FontConfig::default();
+        let mut cache = GlyphCache::new();
+        let theme = crate::config::ThemeConfig::default();
+        let palette = Palette::from_theme(&theme);
+
+        let text = TextGlyph {
+            row: 0,
+            col: 0,
+            width_cells: 2,
+            glyph_key: GlyphKey {
+                ch: '😀',
+                bold: false,
+                italic: false,
+                dim: false,
+                family: font_config.family.clone(),
+            },
+            fg: Color::Default,
+            bold: false,
+            dim: false,
+            custom_id: 0,
+            selected: false,
+        };
+
+        let cg = text_glyph_to_custom(
+            &text,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &font_config.family,
+            &mut cache,
+            &mut font_system,
+            &mut swash_cache,
+        )
+        .expect("ok")
+        .expect("emoji rasterizado");
+
+        assert!(
+            cg.color.is_none(),
+            "emoji a color no debe llevar tinte de foreground"
+        );
+    }
+
+    #[test]
+    fn rasterize_emoji_usa_dimensiones_del_bitmap() {
+        let (mut font_system, metrics) = test_metrics();
+        let mut swash_cache = glyphon::SwashCache::new();
+        let font_config = FontConfig::default();
+        let mut cache = GlyphCache::new();
+        let key = GlyphKey {
+            ch: '😀',
+            bold: false,
+            italic: false,
+            dim: false,
+            family: font_config.family.clone(),
+        };
+        let cached = cache.get_or_insert(
+            &mut font_system,
+            &mut swash_cache,
+            &metrics,
+            &font_config.family,
+            key,
+        );
+        assert!(!cached.raster.missing);
+        let raster_w = cached.raster.width;
+        let raster_h = cached.raster.height;
+        let glyph_id = cached.custom_glyph_id;
+        let out = rasterize_custom_glyph(
+            RasterizeCustomGlyphRequest {
+                id: glyph_id,
+                width: raster_w,
+                height: raster_h,
+                x_bin: glyphon::SubpixelBin::Zero,
+                y_bin: glyphon::SubpixelBin::Zero,
+                scale: 1.0,
+            },
+            &cache,
+        );
+        assert!(
+            out.is_some(),
+            "emoji raster {}x{} (celda {}x{})",
+            raster_w,
+            raster_h,
+            metrics.cell_w,
+            metrics.cell_h
+        );
+    }
+
+    #[test]
+    fn rasterize_cjk_usa_dimensiones_del_bitmap() {
+        let (mut font_system, metrics) = test_metrics();
+        let mut swash_cache = glyphon::SwashCache::new();
+        let font_config = FontConfig::default();
+        let mut cache = GlyphCache::new();
+        let key = GlyphKey {
+            ch: '中',
+            bold: false,
+            italic: false,
+            dim: false,
+            family: font_config.family.clone(),
+        };
+        let cached = cache.get_or_insert(
+            &mut font_system,
+            &mut swash_cache,
+            &metrics,
+            &font_config.family,
+            key,
+        );
+        assert!(!cached.raster.missing);
+        let raster_w = cached.raster.width;
+        let raster_h = cached.raster.height;
+        let glyph_id = cached.custom_glyph_id;
+        let out = rasterize_custom_glyph(
+            RasterizeCustomGlyphRequest {
+                id: glyph_id,
+                width: raster_w,
+                height: raster_h,
+                x_bin: glyphon::SubpixelBin::Zero,
+                y_bin: glyphon::SubpixelBin::Zero,
+                scale: 1.0,
+            },
+            &cache,
+        );
+        assert!(
+            out.is_some(),
+            "CJK raster {}x{} (celda {}x{})",
+            raster_w,
+            raster_h,
+            metrics.cell_w,
+            metrics.cell_h
+        );
     }
 }
