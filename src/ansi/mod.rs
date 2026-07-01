@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::copy_mode::CopyModeState;
 use crate::cursor::Cursor;
 use crate::grid::{Grid, DEFAULT_COLS, DEFAULT_ROWS};
@@ -169,6 +171,12 @@ pub struct Term {
     pub mouse_reporting: MouseReporting,
     pub copy_mode: Option<CopyModeState>,
     pub cursor_style: CursorStyle,
+    /// Habilita el parpadeo del cursor (config `[cursor] blink`).
+    pub cursor_blink_enabled: bool,
+    /// Intervalo de parpadeo en ms (config `[cursor] blink_interval_ms`).
+    pub blink_interval_ms: u64,
+    /// Instant del ultimo reset de fase de parpadeo (input o output del PTY).
+    pub last_blink_reset: Instant,
     /// Bytes que el terminal debe escribir de vuelta al PTY (respuestas a
     /// queries: DA1/DA2/DSR/CPR/XTVERSION y, mas adelante, OSC query).
     /// El hilo drain lo vacia tras cada parser.advance().
@@ -253,6 +261,9 @@ impl Term {
             mouse_reporting: MouseReporting::default(),
             copy_mode: None,
             cursor_style: CursorStyle::default(),
+            cursor_blink_enabled: true,
+            blink_interval_ms: 530,
+            last_blink_reset: Instant::now(),
             pty_response: Vec::new(),
             tab_stops: default_tab_stops(DEFAULT_COLS),
             keypad_application_mode: false,
@@ -590,6 +601,40 @@ impl Term {
         let d = self.dirty;
         self.dirty = false;
         d
+    }
+
+    /// Resetea la fase de parpadeo a "on". Llamar en cada input del usuario y
+    /// tras procesar salida del PTY, para que el cursor quede solido mientras
+    /// se escribe (comportamiento xterm).
+    pub fn reset_blink_phase(&mut self) {
+        self.last_blink_reset = Instant::now();
+    }
+
+    /// True si hay algo que parpadea en la vista actual: el cursor (cuando esta
+    /// visible, sin scrollback y fuera de copy mode) o alguna celda con SGR 5.
+    /// Lo consulta el hilo timer para decidir si enviar `RedrawNeeded`.
+    // ponytail: escaneo del grid activo; barato a 265ms de periodo. Marcar en
+    // el parser si medidor de perf indica que el escaneo por tick domina.
+    pub fn has_blink_stuff(&self) -> bool {
+        let cursor_blink = self.cursor_blink_enabled
+            && self.cursor_visible
+            && self.scrollback_offset == 0
+            && self.copy_mode.is_none();
+        if cursor_blink {
+            return true;
+        }
+        if self.blink_interval_ms == 0 {
+            return false;
+        }
+        let grid = self.active_grid();
+        for row in &grid.rows {
+            for cell in row {
+                if cell.attrs.blink {
+                    return true;
+                }
+            }
+        }
+        false
     }
     pub fn take_active_grid_damage(&mut self) -> crate::grid::DamageSnapshot {
         self.active_grid_mut().take_damage()

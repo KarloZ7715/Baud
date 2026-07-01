@@ -408,6 +408,7 @@ impl App {
             if guard.copy_mode.is_none() {
                 guard.clear_selection();
             }
+            guard.reset_blink_phase();
         }
         tracing::debug!("send_input: {} bytes: {:02x?}", bytes.len(), bytes);
         if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {

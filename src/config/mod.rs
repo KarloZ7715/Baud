@@ -576,6 +576,8 @@ impl Config {
             let (r, g, b) = parse_hex(color);
             term.cursor_color_override = Some((r, g, b));
         }
+        term.cursor_blink_enabled = self.cursor.blink;
+        term.blink_interval_ms = self.cursor.blink_interval_ms;
     }
 
     /// Carga la configuración desde disco o devuelve los valores por defecto.

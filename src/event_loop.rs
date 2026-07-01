@@ -244,6 +244,43 @@ fn read_master_available(
     }
 }
 
+/// Lanza el hilo timer de parpadeo.
+///
+/// Cada `blink_interval/2` consulta `Term::has_blink_stuff`; si hay cursor o
+/// celdas SGR 5 que parpadean, marca el term dirty y envia `RedrawNeeded` por
+/// el proxy. cuando el parpadeo esta desactivado (`blink_interval_ms == 0` o
+/// nada que parpadear), el hilo duerme sin enviar eventos.
+// ponytail: hilo detached; muere al salir del proceso. stop flag si se quiere
+// shutdown explicito, hoy sobra para una app interactiva.
+fn spawn_blink_timer(term: Arc<Mutex<Term>>, proxy: winit::event_loop::EventLoopProxy<UserEvent>) {
+    thread::spawn(move || loop {
+        let interval_ms = match term.lock() {
+            Ok(g) => g.blink_interval_ms,
+            Err(_) => return,
+        };
+        if interval_ms == 0 {
+            thread::sleep(Duration::from_secs(1));
+            continue;
+        }
+        let interval = Duration::from_millis(interval_ms);
+        thread::sleep(interval / 2);
+        let blinking = match term.lock() {
+            Ok(mut g) => {
+                if g.has_blink_stuff() {
+                    g.mark_dirty();
+                    true
+                } else {
+                    false
+                }
+            }
+            Err(_) => return,
+        };
+        if blinking {
+            let _ = proxy.send_event(UserEvent::RedrawNeeded);
+        }
+    });
+}
+
 fn handle_non_output_pty_event(
     event: PtyEvent,
     proxy_slot: &Arc<Mutex<Option<winit::event_loop::EventLoopProxy<UserEvent>>>>,
@@ -359,6 +396,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     total_bytes += bytes.len();
                 }
                 term_guard.mark_dirty();
+                term_guard.reset_blink_phase();
                 let response = term_guard.take_pty_response();
                 let title = term_guard.take_title_if_dirty();
                 let clipboard_pending = term_guard.take_clipboard_read_pending();
@@ -400,7 +438,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     *proxy_for_drain
         .lock()
-        .expect("proxy mutex poisoned al setear") = Some(proxy);
+        .expect("proxy mutex poisoned al setear") = Some(proxy.clone());
+
+    spawn_blink_timer(Arc::clone(&term), proxy);
 
     let pty_tx = Arc::new(Mutex::new(Some(cmd_sender)));
 
