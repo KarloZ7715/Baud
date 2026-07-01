@@ -46,10 +46,14 @@ pub fn line_quad(
     let row_top = row as f32 * metrics.cell_h + metrics.padding_y;
     let col_left = col as f32 * metrics.cell_w + metrics.padding_x;
     let (top, height) = match kind {
-        LineKind::Under => (
-            row_top + metrics.baseline_y + 1.0,
-            line_height_for_style(style),
-        ),
+        LineKind::Under => {
+            let h = if style == UnderlineStyle::Double {
+                line_height_for_style(style)
+            } else {
+                metrics.underline_thickness.max(1.0)
+            };
+            (row_top + metrics.baseline_y + metrics.underline_position, h)
+        }
         LineKind::Strike => (row_top + metrics.cell_h * 0.5, 1.0),
         LineKind::Over => (row_top + 1.0, 1.0),
     };
@@ -60,7 +64,7 @@ pub fn line_quad(
         width: metrics.cell_w * width_cells as f32,
         height,
         color: Some(color),
-        snap_to_physical_pixel: true,
+        snap_to_physical_pixel: false,
         metadata: 0,
     }
 }
@@ -220,12 +224,17 @@ pub fn rasterize_line_mask(width: u16, height: u16, id: u16) -> Option<Vec<u8>> 
 mod tests {
     use super::*;
 
+    use super::super::geometry::CellGeometry;
+
     fn test_metrics() -> CellMetrics {
         CellMetrics {
+            geometry: CellGeometry::from_u32(10, 20),
             cell_w: 10.0,
             cell_h: 20.0,
             font_size: 14.0,
             baseline_y: 16.0,
+            underline_position: 1.0,
+            underline_thickness: 1.0,
             glyph_offset_x: 0.0,
             glyph_offset_y: 2.0,
             padding_x: 0.0,

@@ -5,21 +5,23 @@ use glyphon::{
     TextBounds, TextRenderer,
 };
 
-use super::boxdraw;
+use super::builtin;
 use super::decorations::{
     cursor_anchor_offset, line_quad, rasterize_line_mask, LINE_CURLY_GLYPH_ID,
     LINE_DASHED_GLYPH_ID, LINE_DOTTED_GLYPH_ID, LINE_DOUBLE_GLYPH_ID, SOLID_MASK_GLYPH_ID,
 };
 use super::display_list::{resolve_fg_glyphon, CursorGlyph, DisplayList, LineQuad, TextGlyph};
+use super::geometry::cell_origin;
 use super::glyph_cache::GlyphCache;
 use super::limits::{self, MAX_CUSTOM_GLYPH_PIXELS};
 use super::metrics::CellMetrics;
 use super::palette::Palette;
 use super::selection_fg_glyphon;
 use super::BOX_GLYPH_ID_BASE;
+use super::BOX_GLYPH_ID_COUNT;
 
 fn line_quad_to_custom(line: &LineQuad, metrics: &CellMetrics) -> CustomGlyph {
-    line_quad(
+    let mut glyph = line_quad(
         line.row,
         line.col,
         line.width_cells,
@@ -27,7 +29,10 @@ fn line_quad_to_custom(line: &LineQuad, metrics: &CellMetrics) -> CustomGlyph {
         line.style,
         metrics,
         line.color,
-    )
+    );
+    glyph.metadata = LAYER_DECORATION;
+    glyph.snap_to_physical_pixel = true;
+    glyph
 }
 
 /// Convierte una display list en `CustomGlyph` y prepara el frame.
@@ -73,12 +78,9 @@ impl CellRenderer {
             glyphon::Color::rgb(r, g, b)
         };
         for &(row, col) in &display_list.cursor_bars {
-            out.push(super::decorations::bar_quad(
-                row,
-                col,
-                metrics,
-                cursor_color,
-            ));
+            let mut bar = super::decorations::bar_quad(row, col, metrics, cursor_color);
+            bar.metadata = LAYER_DECORATION;
+            out.push(bar);
         }
 
         for text in &display_list.text_glyphs {
@@ -99,7 +101,7 @@ impl CellRenderer {
         }
 
         if let Some(cursor) = &display_list.cursor {
-            if let Some(glyph) = cursor_glyph_to_custom(
+            if let Some(mut glyph) = cursor_glyph_to_custom(
                 cursor,
                 metrics,
                 palette,
@@ -108,9 +110,12 @@ impl CellRenderer {
                 font_system,
                 swash_cache,
             )? {
+                glyph.metadata = LAYER_TEXT;
                 out.push(glyph);
             }
         }
+
+        out.sort_by_key(|g| g.metadata);
 
         Ok(())
     }
@@ -172,23 +177,33 @@ impl CellRenderer {
 }
 
 fn bg_quad_to_custom(bg: &super::display_list::BgQuad, metrics: &CellMetrics) -> CustomGlyph {
-    let width = limits::clamp_custom_dimension(
-        metrics.cell_w * bg.width_cells.min(2) as f32,
-        metrics.cell_w,
-        2,
+    let gw = metrics.geometry.cell_w as f32;
+    let gh = metrics.geometry.cell_h as f32;
+    let width = limits::clamp_custom_dimension(gw * bg.width_cells.min(2) as f32, gw, 2);
+    let height = limits::clamp_custom_dimension(gh, gh, 1);
+    let (left, top) = cell_origin(
+        bg.row,
+        bg.col,
+        metrics.geometry,
+        metrics.padding_x,
+        metrics.padding_y,
     );
-    let height = limits::clamp_custom_dimension(metrics.cell_h, metrics.cell_h, 1);
     CustomGlyph {
         id: SOLID_MASK_GLYPH_ID,
-        left: bg.col as f32 * metrics.cell_w + metrics.padding_x,
-        top: bg.row as f32 * metrics.cell_h + metrics.padding_y,
+        left,
+        top,
         width,
         height,
         color: Some(bg.color),
         snap_to_physical_pixel: true,
-        metadata: 0,
+        metadata: LAYER_BG,
     }
 }
+
+/// Capa de dibujo para ordenar custom glyphs (mayor = encima).
+const LAYER_BG: usize = 0;
+const LAYER_DECORATION: usize = 1;
+const LAYER_TEXT: usize = 2;
 
 #[expect(
     clippy::too_many_arguments,
@@ -207,12 +222,10 @@ fn text_glyph_to_custom(
     if text.box_glyph {
         let ch = text.glyph_key.ch as u32;
         let id = BOX_GLYPH_ID_BASE + (ch - 0x2500) as u16;
-        let width = limits::clamp_custom_dimension(
-            metrics.cell_w * text.width_cells.min(2) as f32,
-            metrics.cell_w,
-            2,
-        );
-        let height = limits::clamp_custom_dimension(metrics.cell_h, metrics.cell_h, 1);
+        let gw = metrics.geometry.cell_w as f32;
+        let gh = metrics.geometry.cell_h as f32;
+        let width = limits::clamp_custom_dimension(gw * text.width_cells.min(2) as f32, gw, 2);
+        let height = limits::clamp_custom_dimension(gh, gh, 1);
         if limits::custom_pixels(width, height) > MAX_CUSTOM_GLYPH_PIXELS {
             return Ok(None);
         }
@@ -221,15 +234,23 @@ fn text_glyph_to_custom(
         } else {
             resolve_fg_glyphon(text.fg, text.dim, text.bold, palette, dim_alpha)
         };
+        // Relleno de celda: mismo anclaje que bg_quads (padding), no glyph_offset de texto.
+        let (left, top) = cell_origin(
+            text.row,
+            text.col,
+            metrics.geometry,
+            metrics.padding_x,
+            metrics.padding_y,
+        );
         return Ok(Some(CustomGlyph {
             id,
-            left: text.col as f32 * metrics.cell_w + metrics.padding_x,
-            top: text.row as f32 * metrics.cell_h + metrics.padding_y,
+            left,
+            top,
             width,
             height,
             color: Some(fg_color),
             snap_to_physical_pixel: true,
-            metadata: 0,
+            metadata: LAYER_TEXT,
         }));
     }
 
@@ -284,7 +305,7 @@ fn text_glyph_to_custom(
         height,
         color: glyph_color,
         snap_to_physical_pixel: true,
-        metadata: 0,
+        metadata: LAYER_TEXT,
     }))
 }
 
@@ -348,9 +369,9 @@ fn rasterize_custom_glyph(
     request: RasterizeCustomGlyphRequest,
     glyph_cache: &GlyphCache,
 ) -> Option<RasterizedCustomGlyph> {
-    if (BOX_GLYPH_ID_BASE..BOX_GLYPH_ID_BASE + 0xA0).contains(&request.id) {
+    if (BOX_GLYPH_ID_BASE..BOX_GLYPH_ID_BASE + BOX_GLYPH_ID_COUNT).contains(&request.id) {
         let ch = char::from_u32(0x2500 + (request.id - BOX_GLYPH_ID_BASE) as u32)?;
-        let data = boxdraw::box_mask(ch, request.width as usize, request.height as usize)?;
+        let data = builtin::render(ch, u32::from(request.width), u32::from(request.height))?;
         return Some(RasterizedCustomGlyph {
             data,
             content_type: ContentType::Mask,
@@ -456,7 +477,7 @@ mod tests {
     #[test]
     fn rasterize_box_glyph_usa_box_mask() {
         let request = RasterizeCustomGlyphRequest {
-            id: super::BOX_GLYPH_ID_BASE,
+            id: BOX_GLYPH_ID_BASE,
             width: 10,
             height: 20,
             x_bin: glyphon::SubpixelBin::Zero,
@@ -471,12 +492,95 @@ mod tests {
     }
 
     #[test]
-    fn bg_quad_uses_solid_glyph_id() {
+    fn rasterize_box_id_roundtrip_junction() {
+        let ch = '\u{253C}';
+        let id = BOX_GLYPH_ID_BASE + (ch as u32 - 0x2500) as u16;
+        let request = RasterizeCustomGlyphRequest {
+            id,
+            width: 12,
+            height: 24,
+            x_bin: glyphon::SubpixelBin::Zero,
+            y_bin: glyphon::SubpixelBin::Zero,
+            scale: 1.0,
+        };
+        let out = rasterize_custom_glyph(request, &GlyphCache::new()).expect("junction");
+        assert_eq!(out.data.len(), 12 * 24);
+        assert!(out.data[12 * 12 + 6] > 0);
+    }
+
+    #[test]
+    fn text_glyph_to_custom_box_sin_glyph_cache() {
+        let (mut font_system, _) = test_metrics();
+        let mut swash_cache = glyphon::SwashCache::new();
+        let font_config = FontConfig::default();
+        let mut cache = GlyphCache::new();
+        let theme = crate::config::ThemeConfig::default();
+        let palette = Palette::from_theme(&theme);
         let metrics = CellMetrics {
+            geometry: super::super::geometry::CellGeometry::from_u32(10, 20),
             cell_w: 10.0,
             cell_h: 20.0,
             font_size: 14.0,
             baseline_y: 14.0,
+            underline_position: 1.0,
+            underline_thickness: 1.0,
+            glyph_offset_x: 4.0,
+            glyph_offset_y: 2.0,
+            padding_x: 2.0,
+            padding_y: 3.0,
+        };
+        let ch = '\u{250C}';
+        let text = TextGlyph {
+            row: 2,
+            col: 1,
+            width_cells: 1,
+            glyph_key: GlyphKey {
+                ch,
+                bold: false,
+                italic: false,
+                dim: false,
+                family: font_config.family.clone(),
+            },
+            fg: Color::Green,
+            bold: false,
+            dim: false,
+            custom_id: 0,
+            selected: false,
+            box_glyph: true,
+        };
+
+        let cg = text_glyph_to_custom(
+            &text,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &font_config.family,
+            &mut cache,
+            &mut font_system,
+            &mut swash_cache,
+        )
+        .expect("ok")
+        .expect("box glyph");
+
+        assert!(cache.is_empty(), "box_glyph no debe insertar en GlyphCache");
+        assert_eq!(cg.id, BOX_GLYPH_ID_BASE + (ch as u32 - 0x2500) as u16);
+        assert_eq!(cg.width, 10.0);
+        assert_eq!(cg.height, 20.0);
+        assert_eq!(cg.left, 12.0);
+        assert_eq!(cg.top, 43.0);
+        assert!(cg.color.is_some());
+    }
+
+    #[test]
+    fn bg_quad_uses_solid_glyph_id() {
+        let metrics = CellMetrics {
+            geometry: super::super::geometry::CellGeometry::from_u32(10, 20),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            font_size: 14.0,
+            baseline_y: 14.0,
+            underline_position: 1.0,
+            underline_thickness: 1.0,
             glyph_offset_x: 0.0,
             glyph_offset_y: 0.0,
             padding_x: 0.0,

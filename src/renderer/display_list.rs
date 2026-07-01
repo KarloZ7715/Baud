@@ -129,9 +129,9 @@ pub fn resolve_fg_glyphon(
     }
 }
 
-fn resolve_bg_glyphon(bg: Color, palette: &Palette<'_>) -> glyphon::Color {
+fn resolve_bg_glyphon(bg: Color, palette: &Palette<'_>, bg_alpha: u8) -> glyphon::Color {
     let (r, g, b) = palette.bg_rgb(bg);
-    glyphon::Color::rgba(r, g, b, 255)
+    glyphon::Color::rgba(r, g, b, bg_alpha)
 }
 
 fn effective_underline_style(cell: &Cell) -> UnderlineStyle {
@@ -184,6 +184,7 @@ impl DisplayListBuilder {
         font_family: &str,
         damage: &DamageSnapshot,
         show_scrollback: bool,
+        builtin_box_drawing: bool,
     ) {
         if damage.is_full() {
             for row in 0..rows {
@@ -198,6 +199,7 @@ impl DisplayListBuilder {
                     row,
                     font_family,
                     show_scrollback,
+                    builtin_box_drawing,
                 );
             }
         } else {
@@ -217,6 +219,7 @@ impl DisplayListBuilder {
                     row,
                     font_family,
                     show_scrollback,
+                    builtin_box_drawing,
                 );
             }
         }
@@ -308,6 +311,7 @@ impl DisplayListBuilder {
         row: usize,
         font_family: &str,
         show_scrollback: bool,
+        builtin_box_drawing: bool,
     ) {
         let source_row = row_sources.get(row).copied().unwrap_or(&[]);
         let cursor_on_row = !show_scrollback
@@ -344,6 +348,8 @@ impl DisplayListBuilder {
                 std::mem::swap(&mut fg, &mut bg);
             }
 
+            let box_glyph = builtin_box_drawing && super::builtin::supports(cell.ch);
+
             if is_sel {
                 list.bg_quads.push(BgQuad {
                     row,
@@ -363,9 +369,16 @@ impl DisplayListBuilder {
                     row,
                     col,
                     width_cells: cell.width.max(1),
-                    color: resolve_bg_glyphon(bg, palette),
+                    color: resolve_bg_glyphon(bg, palette, 255),
                 });
             }
+            // Sin fondo explicito (Color::Default): no se pinta ningun bg_quad,
+            // ni siquiera para box-drawing/block elements. Igual que las letras
+            // normales, dejan ver el clear color (translucido si window.opacity
+            // < 1). Una version anterior le daba a estas celdas un "backing"
+            // propio a la misma opacidad de la ventana, pero al apilarse sobre
+            // el clear color ya translucido, el resultado se veia opaco: un
+            // recuadro negro solido justo donde habia box-drawing.
 
             if is_cursor && matches!(term.cursor_style, CursorStyle::Underline) {
                 list.line_quads.push(LineQuad {
@@ -425,8 +438,6 @@ impl DisplayListBuilder {
             } else {
                 fg
             };
-
-            let box_glyph = super::boxdraw::is_box_mask_supported(cell.ch);
 
             let Some(glyph_key) = resolve_glyph_key(source_row, col, font_family) else {
                 if is_cursor && cell.ch == ' ' {
@@ -532,6 +543,7 @@ mod tests {
             family,
             &DamageSnapshot::Full,
             false,
+            true,
         );
         list
     }
@@ -546,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn doble_linea_usa_fallback_a_fuente() {
+    fn doble_linea_usa_box_glyph() {
         let theme = ThemeConfig::default();
         let metrics = test_metrics();
         let family = FontConfig::default().family;
@@ -558,7 +570,7 @@ mod tests {
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
 
         assert_eq!(list.text_glyphs.len(), 1);
-        assert!(!list.text_glyphs[0].box_glyph);
+        assert!(list.text_glyphs[0].box_glyph);
     }
 
     #[test]
@@ -593,6 +605,24 @@ mod tests {
             assert_eq!(glyph.row, 0);
             assert_eq!(glyph.width_cells, 1);
         }
+    }
+
+    #[test]
+    fn box_drawing_con_fondo_por_defecto_no_emite_bg_quad() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let row = row_with_box_top();
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let mut term = Term::default();
+        term.cursor_visible = false;
+
+        let list = build_full(&term, &metrics, &theme, &row_sources, 4, 1, &family);
+
+        assert!(
+            list.bg_quads.is_empty(),
+            "box-drawing con bg por defecto no deberia generar bg_quad"
+        );
     }
 
     #[test]
@@ -829,6 +859,7 @@ mod tests {
             &family,
             &DamageSnapshot::Full,
             false,
+            true,
         );
         let full_glyphs = list.text_glyphs.len();
         assert_eq!(full_glyphs, 8);
@@ -850,6 +881,7 @@ mod tests {
             &family,
             &snap,
             false,
+            true,
         );
 
         assert_eq!(list.text_glyphs.len(), full_glyphs);

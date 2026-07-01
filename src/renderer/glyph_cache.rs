@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requiere Nerd Font instalada (no disponible en CI)"]
+    #[ignore = "requiere Nerd Font instalada (no disponible en CI); box_glyph activo usa box_mask, no GlyphCache"]
     fn box_drawing_and_nerd_icons_rasterize() {
         let mut font_system = create_font_system();
         let mut swash_cache = SwashCache::new();

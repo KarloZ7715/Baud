@@ -1,15 +1,20 @@
 use baud::ansi::Term;
 use baud::config::ThemeConfig;
 use baud::grid::{Cell, DamageSnapshot, Grid};
-use baud::renderer::{CellMetrics, DisplayList, DisplayListBuilder, Palette};
+use baud::renderer::{
+    clear_builtin_cache, CellGeometry, CellMetrics, DisplayList, DisplayListBuilder, Palette,
+};
 use criterion::{criterion_group, criterion_main, Criterion};
 
 fn dummy_metrics() -> CellMetrics {
     CellMetrics {
+        geometry: CellGeometry::from_u32(10, 20),
         cell_w: 10.0,
         cell_h: 20.0,
         font_size: 14.0,
         baseline_y: 14.0,
+        underline_position: 1.0,
+        underline_thickness: 1.0,
         glyph_offset_x: 0.0,
         glyph_offset_y: 0.0,
         padding_x: 0.0,
@@ -101,10 +106,20 @@ fn bench_display_list_build(c: &mut Criterion) {
                     &family,
                     &DamageSnapshot::Full,
                     false,
+                    true,
                 );
             });
         });
     }
+}
+
+fn bench_builtin_render_cached(c: &mut Criterion) {
+    clear_builtin_cache();
+    c.bench_function("builtin_render_cached", |b| {
+        b.iter(|| {
+            let _ = baud::renderer::box_mask('\u{2502}', 10, 20);
+        });
+    });
 }
 
 criterion_group!(
@@ -112,6 +127,7 @@ criterion_group!(
     bench_scroll_push,
     bench_scroll_pop,
     bench_reflow,
-    bench_display_list_build
+    bench_display_list_build,
+    bench_builtin_render_cached
 );
 criterion_main!(benches);

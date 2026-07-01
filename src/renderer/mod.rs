@@ -1,9 +1,10 @@
 //! Modulo de render GPU del grid dinamico.
 
-mod boxdraw;
+mod builtin;
 mod cell_renderer;
 mod decorations;
 mod display_list;
+mod geometry;
 mod glyph;
 mod glyph_cache;
 pub mod limits;
@@ -15,6 +16,8 @@ pub use palette::{ColorOverrides, Palette};
 
 /// Base de ids reservados para box/block glyphs programaticos (sobre ids de cache).
 pub const BOX_GLYPH_ID_BASE: u16 = 0xF000;
+/// Slots reservados: cubre U+2500..=U+259F (box-drawing + block elements).
+pub const BOX_GLYPH_ID_COUNT: u16 = 0xA0;
 
 use limits::{custom_pixels, MAX_CUSTOM_GLYPH_PIXELS};
 
@@ -50,8 +53,13 @@ fn debug_assert_custom_glyphs_bounded(custom_glyphs: &[glyphon::CustomGlyph]) {
     }
 }
 
+pub use builtin::{
+    box_mask, clear_cache as clear_builtin_cache, is_box_glyph, is_box_mask_supported,
+    render_uncached as render_builtin_uncached, supports as supports_builtin_glyph,
+};
 pub use cell_renderer::CellRenderer;
 pub use display_list::{DisplayList, DisplayListBuilder};
+pub use geometry::CellGeometry;
 pub use glyph::{is_wide_continuation, resolve_glyph_key, shape_glyph, GlyphKey, ShapedGlyph};
 pub use glyph_cache::{CachedGlyph, CachedRaster, GlyphCache};
 pub use metrics::CellMetrics;
@@ -112,6 +120,7 @@ pub struct Renderer {
     display_list: DisplayList,
     line_height: f32,
     glyph_offset: GlyphOffset,
+    builtin_box_drawing: bool,
 }
 
 impl Renderer {
@@ -179,6 +188,7 @@ impl Renderer {
         let font_family = font_config.family.clone();
         let line_height = font_config.line_height;
         let glyph_offset = font_config.glyph_offset;
+        let builtin_box_drawing = font_config.builtin_box_drawing;
 
         let cell_metrics = CellMetrics::measure(
             &mut font_system,
@@ -223,6 +233,7 @@ impl Renderer {
             display_list: DisplayList::default(),
             line_height,
             glyph_offset,
+            builtin_box_drawing,
         }
     }
 
@@ -268,6 +279,7 @@ impl Renderer {
     /// Invalida caches GPU tras cambio de metricas (resize).
     fn reset_glyph_pipeline(&mut self) {
         self.glyph_cache.clear();
+        builtin::clear_cache();
         self.swash_cache = glyphon::SwashCache::new();
         self.display_list.clear();
         self.atlas = glyphon::TextAtlas::new(
@@ -497,6 +509,7 @@ impl Renderer {
             &self.font_family,
             &damage,
             show_scrollback,
+            self.builtin_box_drawing,
         );
 
         let mut custom_glyphs = Vec::new();
@@ -1194,7 +1207,6 @@ mod tests {
                 let default_cell = Cell::default();
                 let cell = source_row.get(col).unwrap_or(&default_cell);
                 if cell.attrs.bg != Color::Default {
-                    // Sin seleccion activa en este test => effective_bg = cell.attrs.bg
                     let bg_color = color_to_glyphon_bg(cell.attrs.bg, &theme);
                     bg_quads.push(glyphon::CustomGlyph {
                         id: 0,
@@ -1215,7 +1227,6 @@ mod tests {
             }
         }
 
-        // Deben generarse 3 quads: (0,0), (0,2), (1,1)
         assert_eq!(bg_quads.len(), 3, "3 celdas con bg != Default => 3 quads");
 
         // Quad 0: fila 0, col 0 -> bg=Red
@@ -1250,7 +1261,7 @@ mod tests {
             "Quad2.color = Green"
         );
 
-        // Verificar que todos tienen snap_to_physical_pixel=true y metadata=0
+        // Verificar metadata e id de fondo solido
         for (i, q) in bg_quads.iter().enumerate() {
             assert!(q.snap_to_physical_pixel, "Quad{i}: snap enabled");
             assert_eq!(q.metadata, 0, "Quad{i}: metadata=0");

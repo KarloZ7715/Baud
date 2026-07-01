@@ -4,21 +4,26 @@ use glyphon::cosmic_text::{FontSystem, Hinting, Metrics, Shaping};
 
 use crate::config::GlyphOffset;
 
+use super::geometry::CellGeometry;
 use super::resolve_family;
 
 /// Dimensiones y offsets de una celda de grid en pixeles.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CellMetrics {
+    /// Geometria entera de celda (fuente de verdad para builtins).
+    pub geometry: CellGeometry,
     pub cell_w: f32,
     pub cell_h: f32,
     pub font_size: f32,
     /// Y de la baseline respecto al borde superior de la celda.
     pub baseline_y: f32,
+    /// Posicion del subrayado respecto a la baseline (px).
+    pub underline_position: f32,
+    /// Grosor del subrayado (px).
+    pub underline_thickness: f32,
     pub glyph_offset_x: f32,
     pub glyph_offset_y: f32,
-    /// Margen interior izquierdo del área de celdas (px).
     pub padding_x: f32,
-    /// Margen interior superior del área de celdas (px).
     pub padding_y: f32,
 }
 
@@ -31,16 +36,24 @@ impl CellMetrics {
         line_height: f32,
         glyph_offset: GlyphOffset,
     ) -> Self {
-        let cell_h = font_size * line_height;
-        let metrics = Metrics::new(font_size, cell_h);
-        let cell_w = measure_cell_width(font_system, metrics, family, font_size);
+        let cell_h_f = font_size * line_height;
+        let metrics = Metrics::new(font_size, cell_h_f);
+        let cell_w_f = measure_cell_width(font_system, metrics, family, font_size);
+        let geometry = CellGeometry::new(cell_w_f, cell_h_f);
+        let cell_w = geometry.cell_w as f32;
+        let cell_h = geometry.cell_h as f32;
         let baseline_y = measure_baseline_y(font_system, metrics, family, cell_w, cell_h);
+        let (underline_position, underline_thickness) =
+            measure_underline_metrics(font_system, family, font_size);
 
         Self {
-            cell_w: sanitize_cell_metric(cell_w, font_size, line_height, true),
-            cell_h: sanitize_cell_metric(cell_h, font_size, line_height, false),
+            geometry,
+            cell_w,
+            cell_h,
             font_size,
             baseline_y,
+            underline_position,
+            underline_thickness,
             glyph_offset_x: glyph_offset.x,
             glyph_offset_y: glyph_offset.y,
             padding_x: 0.0,
@@ -49,18 +62,16 @@ impl CellMetrics {
     }
 }
 
-/// Evita metricas degeneradas (NaN/0) que colapsan el grid a pocos pixeles.
-fn sanitize_cell_metric(value: f32, font_size: f32, line_height: f32, is_width: bool) -> f32 {
-    let fallback = if is_width {
-        font_size * 0.6
-    } else {
-        font_size * line_height
-    };
-    if value.is_finite() && (1.0..=256.0).contains(&value) {
-        value
-    } else {
-        fallback
-    }
+fn measure_underline_metrics(
+    font_system: &mut FontSystem,
+    family: &str,
+    font_size: f32,
+) -> (f32, f32) {
+    // Aproximacion tipografica estandar cuando fontdb no expone underline directamente.
+    let position = (font_size * 0.1).max(1.0);
+    let thickness = (font_size * 0.05).max(1.0);
+    let _ = (font_system, family);
+    (position, thickness)
 }
 
 /// Mide `cell_w` con `monospace_width` activo (avance real entre columnas).
@@ -119,4 +130,26 @@ fn measure_baseline_y(
         .next()
         .map(|run| run.line_y)
         .unwrap_or(metrics.font_size)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::FontConfig;
+    use crate::renderer::terminal_fallback::create_font_system;
+
+    #[test]
+    fn cell_geometry_is_integer_floor() {
+        let mut fs = create_font_system();
+        let fc = FontConfig::default();
+        let m = CellMetrics::measure(
+            &mut fs,
+            &fc.family,
+            fc.size as f32,
+            fc.line_height,
+            fc.glyph_offset,
+        );
+        assert_eq!(m.geometry.cell_w, m.cell_w.floor() as u32);
+        assert_eq!(m.geometry.cell_h, m.cell_h.floor() as u32);
+    }
 }

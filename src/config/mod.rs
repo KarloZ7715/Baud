@@ -142,6 +142,9 @@ pub struct FontConfig {
     pub glyph_offset: GlyphOffset,
     #[serde(default = "default_line_height")]
     pub line_height: f32,
+    /// Dibujar U+2500..U+259F programaticamente. Si false, usa fuente.
+    #[serde(default = "default_true")]
+    pub builtin_box_drawing: bool,
     /// Familias de fallback en orden de preferencia (emoji, CJK, símbolos).
     #[serde(default)]
     pub fallback: Vec<String>,
@@ -310,6 +313,7 @@ impl Default for FontConfig {
             size: default_font_size(),
             glyph_offset: default_glyph_offset(),
             line_height: default_line_height(),
+            builtin_box_drawing: true,
             fallback: Vec::new(),
         }
     }
