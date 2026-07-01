@@ -300,7 +300,7 @@ impl DisplayListBuilder {
     fn build_row(
         list: &mut DisplayList,
         term: &Term,
-        metrics: &CellMetrics,
+        _metrics: &CellMetrics,
         palette: &Palette<'_>,
         dim_alpha: bool,
         row_sources: &[&[Cell]],
@@ -426,10 +426,7 @@ impl DisplayListBuilder {
                 fg
             };
 
-            let cell_w = metrics.cell_w.max(1.0) as usize;
-            let cell_h = metrics.cell_h.max(1.0) as usize;
-            let box_glyph = super::boxdraw::is_box_glyph(cell.ch)
-                && super::boxdraw::box_mask(cell.ch, cell_w, cell_h).is_some();
+            let box_glyph = super::boxdraw::is_box_mask_supported(cell.ch);
 
             let Some(glyph_key) = resolve_glyph_key(source_row, col, font_family) else {
                 if is_cursor && cell.ch == ' ' {
@@ -546,6 +543,22 @@ mod tests {
             row[col].ch = *ch;
         }
         row
+    }
+
+    #[test]
+    fn doble_linea_usa_fallback_a_fuente() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 1];
+        row[0].ch = '\u{2550}';
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let term = Term::default();
+
+        let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
+
+        assert_eq!(list.text_glyphs.len(), 1);
+        assert!(!list.text_glyphs[0].box_glyph);
     }
 
     #[test]

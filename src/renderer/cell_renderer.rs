@@ -454,6 +454,23 @@ mod tests {
     }
 
     #[test]
+    fn rasterize_box_glyph_usa_box_mask() {
+        let request = RasterizeCustomGlyphRequest {
+            id: super::BOX_GLYPH_ID_BASE,
+            width: 10,
+            height: 20,
+            x_bin: glyphon::SubpixelBin::Zero,
+            y_bin: glyphon::SubpixelBin::Zero,
+            scale: 1.0,
+        };
+        let cache = GlyphCache::new();
+        let out = rasterize_custom_glyph(request, &cache).expect("box glyph");
+        assert_eq!(out.content_type, ContentType::Mask);
+        assert_eq!(out.data.len(), 200);
+        assert!(out.data[100] > 0);
+    }
+
+    #[test]
     fn bg_quad_uses_solid_glyph_id() {
         let metrics = CellMetrics {
             cell_w: 10.0,

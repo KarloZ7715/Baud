@@ -5,6 +5,20 @@ pub fn is_box_glyph(ch: char) -> bool {
     matches!(ch as u32, 0x2500..=0x259F)
 }
 
+/// True si box_mask puede rasterizar el caracter (sin recurrir a fuente).
+pub fn is_box_mask_supported(ch: char) -> bool {
+    if !is_box_glyph(ch) {
+        return false;
+    }
+    matches!(
+        ch,
+        '\u{2500}' | '\u{2502}' | '\u{250C}' | '\u{2510}' | '\u{2514}' | '\u{2518}'
+            | '\u{251C}' | '\u{2524}' | '\u{252C}' | '\u{2534}' | '\u{253C}' | '\u{2588}'
+            | '\u{2580}' | '\u{2584}' | '\u{258C}' | '\u{2590}' | '\u{2591}' | '\u{2592}'
+            | '\u{2593}' | '\u{2581}'..='\u{2587}' | '\u{2589}'..='\u{258F}'
+    )
+}
+
 /// Grosor de linea en pixeles (al menos 1, ~1/8 de la celda).
 fn stroke(w: usize, h: usize) -> usize {
     (w.min(h) / 8).max(1)
@@ -21,7 +35,7 @@ fn fill(mask: &mut [u8], w: usize, x0: usize, y0: usize, x1: usize, y1: usize) {
 
 /// Mascara alpha para un box/block char. None = no soportado (usar fuente).
 pub fn box_mask(ch: char, w: usize, h: usize) -> Option<Vec<u8>> {
-    if w == 0 || h == 0 {
+    if w == 0 || h == 0 || !is_box_mask_supported(ch) {
         return None;
     }
     let mut m = vec![0u8; w * h];
