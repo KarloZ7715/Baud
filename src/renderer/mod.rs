@@ -1,5 +1,6 @@
 //! Modulo de render GPU del grid dinamico.
 
+mod blink;
 mod builtin;
 mod cell_renderer;
 mod decorations;
@@ -12,6 +13,7 @@ mod metrics;
 mod palette;
 mod terminal_fallback;
 
+pub use blink::blink_on;
 pub use palette::{ColorOverrides, Palette};
 
 /// Base de ids reservados para box/block glyphs programaticos (sobre ids de cache).
