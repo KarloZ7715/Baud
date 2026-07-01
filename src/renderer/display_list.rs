@@ -61,6 +61,8 @@ pub struct TextGlyph {
     pub dim: bool,
     pub custom_id: u16,
     pub selected: bool,
+    /// True si se rasteriza con box_mask en vez de fuente.
+    pub box_glyph: bool,
 }
 
 /// Lista de primitivas a pintar para un frame.
@@ -188,6 +190,7 @@ impl DisplayListBuilder {
                 Self::build_row(
                     list,
                     term,
+                    metrics,
                     palette,
                     dim_alpha,
                     row_sources,
@@ -206,6 +209,7 @@ impl DisplayListBuilder {
                 Self::build_row(
                     list,
                     term,
+                    metrics,
                     palette,
                     dim_alpha,
                     row_sources,
@@ -296,6 +300,7 @@ impl DisplayListBuilder {
     fn build_row(
         list: &mut DisplayList,
         term: &Term,
+        metrics: &CellMetrics,
         palette: &Palette<'_>,
         dim_alpha: bool,
         row_sources: &[&[Cell]],
@@ -421,6 +426,11 @@ impl DisplayListBuilder {
                 fg
             };
 
+            let cell_w = metrics.cell_w.max(1.0) as usize;
+            let cell_h = metrics.cell_h.max(1.0) as usize;
+            let box_glyph = super::boxdraw::is_box_glyph(cell.ch)
+                && super::boxdraw::box_mask(cell.ch, cell_w, cell_h).is_some();
+
             let Some(glyph_key) = resolve_glyph_key(source_row, col, font_family) else {
                 if is_cursor && cell.ch == ' ' {
                     let mut space_key = GlyphKey {
@@ -443,6 +453,7 @@ impl DisplayListBuilder {
                         dim: cell.attrs.dim,
                         custom_id: 0,
                         selected: is_sel,
+                        box_glyph: false,
                     });
                 }
                 continue;
@@ -458,6 +469,7 @@ impl DisplayListBuilder {
                 dim: cell.attrs.dim,
                 custom_id: 0,
                 selected: is_sel,
+                box_glyph,
             });
         }
     }
@@ -534,6 +546,21 @@ mod tests {
             row[col].ch = *ch;
         }
         row
+    }
+
+    #[test]
+    fn box_drawing_row_marca_box_glyph() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let row = row_with_box_top();
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let term = Term::default();
+
+        let list = build_full(&term, &metrics, &theme, &row_sources, 4, 1, &family);
+
+        assert_eq!(list.text_glyphs.len(), 4);
+        assert!(list.text_glyphs.iter().all(|g| g.box_glyph));
     }
 
     #[test]

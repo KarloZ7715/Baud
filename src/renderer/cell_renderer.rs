@@ -5,6 +5,7 @@ use glyphon::{
     TextBounds, TextRenderer,
 };
 
+use super::boxdraw;
 use super::decorations::{
     cursor_anchor_offset, line_quad, rasterize_line_mask, LINE_CURLY_GLYPH_ID,
     LINE_DASHED_GLYPH_ID, LINE_DOTTED_GLYPH_ID, LINE_DOUBLE_GLYPH_ID, SOLID_MASK_GLYPH_ID,
@@ -15,6 +16,7 @@ use super::limits::{self, MAX_CUSTOM_GLYPH_PIXELS};
 use super::metrics::CellMetrics;
 use super::palette::Palette;
 use super::selection_fg_glyphon;
+use super::BOX_GLYPH_ID_BASE;
 
 fn line_quad_to_custom(line: &LineQuad, metrics: &CellMetrics) -> CustomGlyph {
     line_quad(
@@ -202,6 +204,35 @@ fn text_glyph_to_custom(
     font_system: &mut glyphon::FontSystem,
     swash_cache: &mut glyphon::SwashCache,
 ) -> Result<Option<CustomGlyph>, String> {
+    if text.box_glyph {
+        let ch = text.glyph_key.ch as u32;
+        let id = BOX_GLYPH_ID_BASE + (ch - 0x2500) as u16;
+        let width = limits::clamp_custom_dimension(
+            metrics.cell_w * text.width_cells.min(2) as f32,
+            metrics.cell_w,
+            2,
+        );
+        let height = limits::clamp_custom_dimension(metrics.cell_h, metrics.cell_h, 1);
+        if limits::custom_pixels(width, height) > MAX_CUSTOM_GLYPH_PIXELS {
+            return Ok(None);
+        }
+        let fg_color = if text.selected {
+            selection_fg_glyphon(palette.theme)
+        } else {
+            resolve_fg_glyphon(text.fg, text.dim, text.bold, palette, dim_alpha)
+        };
+        return Ok(Some(CustomGlyph {
+            id,
+            left: text.col as f32 * metrics.cell_w + metrics.padding_x,
+            top: text.row as f32 * metrics.cell_h + metrics.padding_y,
+            width,
+            height,
+            color: Some(fg_color),
+            snap_to_physical_pixel: true,
+            metadata: 0,
+        }));
+    }
+
     let cached = glyph_cache.get_or_insert(
         font_system,
         swash_cache,
@@ -317,6 +348,15 @@ fn rasterize_custom_glyph(
     request: RasterizeCustomGlyphRequest,
     glyph_cache: &GlyphCache,
 ) -> Option<RasterizedCustomGlyph> {
+    if (BOX_GLYPH_ID_BASE..BOX_GLYPH_ID_BASE + 0xA0).contains(&request.id) {
+        let ch = char::from_u32(0x2500 + (request.id - BOX_GLYPH_ID_BASE) as u32)?;
+        let data = boxdraw::box_mask(ch, request.width as usize, request.height as usize)?;
+        return Some(RasterizedCustomGlyph {
+            data,
+            content_type: ContentType::Mask,
+        });
+    }
+
     if request.id == SOLID_MASK_GLYPH_ID {
         if request.width == 0 || request.height == 0 {
             return None;
@@ -481,6 +521,7 @@ mod tests {
             dim: false,
             custom_id: 0,
             selected: false,
+            box_glyph: false,
         };
 
         let cg = text_glyph_to_custom(
@@ -530,6 +571,7 @@ mod tests {
             dim: false,
             custom_id: 0,
             selected: false,
+            box_glyph: false,
         };
 
         let cg = text_glyph_to_custom(
