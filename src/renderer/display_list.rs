@@ -185,6 +185,7 @@ impl DisplayListBuilder {
         damage: &DamageSnapshot,
         show_scrollback: bool,
         builtin_box_drawing: bool,
+        blink_on: bool,
     ) {
         if damage.is_full() {
             for row in 0..rows {
@@ -200,6 +201,7 @@ impl DisplayListBuilder {
                     font_family,
                     show_scrollback,
                     builtin_box_drawing,
+                    blink_on,
                 );
             }
         } else {
@@ -220,10 +222,12 @@ impl DisplayListBuilder {
                     font_family,
                     show_scrollback,
                     builtin_box_drawing,
+                    blink_on,
                 );
             }
         }
 
+        // El cursor de copy mode es de navegacion: siempre visible, no parpadea.
         Self::build_cursor(
             list,
             term,
@@ -312,6 +316,7 @@ impl DisplayListBuilder {
         font_family: &str,
         show_scrollback: bool,
         builtin_box_drawing: bool,
+        blink_on: bool,
     ) {
         let source_row = row_sources.get(row).copied().unwrap_or(&[]);
         let cursor_on_row = !show_scrollback
@@ -337,9 +342,14 @@ impl DisplayListBuilder {
             let cell = source_row.get(col).unwrap_or(&default_cell);
             let is_sel = term.is_selected(row, col);
             let is_cursor = Self::shell_cursor_here(term, row, col, show_scrollback);
+            // El shell cursor se suprime en la fase "off" del parpadeo cuando
+            // el parpadeo del cursor esta habilitado en config. Si el usuario
+            // lo desactivo, el cursor siempre es visible (independiente de
+            // SGR 5 en el texto).
+            let cursor_rendered = is_cursor && (blink_on || !term.cursor_blink_enabled);
             let bold = cell.attrs.bold;
 
-            if is_cursor && matches!(term.cursor_style, CursorStyle::Bar) {
+            if cursor_rendered && matches!(term.cursor_style, CursorStyle::Bar) {
                 list.cursor_bars.push((row, col));
             }
 
@@ -357,7 +367,7 @@ impl DisplayListBuilder {
                     width_cells: cell.width.max(1),
                     color: selection_bg_glyphon(palette.theme),
                 });
-            } else if is_cursor && matches!(term.cursor_style, CursorStyle::Block) {
+            } else if cursor_rendered && matches!(term.cursor_style, CursorStyle::Block) {
                 list.bg_quads.push(BgQuad {
                     row,
                     col,
@@ -380,7 +390,7 @@ impl DisplayListBuilder {
             // el clear color ya translucido, el resultado se veia opaco: un
             // recuadro negro solido justo donde habia box-drawing.
 
-            if is_cursor && matches!(term.cursor_style, CursorStyle::Underline) {
+            if cursor_rendered && matches!(term.cursor_style, CursorStyle::Underline) {
                 list.line_quads.push(LineQuad {
                     row,
                     col,
@@ -425,14 +435,19 @@ impl DisplayListBuilder {
                 });
             }
 
+            // SGR 5 (blink): oculta el glifo de texto en la fase "off".
+            // El fondo y las decoraciones (subrayado, tachado, overline) se
+            // mantienen, igual que en xterm.
+            let text_hidden_by_blink = cell.attrs.blink && !blink_on;
             let emit_text = !cell.attrs.invisible
+                && !text_hidden_by_blink
                 && (should_emit_text_glyph(cell)
-                    || (is_cursor && matches!(term.cursor_style, CursorStyle::Block)));
+                    || (cursor_rendered && matches!(term.cursor_style, CursorStyle::Block)));
             if !emit_text {
                 continue;
             }
 
-            let cursor_fg = if is_cursor && matches!(term.cursor_style, CursorStyle::Block) {
+            let cursor_fg = if cursor_rendered && matches!(term.cursor_style, CursorStyle::Block) {
                 let (r, g, b) = contrast_text_color(palette.cursor_rgb());
                 Color::Rgb(r, g, b)
             } else {
@@ -440,7 +455,7 @@ impl DisplayListBuilder {
             };
 
             let Some(glyph_key) = resolve_glyph_key(source_row, col, font_family) else {
-                if is_cursor && cell.ch == ' ' {
+                if cursor_rendered && cell.ch == ' ' {
                     let mut space_key = GlyphKey {
                         ch: ' ',
                         bold: false,
@@ -544,6 +559,39 @@ mod tests {
             &DamageSnapshot::Full,
             false,
             true,
+            true,
+        );
+        list
+    }
+
+    /// Como `build_full` pero permite fijar la fase de parpadeo (`blink_on`).
+    #[allow(clippy::too_many_arguments)]
+    fn build_full_blink(
+        term: &Term,
+        metrics: &CellMetrics,
+        theme: &ThemeConfig,
+        row_sources: &[&[Cell]],
+        cols: usize,
+        rows: usize,
+        family: &str,
+        blink_on: bool,
+    ) -> DisplayList {
+        let palette = test_palette(theme);
+        let mut list = DisplayList::default();
+        DisplayListBuilder::build(
+            &mut list,
+            term,
+            metrics,
+            &palette,
+            theme.dim_alpha,
+            row_sources,
+            cols,
+            rows,
+            family,
+            &DamageSnapshot::Full,
+            false,
+            true,
+            blink_on,
         );
         list
     }
@@ -860,6 +908,7 @@ mod tests {
             &DamageSnapshot::Full,
             false,
             true,
+            true,
         );
         let full_glyphs = list.text_glyphs.len();
         assert_eq!(full_glyphs, 8);
@@ -881,6 +930,7 @@ mod tests {
             &family,
             &snap,
             false,
+            true,
             true,
         );
 
@@ -984,6 +1034,104 @@ mod tests {
                 .filter(|q| q.kind == LineKind::Under)
                 .count(),
             1
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Parpadeo (Renderer 4): cursor y texto SGR 5 se ocultan en fase off.
+    // -----------------------------------------------------------------
+
+    /// Cursor block emitido en fase on; suprimido en fase off (blink activado).
+    #[test]
+    fn cursor_block_blink_off_oculta_bg_quad() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 3];
+        row[1].ch = 'X';
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let mut term = Term::new();
+        term.cursor.move_to(0, 1);
+        term.cursor_visible = true;
+        term.cursor_style = CursorStyle::Block;
+        term.cursor_blink_enabled = true;
+
+        let on = build_full_blink(&term, &metrics, &theme, &row_sources, 3, 1, &family, true);
+        let off = build_full_blink(&term, &metrics, &theme, &row_sources, 3, 1, &family, false);
+
+        assert!(
+            on.bg_quads.iter().any(|q| q.row == 0 && q.col == 1),
+            "fase on: el cursor block emite bg_quad"
+        );
+        assert!(
+            !off.bg_quads.iter().any(|q| q.row == 0 && q.col == 1),
+            "fase off: no hay bg_quad del cursor"
+        );
+        assert!(
+            !off.cursor_bars.iter().any(|&(r, _)| r == 0),
+            "fase off: no hay cursor_bars"
+        );
+    }
+
+    /// Con cursor_blink desactivado, el cursor se mantiene en ambas fases.
+    #[test]
+    fn cursor_blink_disabled_no_suprime_en_off() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 3];
+        row[1].ch = 'X';
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let mut term = Term::new();
+        term.cursor.move_to(0, 1);
+        term.cursor_visible = true;
+        term.cursor_style = CursorStyle::Block;
+        term.cursor_blink_enabled = false;
+
+        let off = build_full_blink(&term, &metrics, &theme, &row_sources, 3, 1, &family, false);
+
+        assert!(
+            off.bg_quads.iter().any(|q| q.row == 0 && q.col == 1),
+            "blink desactivado: el cursor sigue visible en fase off"
+        );
+    }
+
+    /// Texto con SGR 5 (blink): glifo oculto en fase off, bg y decoraciones
+    /// se mantienen.
+    #[test]
+    fn texto_blink_oculto_en_fase_off_mantiene_bg() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 1];
+        row[0].ch = 'x';
+        row[0].attrs.blink = true;
+        row[0].attrs.bg = Color::Red;
+        row[0].attrs.underline = true;
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let mut term = Term::new();
+        term.cursor_visible = false;
+
+        let on = build_full_blink(&term, &metrics, &theme, &row_sources, 1, 1, &family, true);
+        let off = build_full_blink(&term, &metrics, &theme, &row_sources, 1, 1, &family, false);
+
+        assert_eq!(on.text_glyphs.len(), 1, "fase on: glifo de texto visible");
+        assert!(
+            off.text_glyphs.is_empty(),
+            "fase off: glifo de texto blink suprimido"
+        );
+        assert_eq!(
+            off.bg_quads.len(),
+            on.bg_quads.len(),
+            "bg de celda blink se mantiene en fase off"
+        );
+        assert_eq!(
+            off.line_quads
+                .iter()
+                .filter(|q| q.kind == LineKind::Under)
+                .count(),
+            1,
+            "underline de celda blink se mantiene en fase off"
         );
     }
 }

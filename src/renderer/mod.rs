@@ -483,6 +483,10 @@ impl Renderer {
         self.prev_scrollback_offset = term.scrollback_offset;
 
         let t_build = Instant::now();
+        let blink_on = crate::renderer::blink_on(
+            term.last_blink_reset.elapsed(),
+            std::time::Duration::from_millis(term.blink_interval_ms),
+        );
         let bg_cap = self.display_list.bg_quads.capacity();
         let line_cap = self.display_list.line_quads.capacity();
         let glyph_cap = self.display_list.text_glyphs.capacity();
@@ -512,6 +516,7 @@ impl Renderer {
             &damage,
             show_scrollback,
             self.builtin_box_drawing,
+            blink_on,
         );
 
         let mut custom_glyphs = Vec::new();

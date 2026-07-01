@@ -107,6 +107,7 @@ fn bench_display_list_build(c: &mut Criterion) {
                     &DamageSnapshot::Full,
                     false,
                     true,
+                    true,
                 );
             });
         });
