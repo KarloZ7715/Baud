@@ -142,6 +142,9 @@ pub struct FontConfig {
     pub glyph_offset: GlyphOffset,
     #[serde(default = "default_line_height")]
     pub line_height: f32,
+    /// Familias de fallback en orden de preferencia (emoji, CJK, símbolos).
+    #[serde(default)]
+    pub fallback: Vec<String>,
 }
 
 /// Desplazamiento fino del glifo dentro de la celda.
@@ -307,6 +310,7 @@ impl Default for FontConfig {
             size: default_font_size(),
             glyph_offset: default_glyph_offset(),
             line_height: default_line_height(),
+            fallback: Vec::new(),
         }
     }
 }
@@ -921,6 +925,23 @@ height = 800
         assert_eq!(cfg.window.padding_x, 0);
         assert!(cfg.window.decorations);
         assert_eq!(cfg.window.startup, StartupState::Windowed);
+    }
+
+    #[test]
+    fn test_font_fallback_default_y_parse() {
+        let cfg = FontConfig::default();
+        assert!(cfg.fallback.is_empty());
+
+        let toml = r#"
+[font]
+family = "Fira Code"
+fallback = ["Noto Color Emoji", "Noto Sans CJK SC"]
+"#;
+        let parsed: Config = toml::from_str(toml).unwrap();
+        assert_eq!(
+            parsed.font.fallback,
+            vec!["Noto Color Emoji", "Noto Sans CJK SC"]
+        );
     }
 
     /// Verifica que un TOML parcial usa defaults para los campos faltantes.

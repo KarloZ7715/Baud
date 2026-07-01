@@ -530,12 +530,11 @@ impl App {
             clamp_font_size(self.font_size, dir)
         };
         if let Some(renderer) = &mut self.renderer {
-            renderer.set_font_size(self.font_size);
-        }
-        let metrics = self.renderer.as_ref().map(|r| (r.cell_w(), r.cell_h()));
-        if let (Some(window), Some((cell_w, cell_h))) = (&self.window, metrics) {
-            let size = window.inner_size();
-            self.sync_grid_to_window(size.width, size.height, cell_w, cell_h, true, false);
+            let (cell_w, cell_h) = renderer.set_font_size(self.font_size);
+            if let Some(window) = &self.window {
+                let size = window.inner_size();
+                self.sync_grid_to_window(size.width, size.height, cell_w, cell_h, true, false);
+            }
         }
     }
 

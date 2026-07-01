@@ -146,7 +146,8 @@ impl Renderer {
         config: wgpu::SurfaceConfiguration,
         font_config: &FontConfig,
     ) -> Self {
-        let mut font_system = terminal_fallback::create_font_system();
+        let mut font_system =
+            terminal_fallback::create_font_system_with_fallback(&font_config.fallback);
         // Cache necesario para glyphon 0.11
         let wgpu_cache = glyphon::Cache::new(&device);
         let mut atlas = glyphon::TextAtlas::new(&device, &queue, &wgpu_cache, config.format);
@@ -248,7 +249,7 @@ impl Renderer {
     }
 
     /// Aplica un nuevo tamano de fuente y recalcula metricas de celda.
-    pub fn set_font_size(&mut self, size: u16) {
+    pub fn set_font_size(&mut self, size: u16) -> (f32, f32) {
         self.font_size = size as f32;
         self.refresh_cell_metrics();
         self.reset_glyph_pipeline();
@@ -257,6 +258,7 @@ impl Renderer {
         Self::configure_buffer(&mut self.font_system, &mut self.overlay_buffer, self.cell_w);
         self.bg_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
         Self::configure_buffer(&mut self.font_system, &mut self.bg_buffer, self.cell_w);
+        (self.cell_w, self.cell_h)
     }
 
     /// Invalida caches GPU tras cambio de metricas (resize).
@@ -986,6 +988,17 @@ mod tests {
         assert_eq!(c.r(), 0xec, "Default R debe ser foreground del tema");
         assert_eq!(c.g(), 0xec, "Default G debe ser foreground del tema");
         assert_eq!(c.b(), 0xec, "Default B debe ser foreground del tema");
+    }
+
+    #[test]
+    fn set_font_size_aumenta_celda() {
+        let mut fs = terminal_fallback::create_font_system();
+        let fam = FontConfig::default().family;
+        let offset = GlyphOffset { x: 0.0, y: 0.0 };
+        let small = CellMetrics::measure(&mut fs, &fam, 12.0, 1.0, offset);
+        let big = CellMetrics::measure(&mut fs, &fam, 24.0, 1.0, offset);
+        assert!(big.cell_w > small.cell_w);
+        assert!(big.cell_h > small.cell_h);
     }
 
     #[test]
