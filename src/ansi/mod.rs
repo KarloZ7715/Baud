@@ -606,6 +606,11 @@ impl Term {
     /// Resetea la fase de parpadeo a "on". Llamar en cada input del usuario y
     /// tras procesar salida del PTY, para que el cursor quede solido mientras
     /// se escribe (comportamiento xterm).
+    ///
+    /// Solo se invoca en estos dos caminos deliberadamente: eventos de mouse,
+    /// scroll y navegacion de copy mode no resetean la fase (no son entrada
+    /// semantica); duplicar el reset aqui iria contra la advertencia del plan
+    /// de no pisar el reset del coalescing del drain.
     pub fn reset_blink_phase(&mut self) {
         self.last_blink_reset = Instant::now();
     }
@@ -613,18 +618,22 @@ impl Term {
     /// True si hay algo que parpadea en la vista actual: el cursor (cuando esta
     /// visible, sin scrollback y fuera de copy mode) o alguna celda con SGR 5.
     /// Lo consulta el hilo timer para decidir si enviar `RedrawNeeded`.
+    ///
+    /// `blink_interval_ms == 0` desactiva tanto el parpadeo del cursor como el
+    /// del texto SGR 5; en ese caso no hay nada que titilar y devuelve false,
+    /// coherente con `blink_on` que siempre retorna visible.
     // ponytail: escaneo del grid activo; barato a 265ms de periodo. Marcar en
     // el parser si medidor de perf indica que el escaneo por tick domina.
     pub fn has_blink_stuff(&self) -> bool {
+        if self.blink_interval_ms == 0 {
+            return false;
+        }
         let cursor_blink = self.cursor_blink_enabled
             && self.cursor_visible
             && self.scrollback_offset == 0
             && self.copy_mode.is_none();
         if cursor_blink {
             return true;
-        }
-        if self.blink_interval_ms == 0 {
-            return false;
         }
         let grid = self.active_grid();
         for row in &grid.rows {
@@ -3854,5 +3863,81 @@ mod tests {
             assert!(term.grid.rows[0][0].attrs.bold);
             assert_eq!(term.grid.rows[0][0].attrs.fg, Color::Red);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // has_blink_stuff / reset_blink_phase (Renderer 4)
+    // -----------------------------------------------------------------
+
+    /// Cursor visible + por defecto blink activo + sin scrollback => hay blink.
+    #[test]
+    fn has_blink_stuff_cursor_visible_por_defecto() {
+        let term = Term::new();
+        assert!(term.cursor_visible);
+        assert!(term.cursor_blink_enabled);
+        assert_eq!(term.scrollback_offset, 0);
+        assert!(term.has_blink_stuff());
+    }
+
+    /// `blink_interval_ms == 0` desactiva el parpadeo del cursor: nada que
+    /// titilar aunque el cursor sea visible.
+    #[test]
+    fn has_blink_stuff_interval_cero_sin_nada_que_titilar() {
+        let mut term = Term::new();
+        term.blink_interval_ms = 0;
+        assert!(!term.has_blink_stuff());
+    }
+
+    /// Scrollback abierto: el cursor deja de titilar aunque sea visible.
+    #[test]
+    fn has_blink_stuff_scrollback_ignora_cursor() {
+        let mut term = Term::new();
+        term.scrollback_offset = 1;
+        assert!(
+            !term.has_blink_stuff(),
+            "con scrollback no hay cursor blink"
+        );
+        // ... pero SGR 5 sigue contando aunque haya scrollback.
+        feed(&mut term, b"\x1b[5mblink");
+        assert!(term.has_blink_stuff(), "SGR 5 cuenta con scrollback");
+    }
+
+    /// Copy mode: el cursor del shell no titila, pero el de copy mode es de
+    /// navegacion (otro path) y SGR 5 sigue activo.
+    #[test]
+    fn has_blink_stuff_copy_mode_ignora_cursor_pero_carga_sgr5() {
+        let mut term = Term::new();
+        term.copy_mode = Some(crate::copy_mode::CopyModeState::enter(&term));
+        assert!(
+            !term.has_blink_stuff(),
+            "copy mode: el shell cursor no titila"
+        );
+        feed(&mut term, b"\x1b[5mx");
+        assert!(term.has_blink_stuff(), "SGR 5 sigue activo en copy mode");
+    }
+
+    /// `cursor_blink_enabled = false` no aporta blink por cursor; SGR 5 si.
+    #[test]
+    fn has_blink_stuff_cursor_blink_disabled_no_aporta() {
+        let mut term = Term::new();
+        term.cursor_blink_enabled = false;
+        assert!(
+            !term.has_blink_stuff(),
+            "cursor blink desactivado: solo aporta si hay SGR 5"
+        );
+        feed(&mut term, b"normal");
+        assert!(!term.has_blink_stuff(), "texto normal sin blink");
+        feed(&mut term, b"\x1b[5mx");
+        assert!(term.has_blink_stuff(), "SGR 5 aporta blink");
+    }
+
+    /// `reset_blink_phase` actualiza `last_blink_reset` a ahora.
+    #[test]
+    fn reset_blink_phase_actualiza_instant() {
+        let mut term = Term::new();
+        let before = term.last_blink_reset;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        term.reset_blink_phase();
+        assert!(term.last_blink_reset > before);
     }
 }

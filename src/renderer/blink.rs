@@ -18,7 +18,7 @@ pub fn blink_on(elapsed: Duration, interval: Duration) -> bool {
         return true;
     }
     let interval_ms = interval.as_millis().max(1);
-    let half = interval_ms / 2;
+    let half = (interval_ms / 2).max(1);
     let pos = elapsed.as_millis() % interval_ms;
     pos < half
 }
@@ -48,5 +48,16 @@ mod tests {
         let interval = Duration::from_millis(1000);
         assert!(!blink_on(Duration::from_millis(500), interval));
         assert!(blink_on(Duration::from_millis(499), interval));
+    }
+
+    /// Intervalos degenerados (1ms) no deben dejar la fase permanentemente
+    /// off: `half` se clampa a >= 1 para garantizar una ventana visible.
+    #[test]
+    fn intervalo_muy_corto_no_deja_siempre_off() {
+        let interval = Duration::from_millis(1);
+        assert!(blink_on(Duration::from_millis(0), interval));
+        assert!(blink_on(Duration::from_millis(1), interval));
+        assert!(blink_on(Duration::from_millis(2), interval));
+        assert!(blink_on(Duration::from_millis(3), interval));
     }
 }

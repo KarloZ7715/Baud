@@ -231,10 +231,12 @@ pub struct CursorConfig {
     /// `"block"` | `"bar"` | `"underline"`.
     #[serde(default = "default_cursor_style")]
     pub style: String,
+    /// Si `true` el cursor parpadea (independiente del SGR 5 del texto).
     #[serde(default = "default_true")]
     pub blink: bool,
-    /// Intervalo de parpadeo en ms. El timer de render vive en Renderer 4; aquí
-    /// solo se parsea para cablearlo cuando exista.
+    /// Intervalo del parpadeo de cursor y texto SGR 5 en milisegundos. `0`
+    /// desactiva ambos: el cursor queda fijo y SGR 5 no se oculta. Lo cablea
+    /// `Config::apply_to_term` a `Term::blink_interval_ms`.
     #[serde(default = "default_blink_ms")]
     pub blink_interval_ms: u64,
 }

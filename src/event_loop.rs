@@ -251,12 +251,15 @@ fn read_master_available(
 /// el proxy. cuando el parpadeo esta desactivado (`blink_interval_ms == 0` o
 /// nada que parpadear), el hilo duerme sin enviar eventos.
 // ponytail: hilo detached; muere al salir del proceso. stop flag si se quiere
-// shutdown explicito, hoy sobra para una app interactiva.
+// shutdown explicito, sobra para una app interactiva.
 fn spawn_blink_timer(term: Arc<Mutex<Term>>, proxy: winit::event_loop::EventLoopProxy<UserEvent>) {
     thread::spawn(move || loop {
         let interval_ms = match term.lock() {
             Ok(g) => g.blink_interval_ms,
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!("blink timer: term mutex envenenado, deteniendo: {e}");
+                return;
+            }
         };
         if interval_ms == 0 {
             thread::sleep(Duration::from_secs(1));
@@ -273,7 +276,10 @@ fn spawn_blink_timer(term: Arc<Mutex<Term>>, proxy: winit::event_loop::EventLoop
                     false
                 }
             }
-            Err(_) => return,
+            Err(e) => {
+                tracing::warn!("blink timer: term mutex envenenado, deteniendo: {e}");
+                return;
+            }
         };
         if blinking {
             let _ = proxy.send_event(UserEvent::RedrawNeeded);
