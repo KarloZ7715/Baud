@@ -1,6 +1,6 @@
 //! Agrupacion de secuencias ligables y shaping multi-caracter.
 
-use glyphon::cosmic_text::{Metrics, Shaping, Style, Weight};
+use glyphon::cosmic_text::{Hinting, Metrics, Shaping, Style, Weight};
 use glyphon::CacheKey;
 
 use crate::grid::Cell;
@@ -40,6 +40,7 @@ pub fn shape_run(
     let ct = Metrics::new(metrics.font_size, metrics.cell_h);
     let mut buf = glyphon::Buffer::new(font_system, ct);
     buf.set_monospace_width(font_system, Some(metrics.cell_w));
+    buf.set_hinting(font_system, Hinting::Enabled);
     let run_cols = text.chars().count().max(1) as f32;
     buf.set_size(
         font_system,
@@ -64,13 +65,14 @@ pub fn shape_run(
     if let Some(run) = buf.layout_runs().next() {
         let line_y = run.line_y;
         for g in run.glyphs.iter() {
-            let physical = g.physical((0.0, line_y), 1.0);
+            let physical = g.physical((metrics.glyph_offset_x, line_y), 1.0);
+            let anchor = g.physical((metrics.glyph_offset_x, 0.0), 1.0);
             let byte_start = g.start.min(text.len());
             let col_in_run = text[..byte_start].chars().count();
             out.push(RunGlyph {
                 cache_key: physical.cache_key,
                 col_in_run,
-                top: physical.y as f32,
+                top: anchor.y as f32,
                 line_y,
                 width: g.w,
                 height: run.line_height,
@@ -243,6 +245,41 @@ mod tests {
         assert!(in_ligature_run(2, &runs));
         assert!(in_ligature_run(3, &runs));
         assert!(!in_ligature_run(4, &runs));
+    }
+
+    #[test]
+    fn shape_run_top_alineado_con_per_celda() {
+        let mut fs = crate::renderer::terminal_fallback::create_font_system();
+        let fam = crate::config::FontConfig::default().family;
+        let m = crate::renderer::metrics::CellMetrics::measure(
+            &mut fs,
+            &fam,
+            14.0,
+            1.0,
+            crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+        );
+        let run_g = shape_run(&mut fs, &m, &fam, "==", false, false, false)
+            .into_iter()
+            .next()
+            .expect("glifo");
+        let cell_g = crate::renderer::glyph::shape_glyph(
+            &mut fs,
+            &m,
+            &crate::renderer::glyph::GlyphKey {
+                ch: '=',
+                bold: false,
+                italic: false,
+                dim: false,
+                family: fam.clone(),
+            },
+            &fam,
+        );
+        let run_anchor = run_g.line_y + run_g.top;
+        let cell_anchor = cell_g.line_y + cell_g.top;
+        assert!(
+            (run_anchor - cell_anchor).abs() < 2.0,
+            "run={run_anchor} cell={cell_anchor}"
+        );
     }
 
     #[test]
