@@ -254,13 +254,17 @@ fn text_glyph_to_custom(
         }));
     }
 
-    let cached = glyph_cache.get_or_insert(
-        font_system,
-        swash_cache,
-        metrics,
-        font_family,
-        text.glyph_key.clone(),
-    );
+    let cached = if let Some(shaped) = text.run_shaped.clone() {
+        glyph_cache.get_or_insert_shaped(font_system, swash_cache, text.glyph_key.clone(), shaped)
+    } else {
+        glyph_cache.get_or_insert(
+            font_system,
+            swash_cache,
+            metrics,
+            font_family,
+            text.glyph_key.clone(),
+        )
+    };
 
     if cached.raster.missing {
         return Ok(None);
@@ -273,10 +277,14 @@ fn text_glyph_to_custom(
         return Ok(None);
     }
 
-    let left = text.col as f32 * metrics.cell_w
-        + metrics.padding_x
-        + metrics.glyph_offset_x
-        + cached.raster.placement_left as f32;
+    let left = if let Some(x_offset) = text.x_offset {
+        x_offset + metrics.padding_x + metrics.glyph_offset_x + cached.raster.placement_left as f32
+    } else {
+        text.col as f32 * metrics.cell_w
+            + metrics.padding_x
+            + metrics.glyph_offset_x
+            + cached.raster.placement_left as f32
+    };
     let top = text.row as f32 * metrics.cell_h
         + metrics.padding_y
         + metrics.glyph_offset_y
@@ -547,6 +555,8 @@ mod tests {
             custom_id: 0,
             selected: false,
             box_glyph: true,
+            x_offset: None,
+            run_shaped: None,
         };
 
         let cg = text_glyph_to_custom(
@@ -643,6 +653,8 @@ mod tests {
             custom_id: 0,
             selected: false,
             box_glyph: false,
+            x_offset: None,
+            run_shaped: None,
         };
 
         let cg = text_glyph_to_custom(
@@ -693,6 +705,8 @@ mod tests {
             custom_id: 0,
             selected: false,
             box_glyph: false,
+            x_offset: None,
+            run_shaped: None,
         };
 
         let cg = text_glyph_to_custom(

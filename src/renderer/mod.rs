@@ -11,6 +11,7 @@ mod glyph_cache;
 pub mod limits;
 mod metrics;
 mod palette;
+mod runs;
 mod terminal_fallback;
 
 pub use blink::blink_on;
@@ -123,6 +124,7 @@ pub struct Renderer {
     line_height: f32,
     glyph_offset: GlyphOffset,
     builtin_box_drawing: bool,
+    ligatures: bool,
 }
 
 impl Renderer {
@@ -191,6 +193,7 @@ impl Renderer {
         let line_height = font_config.line_height;
         let glyph_offset = font_config.glyph_offset;
         let builtin_box_drawing = font_config.builtin_box_drawing;
+        let ligatures = font_config.ligatures;
 
         let cell_metrics = CellMetrics::measure(
             &mut font_system,
@@ -236,6 +239,7 @@ impl Renderer {
             line_height,
             glyph_offset,
             builtin_box_drawing,
+            ligatures,
         }
     }
 
@@ -503,6 +507,11 @@ impl Renderer {
             .text_glyphs
             .reserve(glyph_cap.min(limits::MAX_GRID_DIM * limits::MAX_GRID_DIM));
 
+        let mut font_system = if self.ligatures {
+            Some(&mut self.font_system)
+        } else {
+            None
+        };
         DisplayListBuilder::build(
             &mut self.display_list,
             term,
@@ -517,6 +526,8 @@ impl Renderer {
             show_scrollback,
             self.builtin_box_drawing,
             blink_on,
+            self.ligatures,
+            &mut font_system,
         );
 
         let mut custom_glyphs = Vec::new();

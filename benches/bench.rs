@@ -108,6 +108,8 @@ fn bench_display_list_build(c: &mut Criterion) {
                     false,
                     true,
                     true,
+                    false,
+                    &mut None,
                 );
             });
         });

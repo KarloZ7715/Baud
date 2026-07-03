@@ -86,6 +86,32 @@ impl GlyphCache {
         }
     }
 
+    /// Inserta o devuelve un glifo ya shaped (p. ej. de un run con ligaduras).
+    pub fn get_or_insert_shaped(
+        &mut self,
+        font_system: &mut FontSystem,
+        swash_cache: &mut SwashCache,
+        key: GlyphKey,
+        shaped: ShapedGlyph,
+    ) -> &CachedGlyph {
+        use std::collections::hash_map::Entry;
+
+        match self.entries.entry(key) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(vacant) => {
+                let raster = rasterize_shaped(font_system, swash_cache, &shaped);
+                let custom_glyph_id = self.next_id;
+                self.next_id = self.next_id.saturating_add(1);
+                self.by_id.insert(custom_glyph_id, vacant.key().clone());
+                vacant.insert(CachedGlyph {
+                    custom_glyph_id,
+                    shaped,
+                    raster,
+                })
+            }
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
