@@ -21,10 +21,44 @@ pub struct RunGlyph {
     pub cache_key: CacheKey,
     /// Primera columna del cluster dentro del run (0..run.cols).
     pub col_in_run: usize,
+    /// Celdas de grid que cubre este cluster (1 = sin ligadura).
+    pub cluster_cols: usize,
     pub top: f32,
     pub line_y: f32,
     pub width: f32,
     pub height: f32,
+}
+
+fn reference_line_y(
+    font_system: &mut glyphon::FontSystem,
+    metrics: &CellMetrics,
+    family: &str,
+    bold: bool,
+    italic: bool,
+    dim: bool,
+) -> f32 {
+    let ct = Metrics::new(metrics.font_size, metrics.cell_h);
+    let mut buf = glyphon::Buffer::new(font_system, ct);
+    buf.set_monospace_width(font_system, Some(metrics.cell_w));
+    buf.set_hinting(font_system, Hinting::Enabled);
+    buf.set_size(font_system, Some(metrics.cell_w), Some(metrics.cell_h));
+
+    let mut attrs = glyphon::Attrs::new().family(resolve_family(family));
+    if bold {
+        attrs = attrs.weight(Weight::BOLD);
+    } else if dim {
+        attrs = attrs.weight(Weight::LIGHT);
+    }
+    if italic {
+        attrs = attrs.style(Style::Italic);
+    }
+
+    buf.set_text(font_system, "M", &attrs, Shaping::Advanced, None);
+    buf.shape_until_scroll(font_system, false);
+    buf.layout_runs()
+        .next()
+        .map(|run| run.line_y)
+        .unwrap_or(metrics.font_size)
 }
 
 /// Shapea una secuencia corta con ligaduras, ancho monospace por celda.
@@ -61,17 +95,28 @@ pub fn shape_run(
     buf.set_text(font_system, text, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
 
+    let line_y = reference_line_y(font_system, metrics, family, bold, italic, dim);
+
     let mut out = Vec::new();
     if let Some(run) = buf.layout_runs().next() {
-        let line_y = run.line_y;
-        for g in run.glyphs.iter() {
+        let glyphs: Vec<_> = run.glyphs.iter().collect();
+        let total_cols = text.chars().count();
+        for (gi, g) in glyphs.iter().enumerate() {
             let physical = g.physical((metrics.glyph_offset_x, line_y), 1.0);
             let anchor = g.physical((metrics.glyph_offset_x, 0.0), 1.0);
             let byte_start = g.start.min(text.len());
             let col_in_run = text[..byte_start].chars().count();
+            let next_col = if gi + 1 < glyphs.len() {
+                let next_start = glyphs[gi + 1].start.min(text.len());
+                text[..next_start].chars().count()
+            } else {
+                total_cols
+            };
+            let cluster_cols = (next_col - col_in_run).max(1);
             out.push(RunGlyph {
                 cache_key: physical.cache_key,
                 col_in_run,
+                cluster_cols,
                 top: anchor.y as f32,
                 line_y,
                 width: g.w,
@@ -181,12 +226,6 @@ pub fn group_ligature_runs(
     runs
 }
 
-/// True si `col` pertenece a alguna secuencia ligable detectada.
-pub fn in_ligature_run(col: usize, runs: &[LigRun]) -> bool {
-    runs.iter()
-        .any(|r| (r.start_col..r.start_col + r.cols).contains(&col))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,14 +276,48 @@ mod tests {
 
     #[test]
     fn in_ligature_run_cubre_rango() {
-        let runs = vec![LigRun {
+        let runs = [LigRun {
             start_col: 2,
             text: "=>".into(),
             cols: 2,
         }];
-        assert!(in_ligature_run(2, &runs));
-        assert!(in_ligature_run(3, &runs));
-        assert!(!in_ligature_run(4, &runs));
+        let in_run = |col: usize| {
+            runs.iter()
+                .any(|r| (r.start_col..r.start_col + r.cols).contains(&col))
+        };
+        assert!(in_run(2));
+        assert!(in_run(3));
+        assert!(!in_run(4));
+    }
+
+    #[test]
+    fn detecta_triple_igual() {
+        let mut row = vec![Cell::default(); 3];
+        for (i, ch) in "===".chars().enumerate() {
+            row[i].ch = ch;
+        }
+        let runs = group_ligature_runs(&row, 3, |_| false);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "===");
+    }
+
+    #[test]
+    fn shape_run_clusters_cubren_todo_el_patron() {
+        let mut fs = crate::renderer::terminal_fallback::create_font_system();
+        let fam = crate::config::FontConfig::default().family;
+        let m = crate::renderer::metrics::CellMetrics::measure(
+            &mut fs,
+            &fam,
+            14.0,
+            1.0,
+            crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+        );
+        for text in ["=>", "==", "==="] {
+            let glyphs = shape_run(&mut fs, &m, &fam, text, false, false, false);
+            assert!(!glyphs.is_empty(), "sin glifos para {text}");
+            let covered: usize = glyphs.iter().map(|g| g.cluster_cols).sum();
+            assert_eq!(covered, text.chars().count(), "clusters no cubren {text}");
+        }
     }
 
     #[test]

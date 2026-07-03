@@ -1,5 +1,7 @@
 //! Display list celda-determinista: fondos y glifos por coordenada de grid.
 
+use std::collections::HashSet;
+
 use crate::ansi::{Color, CursorStyle, Term, UnderlineStyle};
 use crate::grid::{Cell, DamageSnapshot};
 
@@ -7,7 +9,7 @@ use super::decorations::cursor_glyph;
 use super::glyph::{is_wide_continuation, resolve_glyph_key, GlyphKey};
 use super::metrics::CellMetrics;
 use super::palette::Palette;
-use super::runs::{group_ligature_runs, in_ligature_run, shape_run};
+use super::runs::{group_ligature_runs, shape_run};
 use super::selection_bg_glyphon;
 
 /// Factor de atenuacion RGB para SGR dim (2) cuando `dim_alpha` esta desactivado.
@@ -354,6 +356,27 @@ impl DisplayListBuilder {
         } else {
             Vec::new()
         };
+        let lig_handled = if ligatures {
+            font_system.as_deref_mut().map_or_else(HashSet::new, |fs| {
+                Self::build_row_text_runs(
+                    list,
+                    term,
+                    metrics,
+                    palette,
+                    &lig_runs,
+                    source_row,
+                    cols,
+                    row,
+                    font_family,
+                    fs,
+                    show_scrollback,
+                    builtin_box_drawing,
+                    blink_on,
+                )
+            })
+        } else {
+            HashSet::new()
+        };
 
         for col in 0..cols.min(max_col.max(1)) {
             if col < source_row.len() && is_wide_continuation(source_row, col) {
@@ -476,7 +499,7 @@ impl DisplayListBuilder {
                 fg
             };
 
-            if ligatures && in_ligature_run(col, &lig_runs) {
+            if lig_handled.contains(&col) {
                 continue;
             }
 
@@ -525,24 +548,6 @@ impl DisplayListBuilder {
                 run_shaped: None,
             });
         }
-
-        if ligatures {
-            if let Some(fs) = font_system.as_deref_mut() {
-                Self::build_row_text_runs(
-                    list,
-                    term,
-                    metrics,
-                    palette,
-                    &lig_runs,
-                    source_row,
-                    row,
-                    font_family,
-                    fs,
-                    show_scrollback,
-                    blink_on,
-                );
-            }
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -553,12 +558,15 @@ impl DisplayListBuilder {
         palette: &Palette<'_>,
         lig_runs: &[super::runs::LigRun],
         source_row: &[Cell],
+        cols: usize,
         row: usize,
         font_family: &str,
         font_system: &mut glyphon::FontSystem,
         show_scrollback: bool,
+        builtin_box_drawing: bool,
         blink_on: bool,
-    ) {
+    ) -> HashSet<usize> {
+        let mut handled = HashSet::new();
         for run in lig_runs {
             if run.text.is_empty() {
                 continue;
@@ -576,25 +584,6 @@ impl DisplayListBuilder {
                 continue;
             }
 
-            let cursor_col = (start..end).find(|&c| {
-                Self::shell_cursor_here(term, row, c, show_scrollback)
-                    && (blink_on || !term.cursor_blink_enabled)
-            });
-
-            let mut fg = cell.attrs.fg;
-            let mut bg = cell.attrs.bg;
-            if cell.attrs.reverse {
-                std::mem::swap(&mut fg, &mut bg);
-            }
-
-            let fg_color =
-                if cursor_col.is_some() && matches!(term.cursor_style, CursorStyle::Block) {
-                    let (r, g, b) = contrast_text_color(palette.cursor_rgb());
-                    Color::Rgb(r, g, b)
-                } else {
-                    fg
-                };
-
             let bold = cell.attrs.bold;
             let shaped_glyphs = shape_run(
                 font_system,
@@ -608,30 +597,76 @@ impl DisplayListBuilder {
 
             for (gi, g) in shaped_glyphs.iter().enumerate() {
                 let col = run.start_col + g.col_in_run;
-                let x_offset = col as f32 * metrics.cell_w;
-                let glyph_key = GlyphKey {
-                    ch: run.text.chars().nth(g.col_in_run).unwrap_or(' '),
-                    bold,
-                    italic: cell.attrs.italic,
-                    dim: cell.attrs.dim,
-                    family: format!("{font_family}#lig:{start}:{gi}"),
+                if col >= cols {
+                    continue;
+                }
+                let Some(cell_at) = source_row.get(col) else {
+                    continue;
                 };
-                list.text_glyphs.push(TextGlyph {
-                    row,
-                    col,
-                    width_cells: 1,
-                    glyph_key,
-                    fg: fg_color,
-                    bold,
-                    dim: cell.attrs.dim,
-                    custom_id: 0,
-                    selected: term.is_selected(row, col),
-                    box_glyph: false,
-                    x_offset: Some(x_offset),
-                    run_shaped: Some(super::runs::run_glyph_to_shaped(g)),
-                });
+                let is_cursor = Self::shell_cursor_here(term, row, col, show_scrollback)
+                    && (blink_on || !term.cursor_blink_enabled);
+                let mut fg = cell_at.attrs.fg;
+                let mut bg = cell_at.attrs.bg;
+                if cell_at.attrs.reverse {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                let fg_color = if is_cursor && matches!(term.cursor_style, CursorStyle::Block) {
+                    let (r, g, b) = contrast_text_color(palette.cursor_rgb());
+                    Color::Rgb(r, g, b)
+                } else {
+                    fg
+                };
+                let box_glyph = builtin_box_drawing && super::builtin::supports(cell_at.ch);
+
+                if g.cluster_cols > 1 {
+                    for c in col..col + g.cluster_cols {
+                        handled.insert(c);
+                    }
+                    let x_offset = col as f32 * metrics.cell_w;
+                    let glyph_key = GlyphKey {
+                        ch: run.text.chars().nth(g.col_in_run).unwrap_or(' '),
+                        bold,
+                        italic: cell.attrs.italic,
+                        dim: cell.attrs.dim,
+                        family: format!("{font_family}#lig:{}:{gi}", run.text),
+                    };
+                    list.text_glyphs.push(TextGlyph {
+                        row,
+                        col,
+                        width_cells: g.cluster_cols.min(255) as u8,
+                        glyph_key,
+                        fg: fg_color,
+                        bold,
+                        dim: cell_at.attrs.dim,
+                        custom_id: 0,
+                        selected: term.is_selected(row, col),
+                        box_glyph: false,
+                        x_offset: Some(x_offset),
+                        run_shaped: Some(super::runs::run_glyph_to_shaped(g)),
+                    });
+                } else {
+                    handled.insert(col);
+                    let Some(glyph_key) = resolve_glyph_key(source_row, col, font_family) else {
+                        continue;
+                    };
+                    list.text_glyphs.push(TextGlyph {
+                        row,
+                        col,
+                        width_cells: cell_at.width.max(1),
+                        glyph_key,
+                        fg: fg_color,
+                        bold: cell_at.attrs.bold,
+                        dim: cell_at.attrs.dim,
+                        custom_id: 0,
+                        selected: term.is_selected(row, col),
+                        box_glyph,
+                        x_offset: None,
+                        run_shaped: None,
+                    });
+                }
             }
         }
+        handled
     }
 }
 
