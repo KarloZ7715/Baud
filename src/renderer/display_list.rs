@@ -7,7 +7,7 @@ use super::decorations::cursor_glyph;
 use super::glyph::{is_wide_continuation, resolve_glyph_key, GlyphKey};
 use super::metrics::CellMetrics;
 use super::palette::Palette;
-use super::runs::{group_runs, is_ligable_cell, shape_run};
+use super::runs::{group_ligature_runs, in_ligature_run, shape_run};
 use super::selection_bg_glyphon;
 
 /// Factor de atenuacion RGB para SGR dim (2) cuando `dim_alpha` esta desactivado.
@@ -349,6 +349,12 @@ impl DisplayListBuilder {
         } else {
             source_row.len()
         };
+        let lig_runs = if ligatures {
+            group_ligature_runs(source_row, cols, |col| term.is_selected(row, col))
+        } else {
+            Vec::new()
+        };
+
         for col in 0..cols.min(max_col.max(1)) {
             if col < source_row.len() && is_wide_continuation(source_row, col) {
                 continue;
@@ -470,7 +476,7 @@ impl DisplayListBuilder {
                 fg
             };
 
-            if ligatures && is_ligable_cell(cell) {
+            if ligatures && in_ligature_run(col, &lig_runs) {
                 continue;
             }
 
@@ -527,8 +533,8 @@ impl DisplayListBuilder {
                     term,
                     metrics,
                     palette,
+                    &lig_runs,
                     source_row,
-                    cols,
                     row,
                     font_family,
                     fs,
@@ -545,16 +551,15 @@ impl DisplayListBuilder {
         term: &Term,
         metrics: &CellMetrics,
         palette: &Palette<'_>,
+        lig_runs: &[super::runs::LigRun],
         source_row: &[Cell],
-        cols: usize,
         row: usize,
         font_family: &str,
         font_system: &mut glyphon::FontSystem,
         show_scrollback: bool,
         blink_on: bool,
     ) {
-        let runs = group_runs(source_row, cols, |col| term.is_selected(row, col));
-        for run in runs {
+        for run in lig_runs {
             if run.text.is_empty() {
                 continue;
             }
@@ -602,9 +607,10 @@ impl DisplayListBuilder {
             );
 
             for (gi, g) in shaped_glyphs.iter().enumerate() {
-                let x_offset = run.start_col as f32 * metrics.cell_w + g.x;
+                let col = run.start_col + g.col_in_run;
+                let x_offset = col as f32 * metrics.cell_w;
                 let glyph_key = GlyphKey {
-                    ch: run.text.chars().next().unwrap_or(' '),
+                    ch: run.text.chars().nth(g.col_in_run).unwrap_or(' '),
                     bold,
                     italic: cell.attrs.italic,
                     dim: cell.attrs.dim,
@@ -612,14 +618,14 @@ impl DisplayListBuilder {
                 };
                 list.text_glyphs.push(TextGlyph {
                     row,
-                    col: run.start_col,
+                    col,
                     width_cells: 1,
                     glyph_key,
                     fg: fg_color,
                     bold,
                     dim: cell.attrs.dim,
                     custom_id: 0,
-                    selected: term.is_selected(row, start),
+                    selected: term.is_selected(row, col),
                     box_glyph: false,
                     x_offset: Some(x_offset),
                     run_shaped: Some(super::runs::run_glyph_to_shaped(g)),

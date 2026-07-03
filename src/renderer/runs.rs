@@ -1,4 +1,4 @@
-//! Agrupacion de celdas en runs ligables para shaping multi-caracter.
+//! Agrupacion de secuencias ligables y shaping multi-caracter.
 
 use glyphon::cosmic_text::{Metrics, Shaping, Style, Weight};
 use glyphon::CacheKey;
@@ -9,18 +9,25 @@ use super::builtin::is_box_glyph;
 use super::metrics::CellMetrics;
 use super::resolve_family;
 
+/// Secuencias tipograficas habituales en fuentes con ligaduras (Fira Code, etc.).
+/// Ordenadas de mayor a menor longitud para greedy match.
+const LIGATURE_PATTERNS: &[&str] = &[
+    "...", "!==", "===", "==", "!=", ">=", "<=", "=>", "->", "<-", "::", "&&", "||", "//", "/*",
+    "*/", "..",
+];
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunGlyph {
     pub cache_key: CacheKey,
-    /// Offset desde el inicio del run, en px.
-    pub x: f32,
+    /// Primera columna del cluster dentro del run (0..run.cols).
+    pub col_in_run: usize,
     pub top: f32,
     pub line_y: f32,
     pub width: f32,
     pub height: f32,
 }
 
-/// Shapea un run completo con ligaduras (sin ancho monospace forzado por char).
+/// Shapea una secuencia corta con ligaduras, ancho monospace por celda.
 pub fn shape_run(
     font_system: &mut glyphon::FontSystem,
     metrics: &CellMetrics,
@@ -32,7 +39,13 @@ pub fn shape_run(
 ) -> Vec<RunGlyph> {
     let ct = Metrics::new(metrics.font_size, metrics.cell_h);
     let mut buf = glyphon::Buffer::new(font_system, ct);
-    buf.set_size(font_system, None, Some(metrics.cell_h));
+    buf.set_monospace_width(font_system, Some(metrics.cell_w));
+    let run_cols = text.chars().count().max(1) as f32;
+    buf.set_size(
+        font_system,
+        Some(metrics.cell_w * run_cols),
+        Some(metrics.cell_h),
+    );
 
     let mut attrs = glyphon::Attrs::new().family(resolve_family(family));
     if bold {
@@ -52,9 +65,11 @@ pub fn shape_run(
         let line_y = run.line_y;
         for g in run.glyphs.iter() {
             let physical = g.physical((0.0, line_y), 1.0);
+            let byte_start = g.start.min(text.len());
+            let col_in_run = text[..byte_start].chars().count();
             out.push(RunGlyph {
                 cache_key: physical.cache_key,
-                x: g.x,
+                col_in_run,
                 top: physical.y as f32,
                 line_y,
                 width: g.w,
@@ -83,64 +98,91 @@ pub fn run_glyph_to_shaped(g: &RunGlyph) -> super::glyph::ShapedGlyph {
 pub struct LigRun {
     pub start_col: usize,
     pub text: String,
-    /// Columnas cubiertas (== text.chars().count() para runs no-wide).
+    /// Columnas cubiertas (== text.chars().count()).
     pub cols: usize,
 }
 
-/// True si la celda puede ir en un run ligable.
+/// True si la celda puede participar en una secuencia ligable.
 pub fn is_ligable_cell(cell: &Cell) -> bool {
-    cell.width == 1 && cell.ch != ' ' && cell.ch != '\0' && !is_box_glyph(cell.ch)
+    if cell.width != 1 || cell.ch == ' ' || cell.ch == '\0' || is_box_glyph(cell.ch) {
+        return false;
+    }
+    // Iconos Powerline/Nerd Font (PUA): siempre per-celda.
+    let u = cell.ch as u32;
+    !(0xE000..=0xF8FF).contains(&u)
 }
 
-fn ligable(cell: &Cell) -> bool {
-    is_ligable_cell(cell)
-}
-
-/// Mismos atributos visuales => mismo run.
 fn same_style(a: &Cell, b: &Cell) -> bool {
     a.attrs == b.attrs && a.hyperlink == b.hyperlink
 }
 
-/// Agrupa runs ligables. `is_selected(col)` corta el run en fronteras de seleccion.
-pub fn group_runs(row: &[Cell], cols: usize, is_selected: impl Fn(usize) -> bool) -> Vec<LigRun> {
-    let mut runs = Vec::new();
-    let mut cur: Option<LigRun> = None;
-    let mut prev_idx: Option<usize> = None;
-    for col in 0..cols.min(row.len()) {
-        let cell = &row[col];
-        let ok = ligable(cell)
-            && prev_idx
-                .map(|p| same_style(&row[p], cell) && is_selected(p) == is_selected(col))
-                .unwrap_or(true);
-        if ok {
-            let run = cur.get_or_insert(LigRun {
-                start_col: col,
-                text: String::new(),
-                cols: 0,
-            });
-            run.text.push(cell.ch);
-            run.cols += 1;
-            prev_idx = Some(col);
-        } else {
-            if let Some(r) = cur.take() {
-                runs.push(r);
-            }
-            if ligable(cell) {
-                cur = Some(LigRun {
-                    start_col: col,
-                    text: cell.ch.to_string(),
-                    cols: 1,
-                });
-                prev_idx = Some(col);
-            } else {
-                prev_idx = None;
-            }
+fn pattern_matches(
+    row: &[Cell],
+    start_col: usize,
+    pattern: &str,
+    is_selected: &impl Fn(usize) -> bool,
+) -> bool {
+    let sel = is_selected(start_col);
+    for (i, ch) in pattern.chars().enumerate() {
+        let col = start_col + i;
+        let Some(cell) = row.get(col) else {
+            return false;
+        };
+        if cell.ch != ch || !is_ligable_cell(cell) {
+            return false;
+        }
+        if i > 0 && !same_style(&row[start_col], cell) {
+            return false;
+        }
+        if is_selected(col) != sel {
+            return false;
         }
     }
-    if let Some(r) = cur.take() {
-        runs.push(r);
+    true
+}
+
+/// Detecta solo secuencias que forman ligaduras tipograficas (no runs de estilo homogeneo).
+pub fn group_ligature_runs(
+    row: &[Cell],
+    cols: usize,
+    is_selected: impl Fn(usize) -> bool,
+) -> Vec<LigRun> {
+    let mut runs = Vec::new();
+    let mut col = 0;
+    let limit = cols.min(row.len());
+    while col < limit {
+        if !is_ligable_cell(&row[col]) {
+            col += 1;
+            continue;
+        }
+        let mut matched = false;
+        for pattern in LIGATURE_PATTERNS {
+            let plen = pattern.chars().count();
+            if col + plen > limit {
+                continue;
+            }
+            if pattern_matches(row, col, pattern, &is_selected) {
+                runs.push(LigRun {
+                    start_col: col,
+                    text: pattern.to_string(),
+                    cols: plen,
+                });
+                col += plen;
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            col += 1;
+        }
     }
     runs
+}
+
+/// True si `col` pertenece a alguna secuencia ligable detectada.
+pub fn in_ligature_run(col: usize, runs: &[LigRun]) -> bool {
+    runs.iter()
+        .any(|r| (r.start_col..r.start_col + r.cols).contains(&col))
 }
 
 #[cfg(test)]
@@ -149,40 +191,58 @@ mod tests {
     use crate::grid::Cell;
 
     #[test]
-    fn agrupa_run_homogeneo_y_corta_en_cambio_de_color() {
+    fn detecta_solo_secuencia_ligadura() {
         let mut row = vec![Cell::default(); 6];
         for (i, ch) in "a=>b".chars().enumerate() {
             row[i].ch = ch;
         }
         row[3].attrs.fg = crate::ansi::Color::Red;
-        let runs = group_runs(&row, 4, |_| false);
-        assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0].start_col, 0);
-        assert_eq!(runs[0].text, "a=>");
-        assert_eq!(runs[1].text, "b");
+        let runs = group_ligature_runs(&row, 4, |_| false);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].start_col, 1);
+        assert_eq!(runs[0].text, "=>");
     }
 
     #[test]
-    fn seleccion_corta_run() {
+    fn seleccion_corta_ligadura() {
         let mut row = vec![Cell::default(); 4];
-        for (i, ch) in "abcd".chars().enumerate() {
+        for (i, ch) in "x=>y".chars().enumerate() {
             row[i].ch = ch;
         }
-        let runs = group_runs(&row, 4, |col| col >= 2);
-        assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0].text, "ab");
-        assert_eq!(runs[1].text, "cd");
+        let runs = group_ligature_runs(&row, 4, |col| col >= 2);
+        assert!(runs.is_empty());
     }
 
     #[test]
-    fn wide_y_box_rompen_run() {
-        let mut row = vec![Cell::default(); 4];
-        row[0].ch = '─';
-        row[1].ch = 'a';
-        row[2].ch = 'b';
-        let runs = group_runs(&row, 3, |_| false);
-        assert!(runs.iter().any(|r| r.text == "ab"));
-        assert!(runs.iter().all(|r| !r.text.contains('─')));
+    fn path_largo_no_genera_run() {
+        let path = "~/Documentos/Dev/baud";
+        let mut row = vec![Cell::default(); path.chars().count()];
+        for (i, ch) in path.chars().enumerate() {
+            row[i].ch = ch;
+        }
+        let runs = group_ligature_runs(&row, row.len(), |_| false);
+        assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn pua_no_es_ligable() {
+        let cell = Cell {
+            ch: '\u{E0B0}',
+            ..Default::default()
+        };
+        assert!(!is_ligable_cell(&cell));
+    }
+
+    #[test]
+    fn in_ligature_run_cubre_rango() {
+        let runs = vec![LigRun {
+            start_col: 2,
+            text: "=>".into(),
+            cols: 2,
+        }];
+        assert!(in_ligature_run(2, &runs));
+        assert!(in_ligature_run(3, &runs));
+        assert!(!in_ligature_run(4, &runs));
     }
 
     #[test]
@@ -198,5 +258,6 @@ mod tests {
         );
         let glyphs = shape_run(&mut fs, &m, &fam, "=>", false, false, false);
         assert!(!glyphs.is_empty());
+        assert_eq!(glyphs[0].col_in_run, 0);
     }
 }
