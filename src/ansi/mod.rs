@@ -3866,7 +3866,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // has_blink_stuff / reset_blink_phase (Renderer 4)
+    // has_blink_stuff / reset_blink_phase
     // -----------------------------------------------------------------
 
     /// Cursor visible + por defecto blink activo + sin scrollback => hay blink.
