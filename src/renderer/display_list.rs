@@ -7,7 +7,7 @@ use super::decorations::cursor_glyph;
 use super::glyph::{is_wide_continuation, resolve_glyph_key, GlyphKey};
 use super::metrics::CellMetrics;
 use super::palette::Palette;
-use super::runs::{group_runs, shape_run};
+use super::runs::{group_runs, is_ligable_cell, shape_run};
 use super::selection_bg_glyphon;
 
 /// Factor de atenuacion RGB para SGR dim (2) cuando `dim_alpha` esta desactivado.
@@ -470,13 +470,8 @@ impl DisplayListBuilder {
                 fg
             };
 
-            if ligatures && !box_glyph {
-                let keep_cursor_space = cursor_rendered
-                    && matches!(term.cursor_style, CursorStyle::Block)
-                    && cell.ch == ' ';
-                if !keep_cursor_space {
-                    continue;
-                }
+            if ligatures && is_ligable_cell(cell) {
+                continue;
             }
 
             let Some(glyph_key) = resolve_glyph_key(source_row, col, font_family) else {
@@ -606,14 +601,14 @@ impl DisplayListBuilder {
                 cell.attrs.dim,
             );
 
-            for g in shaped_glyphs {
+            for (gi, g) in shaped_glyphs.iter().enumerate() {
                 let x_offset = run.start_col as f32 * metrics.cell_w + g.x;
                 let glyph_key = GlyphKey {
                     ch: run.text.chars().next().unwrap_or(' '),
                     bold,
                     italic: cell.attrs.italic,
                     dim: cell.attrs.dim,
-                    family: format!("{font_family}#lig:{start}:{x_offset:.3}"),
+                    family: format!("{font_family}#lig:{start}:{gi}"),
                 };
                 list.text_glyphs.push(TextGlyph {
                     row,
@@ -627,7 +622,7 @@ impl DisplayListBuilder {
                     selected: term.is_selected(row, start),
                     box_glyph: false,
                     x_offset: Some(x_offset),
-                    run_shaped: Some(super::runs::run_glyph_to_shaped(&g)),
+                    run_shaped: Some(super::runs::run_glyph_to_shaped(g)),
                 });
             }
         }

@@ -88,8 +88,12 @@ pub struct LigRun {
 }
 
 /// True si la celda puede ir en un run ligable.
-fn ligable(cell: &Cell) -> bool {
+pub fn is_ligable_cell(cell: &Cell) -> bool {
     cell.width == 1 && cell.ch != ' ' && cell.ch != '\0' && !is_box_glyph(cell.ch)
+}
+
+fn ligable(cell: &Cell) -> bool {
+    is_ligable_cell(cell)
 }
 
 /// Mismos atributos visuales => mismo run.
@@ -156,6 +160,18 @@ mod tests {
         assert_eq!(runs[0].start_col, 0);
         assert_eq!(runs[0].text, "a=>");
         assert_eq!(runs[1].text, "b");
+    }
+
+    #[test]
+    fn seleccion_corta_run() {
+        let mut row = vec![Cell::default(); 4];
+        for (i, ch) in "abcd".chars().enumerate() {
+            row[i].ch = ch;
+        }
+        let runs = group_runs(&row, 4, |col| col >= 2);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].text, "ab");
+        assert_eq!(runs[1].text, "cd");
     }
 
     #[test]
