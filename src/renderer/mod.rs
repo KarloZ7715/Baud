@@ -512,6 +512,11 @@ impl Renderer {
         } else {
             None
         };
+        let mut swash_cache = if self.ligatures {
+            Some(&mut self.swash_cache)
+        } else {
+            None
+        };
         DisplayListBuilder::build(
             &mut self.display_list,
             term,
@@ -528,6 +533,7 @@ impl Renderer {
             blink_on,
             self.ligatures,
             &mut font_system,
+            &mut swash_cache,
         );
 
         let mut custom_glyphs = Vec::new();
@@ -1040,8 +1046,8 @@ mod tests {
     #[test]
     fn test_font_config_defaults() {
         let fc = FontConfig::default();
-        assert_eq!(fc.family, "MesloLGS Nerd Font Mono");
-        assert_eq!(fc.size, 14);
+        assert_eq!(fc.family, "FiraCode Nerd Font Mono");
+        assert_eq!(fc.size, 12);
     }
 
     #[test]

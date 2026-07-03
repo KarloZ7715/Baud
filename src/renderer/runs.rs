@@ -1,6 +1,6 @@
 //! Agrupacion de secuencias ligables y shaping multi-caracter.
 
-use glyphon::cosmic_text::{Hinting, Metrics, Shaping, Style, Weight};
+use glyphon::cosmic_text::{FeatureTag, FontFeatures, Hinting, Metrics, Shaping, Style, Weight};
 use glyphon::CacheKey;
 
 use crate::grid::Cell;
@@ -25,6 +25,8 @@ pub struct RunGlyph {
     pub cluster_cols: usize,
     pub top: f32,
     pub line_y: f32,
+    /// Offset X del layout dentro del run (physical.x de cosmic-text).
+    pub left: f32,
     pub width: f32,
     pub height: f32,
 }
@@ -61,7 +63,36 @@ fn reference_line_y(
         .unwrap_or(metrics.font_size)
 }
 
-/// Shapea una secuencia corta con ligaduras, ancho monospace por celda.
+fn ligature_attrs(
+    family: glyphon::Family<'_>,
+    bold: bool,
+    italic: bool,
+    dim: bool,
+) -> glyphon::Attrs<'_> {
+    let mut features = FontFeatures::new();
+    features.enable(FeatureTag::CONTEXTUAL_ALTERNATES);
+    features.enable(FeatureTag::STANDARD_LIGATURES);
+    features.enable(FeatureTag::CONTEXTUAL_LIGATURES);
+
+    let mut attrs = glyphon::Attrs::new().family(family).font_features(features);
+    if bold {
+        attrs = attrs.weight(Weight::BOLD);
+    } else if dim {
+        attrs = attrs.weight(Weight::LIGHT);
+    }
+    if italic {
+        attrs = attrs.style(Style::Italic);
+    }
+    attrs
+}
+
+/// True si el shaping colapso el patron en menos glifos o clusters multi-celda.
+#[cfg(test)]
+pub(crate) fn ligature_collapsed(glyphs: &[RunGlyph], char_count: usize) -> bool {
+    glyphs.iter().any(|g| g.cluster_cols > 1) || glyphs.len() < char_count
+}
+
+/// Shapea una secuencia corta con ligaduras (sin forzar ancho monospace).
 pub fn shape_run(
     font_system: &mut glyphon::FontSystem,
     metrics: &CellMetrics,
@@ -73,24 +104,12 @@ pub fn shape_run(
 ) -> Vec<RunGlyph> {
     let ct = Metrics::new(metrics.font_size, metrics.cell_h);
     let mut buf = glyphon::Buffer::new(font_system, ct);
-    buf.set_monospace_width(font_system, Some(metrics.cell_w));
     buf.set_hinting(font_system, Hinting::Enabled);
-    let run_cols = text.chars().count().max(1) as f32;
-    buf.set_size(
-        font_system,
-        Some(metrics.cell_w * run_cols),
-        Some(metrics.cell_h),
-    );
+    // Sin ancho fijo: Fira Code emite glifos marcador (sin bitmap) + glifo visible;
+    // forzar cell_w*cols deja solo el marcador y la ligadura desaparece.
+    buf.set_size(font_system, None, None);
 
-    let mut attrs = glyphon::Attrs::new().family(resolve_family(family));
-    if bold {
-        attrs = attrs.weight(Weight::BOLD);
-    } else if dim {
-        attrs = attrs.weight(Weight::LIGHT);
-    }
-    if italic {
-        attrs = attrs.style(Style::Italic);
-    }
+    let attrs = ligature_attrs(resolve_family(family), bold, italic, dim);
 
     buf.set_text(font_system, text, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
@@ -119,6 +138,7 @@ pub fn shape_run(
                 cluster_cols,
                 top: anchor.y as f32,
                 line_y,
+                left: physical.x as f32,
                 width: g.w,
                 height: run.line_height,
             });
@@ -133,7 +153,7 @@ pub fn run_glyph_to_shaped(g: &RunGlyph) -> super::glyph::ShapedGlyph {
         cache_key: g.cache_key,
         bitmap_w: g.width,
         bitmap_h: g.height,
-        left: 0.0,
+        left: g.left,
         top: g.top,
         line_y: g.line_y,
         advance: g.width,
@@ -321,6 +341,29 @@ mod tests {
     }
 
     #[test]
+    fn shape_run_colapsa_patrones_programacion_si_la_fuente_los_soporta() {
+        let mut fs = crate::renderer::terminal_fallback::create_font_system();
+        let fam = crate::config::FontConfig::default().family;
+        let m = crate::renderer::metrics::CellMetrics::measure(
+            &mut fs,
+            &fam,
+            14.0,
+            1.0,
+            crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+        );
+        for text in ["=>", "->", "=="] {
+            let glyphs = shape_run(&mut fs, &m, &fam, text, false, false, false);
+            let char_count = text.chars().count();
+            if ligature_collapsed(&glyphs, char_count) {
+                assert!(
+                    glyphs.len() < char_count || glyphs.iter().any(|g| g.cluster_cols > 1),
+                    "ligadura colapsada pero sin senal clara para {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn shape_run_top_alineado_con_per_celda() {
         let mut fs = crate::renderer::terminal_fallback::create_font_system();
         let fam = crate::config::FontConfig::default().family;
@@ -369,5 +412,348 @@ mod tests {
         let glyphs = shape_run(&mut fs, &m, &fam, "=>", false, false, false);
         assert!(!glyphs.is_empty());
         assert_eq!(glyphs[0].col_in_run, 0);
+    }
+
+    #[test]
+    fn shape_run_fira_rasteriza_en_12_y_14() {
+        use crate::renderer::glyph_cache::cache_key_rasterizes;
+
+        let mut fs = crate::renderer::terminal_fallback::create_font_system();
+        let db = fs.db();
+        if !db
+            .faces()
+            .any(|f| f.families.iter().any(|(n, _)| n == "Fira Code"))
+        {
+            return;
+        }
+        let mut swash = glyphon::SwashCache::new();
+        for size in [12.0_f32, 14.0] {
+            let m = crate::renderer::metrics::CellMetrics::measure(
+                &mut fs,
+                "Fira Code",
+                size,
+                1.0,
+                crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+            );
+            for pattern in ["=>", "==", "==="] {
+                let glyphs = shape_run(&mut fs, &m, "Fira Code", pattern, false, false, false);
+                assert!(
+                    glyphs
+                        .iter()
+                        .any(|g| { cache_key_rasterizes(&mut fs, &mut swash, g.cache_key) }),
+                    "size={size} pattern={pattern} sin glifo rasterizable: {glyphs:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ligature_cache_key_vs_per_celda() {
+        use crate::renderer::glyph_cache::cache_key_rasterizes;
+
+        let mut fs = crate::renderer::terminal_fallback::create_font_system();
+        if !fs
+            .db()
+            .faces()
+            .any(|f| f.families.iter().any(|(n, _)| n == "Fira Code"))
+        {
+            return;
+        }
+        let m = crate::renderer::metrics::CellMetrics::measure(
+            &mut fs,
+            "Fira Code",
+            12.0,
+            1.0,
+            crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+        );
+        let mut swash = glyphon::SwashCache::new();
+        let cell = crate::renderer::glyph::shape_glyph(
+            &mut fs,
+            &m,
+            &crate::renderer::glyph::GlyphKey {
+                ch: '=',
+                bold: false,
+                italic: false,
+                dim: false,
+                family: "Fira Code".into(),
+            },
+            "Fira Code",
+        );
+        let run_g = super::shape_run(&mut fs, &m, "Fira Code", "==", false, false, false);
+        assert!(
+            run_g.len() >= 2,
+            "== debe producir marcador + glifo visible: {run_g:?}"
+        );
+        let cell_img = swash.get_image_uncached(&mut fs, cell.cache_key);
+        assert!(cell_img.is_some_and(|i| !i.data.is_empty()));
+        assert!(
+            run_g
+                .iter()
+                .any(|g| cache_key_rasterizes(&mut fs, &mut swash, g.cache_key)),
+            "ningun glifo del run == rasteriza"
+        );
+    }
+
+    #[test]
+    fn ligature_run_glyphs_rasterizan_fira() {
+        use crate::renderer::glyph_cache::cache_key_rasterizes;
+
+        let mut fs = crate::renderer::terminal_fallback::create_font_system();
+        if !fs
+            .db()
+            .faces()
+            .any(|f| f.families.iter().any(|(n, _)| n == "Fira Code"))
+        {
+            return;
+        }
+        let m = crate::renderer::metrics::CellMetrics::measure(
+            &mut fs,
+            "Fira Code",
+            12.0,
+            1.0,
+            crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+        );
+        let mut swash = glyphon::SwashCache::new();
+        let mut cache = crate::renderer::glyph_cache::GlyphCache::new();
+
+        for pattern in ["==", "===", ".."] {
+            let glyphs = super::shape_run(&mut fs, &m, "Fira Code", pattern, false, false, false);
+            let visible: Vec<_> = glyphs
+                .iter()
+                .filter(|g| cache_key_rasterizes(&mut fs, &mut swash, g.cache_key))
+                .collect();
+            assert!(
+                !visible.is_empty(),
+                "patron={pattern} sin glifo visible en {glyphs:?}"
+            );
+            for g in visible {
+                let shaped = super::run_glyph_to_shaped(g);
+                let gi = g.col_in_run;
+                let key = crate::renderer::glyph::GlyphKey {
+                    ch: pattern.chars().nth(g.col_in_run).unwrap_or(' '),
+                    bold: false,
+                    italic: false,
+                    dim: false,
+                    family: format!("Fira Code#lig:{pattern}:{gi}"),
+                };
+                let cached = cache.get_or_insert_shaped(&mut fs, &mut swash, key, shaped);
+                assert!(!cached.raster.missing, "patron={pattern} gi={gi}");
+                assert!(cached.raster.width > 0 && cached.raster.height > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn ligature_probe_report() {
+        use super::ligature_probe::probe_pipeline;
+
+        let family = std::env::var("BAUD_PROBE_FAMILY")
+            .unwrap_or_else(|_| crate::config::FontConfig::default().family);
+        let font_size = std::env::var("BAUD_PROBE_SIZE")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(12.0);
+        let mut fs = crate::renderer::terminal_fallback::create_font_system();
+        let layers = probe_pipeline(&mut fs, &family, font_size, 1.0);
+        eprintln!("\n=== ligature probe: family='{family}' size={font_size} ===");
+        for layer in &layers {
+            let mark = if layer.ok { "OK" } else { "FAIL" };
+            eprintln!("[{mark}] {} — {}", layer.layer, layer.detail);
+        }
+        let failing: Vec<_> = layers.iter().filter(|l| !l.ok).map(|l| l.layer).collect();
+        eprintln!(
+            "primera capa rota: {}",
+            failing
+                .first()
+                .copied()
+                .unwrap_or("ninguna (pipeline OK en shaping)")
+        );
+    }
+}
+
+#[cfg(test)]
+mod ligature_probe {
+    use super::*;
+    use crate::renderer::glyph_cache::cache_key_rasterizes;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) struct Layer {
+        pub layer: &'static str,
+        pub ok: bool,
+        pub detail: String,
+    }
+
+    fn fontdb_exact_family(db: &glyphon::fontdb::Database, family: &str) -> bool {
+        db.faces()
+            .any(|face| face.families.iter().any(|(name, _)| name == family))
+    }
+
+    fn fontdb_similar_families(db: &glyphon::fontdb::Database, family: &str) -> Vec<String> {
+        let needle = family.to_ascii_lowercase();
+        let mut out = Vec::new();
+        for face in db.faces() {
+            for (name, _) in &face.families {
+                let lower = name.to_ascii_lowercase();
+                if lower.contains(&needle) && !out.iter().any(|s: &String| s == name) {
+                    out.push(name.clone());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn resolved_font_label(font_system: &glyphon::FontSystem, cache_key: &CacheKey) -> String {
+        font_system
+            .db()
+            .face(cache_key.font_id)
+            .and_then(|face| face.families.first().map(|(name, _)| name.clone()))
+            .unwrap_or_else(|| format!("font_id={:?}", cache_key.font_id))
+    }
+
+    fn would_render_ligature_glyph(
+        font_system: &mut glyphon::FontSystem,
+        swash_cache: &mut glyphon::SwashCache,
+        glyphs: &[RunGlyph],
+    ) -> bool {
+        use crate::renderer::glyph_cache::cache_key_rasterizes;
+        glyphs
+            .iter()
+            .any(|g| cache_key_rasterizes(font_system, swash_cache, g.cache_key))
+    }
+
+    fn glyph_substituted(
+        font_system: &mut glyphon::FontSystem,
+        metrics: &crate::renderer::metrics::CellMetrics,
+        family: &str,
+        pattern: &str,
+        run_glyphs: &[RunGlyph],
+    ) -> bool {
+        let Some(run_glyph) = run_glyphs.first() else {
+            return false;
+        };
+        let per_char_ids: Vec<u16> = pattern
+            .chars()
+            .map(|ch| {
+                crate::renderer::glyph::shape_glyph(
+                    font_system,
+                    metrics,
+                    &crate::renderer::glyph::GlyphKey {
+                        ch,
+                        bold: false,
+                        italic: false,
+                        dim: false,
+                        family: family.to_string(),
+                    },
+                    family,
+                )
+                .cache_key
+                .glyph_id
+            })
+            .collect();
+        run_glyph.cache_key.glyph_id != per_char_ids.first().copied().unwrap_or(0)
+            || run_glyphs.len() < pattern.chars().count()
+    }
+
+    pub(super) fn probe_pipeline(
+        font_system: &mut glyphon::FontSystem,
+        family: &str,
+        font_size: f32,
+        line_height: f32,
+    ) -> Vec<Layer> {
+        let mut layers = Vec::new();
+        let db = font_system.db();
+        let exact = fontdb_exact_family(db, family);
+        let similar = fontdb_similar_families(db, family);
+        layers.push(Layer {
+            layer: "1_fontdb",
+            ok: exact,
+            detail: if exact {
+                format!("'{family}' encontrada en fontdb")
+            } else if similar.is_empty() {
+                format!("'{family}' NO esta en fontdb; sin nombres parecidos")
+            } else {
+                format!(
+                    "'{family}' NO exacta en fontdb; parecidas: {}",
+                    similar.join(", ")
+                )
+            },
+        });
+
+        let test_line = "=== == => .. ...";
+        let mut row = vec![Cell::default(); test_line.chars().count()];
+        for (i, ch) in test_line.chars().enumerate() {
+            row[i].ch = ch;
+        }
+        let runs = group_ligature_runs(&row, row.len(), |_| false);
+        layers.push(Layer {
+            layer: "2_pattern_detect",
+            ok: !runs.is_empty(),
+            detail: format!(
+                "patrones={} {}",
+                runs.len(),
+                runs.iter()
+                    .map(|r| format!("@{}:'{}'", r.start_col, r.text))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+
+        let metrics = crate::renderer::metrics::CellMetrics::measure(
+            font_system,
+            family,
+            font_size,
+            line_height,
+            crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+        );
+        let mut swash = glyphon::SwashCache::new();
+
+        for pattern in ["=>", "==", "==="] {
+            let glyphs = shape_run(font_system, &metrics, family, pattern, false, false, false);
+            let cols = pattern.chars().count();
+            let rasterizes = would_render_ligature_glyph(font_system, &mut swash, &glyphs);
+            let substituted = glyph_substituted(font_system, &metrics, family, pattern, &glyphs);
+            let glyph_summary: Vec<String> = glyphs
+                .iter()
+                .enumerate()
+                .map(|(i, g)| {
+                    let img = if cache_key_rasterizes(font_system, &mut swash, g.cache_key) {
+                        "img"
+                    } else {
+                        "no-img"
+                    };
+                    format!(
+                        "#{i} id={} font={} cluster_cols={} {img}",
+                        g.cache_key.glyph_id,
+                        resolved_font_label(font_system, &g.cache_key),
+                        g.cluster_cols
+                    )
+                })
+                .collect();
+            let uses_requested_font = glyphs
+                .iter()
+                .all(|g| resolved_font_label(font_system, &g.cache_key) == family);
+            layers.push(Layer {
+                layer: "3_shape",
+                ok: rasterizes && substituted && uses_requested_font,
+                detail: format!(
+                    "'{pattern}': glyphs={}/{} rasterizes={rasterizes} substituted={substituted} uses_family={uses_requested_font} [{}]",
+                    glyphs.len(),
+                    cols,
+                    glyph_summary.join("; ")
+                ),
+            });
+        }
+
+        layers.push(Layer {
+            layer: "4_render_decision",
+            ok: ["=>", "==", "==="].iter().any(|p| {
+                let glyphs = shape_run(font_system, &metrics, family, p, false, false, false);
+                would_render_ligature_glyph(font_system, &mut swash, &glyphs)
+            }),
+            detail: "true si al menos un patron tiene glifo rasterizable".into(),
+        });
+
+        layers
     }
 }

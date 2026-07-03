@@ -278,7 +278,14 @@ fn text_glyph_to_custom(
     }
 
     let left = if let Some(x_offset) = text.x_offset {
-        x_offset + metrics.padding_x + metrics.glyph_offset_x + cached.raster.placement_left as f32
+        if text.run_shaped.is_some() {
+            x_offset + metrics.padding_x + cached.shaped.left + cached.raster.placement_left as f32
+        } else {
+            x_offset
+                + metrics.padding_x
+                + metrics.glyph_offset_x
+                + cached.raster.placement_left as f32
+        }
     } else {
         text.col as f32 * metrics.cell_w
             + metrics.padding_x

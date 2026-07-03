@@ -195,6 +195,7 @@ impl DisplayListBuilder {
         blink_on: bool,
         ligatures: bool,
         font_system: &mut Option<&mut glyphon::FontSystem>,
+        swash_cache: &mut Option<&mut glyphon::SwashCache>,
     ) {
         if damage.is_full() {
             for row in 0..rows {
@@ -213,6 +214,7 @@ impl DisplayListBuilder {
                     blink_on,
                     ligatures,
                     font_system,
+                    swash_cache,
                 );
             }
         } else {
@@ -236,6 +238,7 @@ impl DisplayListBuilder {
                     blink_on,
                     ligatures,
                     font_system,
+                    swash_cache,
                 );
             }
         }
@@ -335,6 +338,7 @@ impl DisplayListBuilder {
         blink_on: bool,
         ligatures: bool,
         font_system: &mut Option<&mut glyphon::FontSystem>,
+        swash_cache: &mut Option<&mut glyphon::SwashCache>,
     ) {
         let source_row = row_sources.get(row).copied().unwrap_or(&[]);
         let cursor_on_row = !show_scrollback
@@ -357,8 +361,8 @@ impl DisplayListBuilder {
             Vec::new()
         };
         let lig_handled = if ligatures {
-            font_system.as_deref_mut().map_or_else(HashSet::new, |fs| {
-                Self::build_row_text_runs(
+            match (font_system.as_deref_mut(), swash_cache.as_deref_mut()) {
+                (Some(fs), Some(swash)) => Self::build_row_text_runs(
                     list,
                     term,
                     metrics,
@@ -369,11 +373,13 @@ impl DisplayListBuilder {
                     row,
                     font_family,
                     fs,
+                    swash,
                     show_scrollback,
                     builtin_box_drawing,
                     blink_on,
-                )
-            })
+                ),
+                _ => HashSet::new(),
+            }
         } else {
             HashSet::new()
         };
@@ -562,10 +568,13 @@ impl DisplayListBuilder {
         row: usize,
         font_family: &str,
         font_system: &mut glyphon::FontSystem,
+        swash_cache: &mut glyphon::SwashCache,
         show_scrollback: bool,
-        builtin_box_drawing: bool,
+        _builtin_box_drawing: bool,
         blink_on: bool,
     ) -> HashSet<usize> {
+        use super::glyph_cache::cache_key_rasterizes;
+
         let mut handled = HashSet::new();
         for run in lig_runs {
             if run.text.is_empty() {
@@ -595,9 +604,24 @@ impl DisplayListBuilder {
                 cell.attrs.dim,
             );
 
+            let rasterizes: Vec<bool> = shaped_glyphs
+                .iter()
+                .map(|g| cache_key_rasterizes(font_system, swash_cache, g.cache_key))
+                .collect();
+            if !rasterizes.iter().any(|&ok| ok) {
+                continue;
+            }
+
+            let run_x = run.start_col as f32 * metrics.cell_w;
             for (gi, g) in shaped_glyphs.iter().enumerate() {
                 let col = run.start_col + g.col_in_run;
                 if col >= cols {
+                    continue;
+                }
+                for c in col..col + g.cluster_cols {
+                    handled.insert(c);
+                }
+                if !rasterizes[gi] {
                     continue;
                 }
                 let Some(cell_at) = source_row.get(col) else {
@@ -616,54 +640,27 @@ impl DisplayListBuilder {
                 } else {
                     fg
                 };
-                let box_glyph = builtin_box_drawing && super::builtin::supports(cell_at.ch);
-
-                if g.cluster_cols > 1 {
-                    for c in col..col + g.cluster_cols {
-                        handled.insert(c);
-                    }
-                    let x_offset = col as f32 * metrics.cell_w;
-                    let glyph_key = GlyphKey {
-                        ch: run.text.chars().nth(g.col_in_run).unwrap_or(' '),
-                        bold,
-                        italic: cell.attrs.italic,
-                        dim: cell.attrs.dim,
-                        family: format!("{font_family}#lig:{}:{gi}", run.text),
-                    };
-                    list.text_glyphs.push(TextGlyph {
-                        row,
-                        col,
-                        width_cells: g.cluster_cols.min(255) as u8,
-                        glyph_key,
-                        fg: fg_color,
-                        bold,
-                        dim: cell_at.attrs.dim,
-                        custom_id: 0,
-                        selected: term.is_selected(row, col),
-                        box_glyph: false,
-                        x_offset: Some(x_offset),
-                        run_shaped: Some(super::runs::run_glyph_to_shaped(g)),
-                    });
-                } else {
-                    handled.insert(col);
-                    let Some(glyph_key) = resolve_glyph_key(source_row, col, font_family) else {
-                        continue;
-                    };
-                    list.text_glyphs.push(TextGlyph {
-                        row,
-                        col,
-                        width_cells: cell_at.width.max(1),
-                        glyph_key,
-                        fg: fg_color,
-                        bold: cell_at.attrs.bold,
-                        dim: cell_at.attrs.dim,
-                        custom_id: 0,
-                        selected: term.is_selected(row, col),
-                        box_glyph,
-                        x_offset: None,
-                        run_shaped: None,
-                    });
-                }
+                let glyph_key = GlyphKey {
+                    ch: run.text.chars().nth(g.col_in_run).unwrap_or(' '),
+                    bold,
+                    italic: cell.attrs.italic,
+                    dim: cell.attrs.dim,
+                    family: format!("{font_family}#lig:{}:{gi}", run.text),
+                };
+                list.text_glyphs.push(TextGlyph {
+                    row,
+                    col,
+                    width_cells: g.cluster_cols.min(255) as u8,
+                    glyph_key,
+                    fg: fg_color,
+                    bold: cell_at.attrs.bold,
+                    dim: cell_at.attrs.dim,
+                    custom_id: 0,
+                    selected: term.is_selected(row, col),
+                    box_glyph: false,
+                    x_offset: Some(run_x),
+                    run_shaped: Some(super::runs::run_glyph_to_shaped(g)),
+                });
             }
         }
         handled
@@ -734,6 +731,7 @@ mod tests {
             true,
             false,
             &mut None,
+            &mut None,
         );
         list
     }
@@ -767,6 +765,7 @@ mod tests {
             true,
             blink_on,
             false,
+            &mut None,
             &mut None,
         );
         list
@@ -1087,6 +1086,7 @@ mod tests {
             true,
             false,
             &mut None,
+            &mut None,
         );
         let full_glyphs = list.text_glyphs.len();
         assert_eq!(full_glyphs, 8);
@@ -1111,6 +1111,7 @@ mod tests {
             true,
             true,
             false,
+            &mut None,
             &mut None,
         );
 

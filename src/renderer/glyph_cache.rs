@@ -136,6 +136,17 @@ impl GlyphCache {
     }
 }
 
+/// True si swash puede rasterizar este cache key (bitmap no vacio).
+pub(crate) fn cache_key_rasterizes(
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    cache_key: glyphon::CacheKey,
+) -> bool {
+    swash_cache
+        .get_image_uncached(font_system, cache_key)
+        .is_some_and(|image| !image.data.is_empty())
+}
+
 fn rasterize_shaped(
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
