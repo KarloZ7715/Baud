@@ -145,6 +145,9 @@ pub struct FontConfig {
     /// Dibujar U+2500..U+259F programaticamente. Si false, usa fuente.
     #[serde(default = "default_true")]
     pub builtin_box_drawing: bool,
+    /// Shaping multi-caracter con ligaduras tipograficas (off por defecto).
+    #[serde(default)]
+    pub ligatures: bool,
     /// Familias de fallback en orden de preferencia (emoji, CJK, símbolos).
     #[serde(default)]
     pub fallback: Vec<String>,
@@ -316,6 +319,7 @@ impl Default for FontConfig {
             glyph_offset: default_glyph_offset(),
             line_height: default_line_height(),
             builtin_box_drawing: true,
+            ligatures: false,
             fallback: Vec::new(),
         }
     }
@@ -933,6 +937,14 @@ height = 800
         assert_eq!(cfg.window.padding_x, 0);
         assert!(cfg.window.decorations);
         assert_eq!(cfg.window.startup, StartupState::Windowed);
+    }
+
+    #[test]
+    fn test_font_ligatures_default_false() {
+        assert!(!FontConfig::default().ligatures);
+        let toml = "[font]\nligatures = true\n";
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.font.ligatures);
     }
 
     #[test]
