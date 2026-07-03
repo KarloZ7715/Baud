@@ -451,10 +451,10 @@ fn default_font_family() -> String {
     // que por defecto busca "Courier New" (no disponible en Linux). En su lugar,
     // se usa una fuente concreta con soporte garantizado de box-drawing Unicode
     // y glifos TUI. El usuario puede sobrescribir esto en ~/.config/baud/config.toml.
-    "MesloLGS Nerd Font Mono".into()
+    "FiraCode Nerd Font Mono".into()
 }
 fn default_font_size() -> u16 {
-    14
+    12
 }
 fn default_glyph_offset() -> GlyphOffset {
     GlyphOffset { x: 0.0, y: 0.0 }
@@ -676,8 +676,8 @@ mod tests {
         assert_eq!(config.theme.bright_white, "#ffffff");
 
         // Fuente
-        assert_eq!(config.font.family, "MesloLGS Nerd Font Mono");
-        assert_eq!(config.font.size, 14);
+        assert_eq!(config.font.family, "FiraCode Nerd Font Mono");
+        assert_eq!(config.font.size, 12);
 
         // Ventana
         assert_eq!(config.window.opacity, 1.0);
@@ -982,8 +982,8 @@ background = "#ddeeff"
         assert_eq!(config.theme.selection_fg, Some("#0a0a0a".into()));
         assert_eq!(config.theme.red, "#e85d5d");
         // Fuente por defecto
-        assert_eq!(config.font.family, "MesloLGS Nerd Font Mono");
-        assert_eq!(config.font.size, 14);
+        assert_eq!(config.font.family, "FiraCode Nerd Font Mono");
+        assert_eq!(config.font.size, 12);
         // Ventana por defecto
         assert_eq!(config.window.opacity, 1.0);
     }
