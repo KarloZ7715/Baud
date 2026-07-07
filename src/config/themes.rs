@@ -2,26 +2,46 @@
 
 use super::ThemeConfig;
 
-const CATPPUCCIN_MOCHA: &str = include_str!("themes/catppuccin-mocha.toml");
-const TOKYO_NIGHT: &str = include_str!("themes/tokyo-night.toml");
-const GRUVBOX_DARK: &str = include_str!("themes/gruvbox-dark.toml");
-const NORD: &str = include_str!("themes/nord.toml");
-const CLAUDE_DARK: &str = include_str!("themes/claude-dark.toml");
+macro_rules! presets {
+    ($( ($name:literal, $body:expr) ),+ $(,)?) => {
+        const PRESETS: &[(&str, &str)] = &[ $( ($name, $body) ),+ ];
+        const PRESET_NAMES: &[&str] = &[ $( $name ),+ ];
+    };
+}
 
-const PRESETS: &[(&str, &str)] = &[
-    ("catppuccin-mocha", CATPPUCCIN_MOCHA),
-    ("tokyo-night", TOKYO_NIGHT),
-    ("gruvbox-dark", GRUVBOX_DARK),
-    ("nord", NORD),
-    ("claude-dark", CLAUDE_DARK),
-];
+presets!(
+    (
+        "catppuccin-mocha",
+        include_str!("themes/catppuccin-mocha.toml")
+    ),
+    ("tokyo-night", include_str!("themes/tokyo-night.toml")),
+    ("gruvbox-dark", include_str!("themes/gruvbox-dark.toml")),
+    ("nord", include_str!("themes/nord.toml")),
+    ("claude-dark", include_str!("themes/claude-dark.toml")),
+);
 
-/// Devuelve el `ThemeConfig` de un preset por nombre (`None` si no existe).
+/// Error al resolver un preset embebido.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresetError {
+    NotFound,
+    InvalidToml(String),
+}
+
+/// Resuelve un preset por nombre con error tipado.
+pub fn try_preset(name: &str) -> Result<ThemeConfig, PresetError> {
+    let (_, body) = PRESETS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .ok_or(PresetError::NotFound)?;
+    toml::from_str::<ThemeConfig>(body).map_err(|e| PresetError::InvalidToml(e.to_string()))
+}
+
+/// Devuelve el `ThemeConfig` de un preset por nombre (`None` si no existe o no parsea).
 pub fn preset(name: &str) -> Option<ThemeConfig> {
-    let (_, body) = PRESETS.iter().find(|(n, _)| *n == name)?;
-    match toml::from_str::<ThemeConfig>(body) {
+    match try_preset(name) {
         Ok(t) => Some(t),
-        Err(e) => {
+        Err(PresetError::NotFound) => None,
+        Err(PresetError::InvalidToml(e)) => {
             tracing::warn!("preset '{name}' inválido: {e}");
             None
         }
@@ -29,8 +49,8 @@ pub fn preset(name: &str) -> Option<ThemeConfig> {
 }
 
 /// Nombres de presets disponibles.
-pub fn available_presets() -> Vec<&'static str> {
-    PRESETS.iter().map(|(n, _)| *n).collect()
+pub fn available_presets() -> &'static [&'static str] {
+    PRESET_NAMES
 }
 
 #[cfg(test)]
@@ -47,11 +67,27 @@ mod tests {
     #[test]
     fn preset_desconocido_es_none() {
         assert!(preset("no-existe").is_none());
+        assert_eq!(try_preset("no-existe"), Err(PresetError::NotFound));
     }
 
     #[test]
-    fn lista_de_presets_no_vacia() {
+    fn lista_de_presets_completa() {
+        assert_eq!(available_presets().len(), PRESET_NAMES.len());
         assert!(available_presets().contains(&"catppuccin-mocha"));
-        assert!(available_presets().len() >= 4);
+    }
+
+    #[test]
+    fn todos_los_presets_parsean() {
+        for name in available_presets() {
+            try_preset(name).unwrap_or_else(|e| panic!("preset '{name}' falló: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn claude_dark_coincide_con_default() {
+        assert_eq!(
+            preset("claude-dark").expect("claude-dark parsea"),
+            ThemeConfig::default()
+        );
     }
 }

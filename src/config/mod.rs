@@ -1,9 +1,8 @@
 //! Sistema de configuración para Baud mediante archivos TOML.
 //!
-//! Las estructuras de este módulo utilizan `serde::Deserialize` con valores
-//! por defecto tomados del tema **Catppuccin Mocha**. La configuración se
-//! carga al inicio del programa (sin hot-reload) desde, por orden de
-//! prioridad:
+//! Los valores por defecto de apariencia corresponden al preset `claude-dark`.
+//! La configuración se carga al inicio del programa (sin hot-reload) desde, por
+//! orden de prioridad:
 //!
 //! 1. `$XDG_CONFIG_HOME/baud/config.toml` (o `~/.config/baud/config.toml` en Linux).
 //! 2. `./baud.toml` en el directorio de trabajo.
@@ -18,7 +17,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-pub use themes::{available_presets, preset};
+pub use themes::{available_presets, preset, try_preset, PresetError};
 
 // ---------------------------------------------------------------------------
 // Estructuras principales
@@ -82,7 +81,7 @@ pub struct CopyModeConfig {
 }
 
 /// Colores del tema de terminal (ANSI de 16 colores + extras).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ThemeConfig {
     #[serde(default = "default_foreground")]
     pub foreground: String,
@@ -110,8 +109,6 @@ pub struct ThemeConfig {
     pub cyan: String,
     #[serde(default = "default_white")]
     pub white: String,
-    // pony tail: Catppuccin Mocha no diferencia bright de los normales,
-    // por eso los brillantes apuntan a los mismos valores.
     #[serde(default = "default_bright_black")]
     pub bright_black: String,
     #[serde(default = "default_bright_red")]
@@ -136,6 +133,61 @@ pub struct ThemeConfig {
     pub dim_alpha: bool,
 }
 
+/// Tabla `[theme]` con campos opcionales para distinguir ausencia de override.
+macro_rules! define_theme_table {
+    ($( $field:ident ),+ $(,)?) => {
+        #[derive(Debug, Clone, Default, Deserialize)]
+        struct ThemeTable {
+            name: Option<String>,
+            selection_bg: Option<String>,
+            selection_fg: Option<String>,
+            $( $field: Option<String>, )+
+            bold_is_bright: Option<bool>,
+            dim_alpha: Option<bool>,
+        }
+
+        fn apply_theme_overrides(base: &mut ThemeConfig, table: &ThemeTable) {
+            $( if let Some(v) = &table.$field {
+                base.$field.clone_from(v);
+            } )+
+            if let Some(v) = &table.selection_bg {
+                base.selection_bg = Some(v.clone());
+            }
+            if let Some(v) = &table.selection_fg {
+                base.selection_fg = Some(v.clone());
+            }
+            if let Some(v) = table.bold_is_bright {
+                base.bold_is_bright = v;
+            }
+            if let Some(v) = table.dim_alpha {
+                base.dim_alpha = v;
+            }
+        }
+    };
+}
+
+define_theme_table!(
+    foreground,
+    background,
+    cursor,
+    black,
+    red,
+    green,
+    yellow,
+    blue,
+    magenta,
+    cyan,
+    white,
+    bright_black,
+    bright_red,
+    bright_green,
+    bright_yellow,
+    bright_blue,
+    bright_magenta,
+    bright_cyan,
+    bright_white,
+);
+
 /// Representación cruda de `theme` en TOML: nombre o tabla inline.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
@@ -148,35 +200,6 @@ impl Default for RawTheme {
     fn default() -> Self {
         Self::Table(Box::default())
     }
-}
-
-/// Tabla `[theme]` con campos opcionales para distinguir ausencia de override.
-#[derive(Debug, Clone, Default, Deserialize)]
-struct ThemeTable {
-    name: Option<String>,
-    foreground: Option<String>,
-    background: Option<String>,
-    cursor: Option<String>,
-    selection_bg: Option<String>,
-    selection_fg: Option<String>,
-    black: Option<String>,
-    red: Option<String>,
-    green: Option<String>,
-    yellow: Option<String>,
-    blue: Option<String>,
-    magenta: Option<String>,
-    cyan: Option<String>,
-    white: Option<String>,
-    bright_black: Option<String>,
-    bright_red: Option<String>,
-    bright_green: Option<String>,
-    bright_yellow: Option<String>,
-    bright_blue: Option<String>,
-    bright_magenta: Option<String>,
-    bright_cyan: Option<String>,
-    bright_white: Option<String>,
-    bold_is_bright: Option<bool>,
-    dim_alpha: Option<bool>,
 }
 
 /// Configuración sin resolver: `theme` queda en forma cruda hasta la conversión.
@@ -207,81 +230,16 @@ struct RawConfig {
 }
 
 fn theme_base_from_name(name: &str) -> ThemeConfig {
-    preset(name).unwrap_or_else(|| {
-        tracing::warn!("preset de tema desconocido: '{name}'");
-        ThemeConfig::default()
-    })
-}
-
-fn apply_theme_overrides(base: &mut ThemeConfig, table: &ThemeTable) {
-    if let Some(v) = &table.foreground {
-        base.foreground.clone_from(v);
-    }
-    if let Some(v) = &table.background {
-        base.background.clone_from(v);
-    }
-    if let Some(v) = &table.cursor {
-        base.cursor.clone_from(v);
-    }
-    if let Some(v) = &table.selection_bg {
-        base.selection_bg = Some(v.clone());
-    }
-    if let Some(v) = &table.selection_fg {
-        base.selection_fg = Some(v.clone());
-    }
-    if let Some(v) = &table.black {
-        base.black.clone_from(v);
-    }
-    if let Some(v) = &table.red {
-        base.red.clone_from(v);
-    }
-    if let Some(v) = &table.green {
-        base.green.clone_from(v);
-    }
-    if let Some(v) = &table.yellow {
-        base.yellow.clone_from(v);
-    }
-    if let Some(v) = &table.blue {
-        base.blue.clone_from(v);
-    }
-    if let Some(v) = &table.magenta {
-        base.magenta.clone_from(v);
-    }
-    if let Some(v) = &table.cyan {
-        base.cyan.clone_from(v);
-    }
-    if let Some(v) = &table.white {
-        base.white.clone_from(v);
-    }
-    if let Some(v) = &table.bright_black {
-        base.bright_black.clone_from(v);
-    }
-    if let Some(v) = &table.bright_red {
-        base.bright_red.clone_from(v);
-    }
-    if let Some(v) = &table.bright_green {
-        base.bright_green.clone_from(v);
-    }
-    if let Some(v) = &table.bright_yellow {
-        base.bright_yellow.clone_from(v);
-    }
-    if let Some(v) = &table.bright_blue {
-        base.bright_blue.clone_from(v);
-    }
-    if let Some(v) = &table.bright_magenta {
-        base.bright_magenta.clone_from(v);
-    }
-    if let Some(v) = &table.bright_cyan {
-        base.bright_cyan.clone_from(v);
-    }
-    if let Some(v) = &table.bright_white {
-        base.bright_white.clone_from(v);
-    }
-    if let Some(v) = table.bold_is_bright {
-        base.bold_is_bright = v;
-    }
-    if let Some(v) = table.dim_alpha {
-        base.dim_alpha = v;
+    match try_preset(name) {
+        Ok(t) => t,
+        Err(PresetError::NotFound) => {
+            tracing::warn!("preset de tema desconocido: '{name}'");
+            ThemeConfig::default()
+        }
+        Err(PresetError::InvalidToml(e)) => {
+            tracing::warn!("preset '{name}' inválido: {e}");
+            ThemeConfig::default()
+        }
     }
 }
 
@@ -1205,5 +1163,38 @@ background = "#000000"
     fn theme_inline_sin_nombre_sigue_funcionando() {
         let cfg: Config = toml::from_str("[theme]\nbackground = \"#123456\"").unwrap();
         assert_eq!(cfg.theme.background, "#123456");
+    }
+
+    #[test]
+    fn theme_preset_desconocido_usa_default() {
+        let cfg: Config = toml::from_str("theme = \"bogus\"").unwrap();
+        assert_eq!(cfg.theme, ThemeConfig::default());
+    }
+
+    #[test]
+    fn theme_nombre_desconocido_mas_override_usa_default_base() {
+        let toml = r##"
+[theme]
+name = "bogus"
+background = "#000000"
+"##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.theme.background, "#000000");
+        assert_eq!(cfg.theme.foreground, ThemeConfig::default().foreground);
+    }
+
+    #[test]
+    fn theme_preset_override_bold_is_bright_y_dim_alpha() {
+        let toml = r##"
+[theme]
+name = "nord"
+bold_is_bright = true
+dim_alpha = true
+"##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let nord = crate::config::themes::preset("nord").unwrap();
+        assert_eq!(cfg.theme.background, nord.background);
+        assert!(cfg.theme.bold_is_bright);
+        assert!(cfg.theme.dim_alpha);
     }
 }
