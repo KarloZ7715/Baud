@@ -1066,6 +1066,15 @@ impl App {
                     }
                     return true;
                 }
+                Key::Named(NamedKey::Space) if !ctrl && !alt => {
+                    if let Some(ref mut s) = guard.search {
+                        s.query.push(' ');
+                        let q = s.query.clone();
+                        let ci = s.case_insensitive;
+                        guard.search_set_query(&q, ci);
+                    }
+                    return true;
+                }
                 Key::Character(c) if ctrl && c == "u" => {
                     if let Some(ref mut s) = guard.search {
                         s.query.clear();
@@ -1086,6 +1095,13 @@ impl App {
                         .text
                         .as_deref()
                         .and_then(|t| t.chars().next())
+                        .or_else(|| {
+                            if let Key::Character(c) = &event.logical_key {
+                                c.chars().next()
+                            } else {
+                                None
+                            }
+                        })
                         .filter(|ch| !ch.is_control());
                     if let Some(ch) = ch {
                         if let Some(ref mut s) = guard.search {
