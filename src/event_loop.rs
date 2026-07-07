@@ -455,8 +455,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             thread::sleep(Duration::from_millis(1000));
             let now = crate::config::watch::config_mtime();
             if state.changed(now) {
-                let cfg = Config::load();
-                let _ = proxy_cfg.send_event(UserEvent::ConfigReloaded(Box::new(cfg)));
+                match Config::try_load_from_disk() {
+                    Ok(cfg) => {
+                        let _ = proxy_cfg.send_event(UserEvent::ConfigReloaded(Box::new(cfg)));
+                    }
+                    Err(msg) => {
+                        let _ = proxy_cfg.send_event(UserEvent::ConfigReloadFailed(msg));
+                    }
+                }
             }
         }
     });

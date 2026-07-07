@@ -46,6 +46,8 @@ pub enum UserEvent {
     ReadClipboard(u8, bool),
     /// Config recargada desde disco.
     ConfigReloaded(Box<Config>),
+    /// Fallo al recargar config; se conserva la config en memoria.
+    ConfigReloadFailed(String),
 }
 
 fn winit_to_key(k: &Key) -> Option<KKey> {
@@ -229,6 +231,12 @@ impl App {
         }
         if prev.window.startup != next.window.startup {
             fields.push("window.startup");
+        }
+        if (prev.window.opacity < 1.0) != (next.window.opacity < 1.0) {
+            fields.push("window.opacity");
+        }
+        if prev.window.width != next.window.width || prev.window.height != next.window.height {
+            fields.push("window.width/height");
         }
         if Self::process_section_changed(&prev.process, &next.process) {
             fields.push("process");
@@ -972,6 +980,9 @@ impl ApplicationHandler<UserEvent> for App {
         // evitando que el compositor (Hyprland) marque la ventana como
         // "no responde" mientras espera output.
         window.request_redraw();
+
+        let cfg = self.config.clone();
+        self.apply_config(cfg);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -1520,6 +1531,15 @@ impl ApplicationHandler<UserEvent> for App {
                         "[Config recargada]".into()
                     };
                     renderer.set_status(&status);
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            UserEvent::ConfigReloadFailed(msg) => {
+                tracing::warn!("config: recarga fallida: {msg}");
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_status("[Config: error de parseo — se mantuvo la anterior]");
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();

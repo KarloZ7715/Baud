@@ -733,6 +733,8 @@ impl Config {
         if let Some(ref color) = self.cursor.color {
             let (r, g, b) = parse_hex(color);
             term.cursor_color_override = Some((r, g, b));
+        } else {
+            term.cursor_color_override = None;
         }
         term.cursor_blink_enabled = self.cursor.blink;
         term.blink_interval_ms = self.cursor.blink_interval_ms;
@@ -783,6 +785,30 @@ impl Config {
         }
 
         Self::default()
+    }
+
+    /// Carga config desde disco para hot-reload.
+    ///
+    /// Si el archivo existe pero falla lectura o parseo, devuelve error y la
+    /// config en memoria debe conservarse. Si no hay archivo, devuelve defaults.
+    pub fn try_load_from_disk() -> Result<Self, String> {
+        let paths = [
+            dirs::config_dir()
+                .map(|d| d.join("baud").join("config.toml"))
+                .unwrap_or_default(),
+            std::path::PathBuf::from("baud.toml"),
+        ];
+
+        for path in &paths {
+            if path.exists() {
+                let content = std::fs::read_to_string(path)
+                    .map_err(|e| format!("no se pudo leer '{}': {e}", path.display()))?;
+                return toml::from_str::<Config>(&content)
+                    .map_err(|e| format!("error al parsear '{}': {e}", path.display()));
+            }
+        }
+
+        Ok(Self::default())
     }
 }
 
@@ -1197,5 +1223,17 @@ dim_alpha = true
         assert_eq!(cfg.theme.background, nord.background);
         assert!(cfg.theme.bold_is_bright);
         assert!(cfg.theme.dim_alpha);
+    }
+
+    #[test]
+    fn apply_to_term_limpia_color_cursor_si_ausente() {
+        use crate::ansi::{CursorStyle, Term};
+
+        let mut term = Term::new();
+        term.cursor_color_override = Some((1, 2, 3));
+        let cfg: Config = toml::from_str("[cursor]\nstyle = \"bar\"\n").unwrap();
+        cfg.apply_to_term(&mut term);
+        assert_eq!(term.cursor_style, CursorStyle::Bar);
+        assert_eq!(term.cursor_color_override, None);
     }
 }

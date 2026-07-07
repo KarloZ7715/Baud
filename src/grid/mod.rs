@@ -663,6 +663,20 @@ mod tests {
     }
 
     #[test]
+    fn set_max_scrollback_trunca_lineas_sobrantes() {
+        let mut grid = Grid::new_sized_with_scrollback(24, 80, 5);
+        for i in 0..5usize {
+            let mut row = vec![Cell::default(); 80];
+            row[0].ch = (b'a' + i as u8) as char;
+            grid.scrollback.push_back(row);
+        }
+        grid.set_max_scrollback(2);
+        assert_eq!(grid.scrollback.len(), 2);
+        assert_eq!(grid.scrollback[0][0].ch, 'd');
+        assert_eq!(grid.scrollback[1][0].ch, 'e');
+    }
+
+    #[test]
     fn test_scrollback_pushes_on_scroll_up() {
         let mut grid = Grid::new();
         grid.scroll_up_region(1, 0, grid.rows_count - 1);
