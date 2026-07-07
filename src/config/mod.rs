@@ -25,7 +25,8 @@ pub use themes::{available_presets, preset};
 // ---------------------------------------------------------------------------
 
 /// Configuración global del emulador.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(from = "RawConfig")]
 pub struct Config {
     #[serde(default)]
     pub theme: ThemeConfig,
@@ -133,6 +134,194 @@ pub struct ThemeConfig {
     /// SGR dim atenua alpha del glifo en vez de oscurecer RGB.
     #[serde(default)]
     pub dim_alpha: bool,
+}
+
+/// Representación cruda de `theme` en TOML: nombre o tabla inline.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum RawTheme {
+    Named(String),
+    Table(Box<ThemeTable>),
+}
+
+impl Default for RawTheme {
+    fn default() -> Self {
+        Self::Table(Box::default())
+    }
+}
+
+/// Tabla `[theme]` con campos opcionales para distinguir ausencia de override.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ThemeTable {
+    name: Option<String>,
+    foreground: Option<String>,
+    background: Option<String>,
+    cursor: Option<String>,
+    selection_bg: Option<String>,
+    selection_fg: Option<String>,
+    black: Option<String>,
+    red: Option<String>,
+    green: Option<String>,
+    yellow: Option<String>,
+    blue: Option<String>,
+    magenta: Option<String>,
+    cyan: Option<String>,
+    white: Option<String>,
+    bright_black: Option<String>,
+    bright_red: Option<String>,
+    bright_green: Option<String>,
+    bright_yellow: Option<String>,
+    bright_blue: Option<String>,
+    bright_magenta: Option<String>,
+    bright_cyan: Option<String>,
+    bright_white: Option<String>,
+    bold_is_bright: Option<bool>,
+    dim_alpha: Option<bool>,
+}
+
+/// Configuración sin resolver: `theme` queda en forma cruda hasta la conversión.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct RawConfig {
+    #[serde(default)]
+    theme: RawTheme,
+    #[serde(default)]
+    font: FontConfig,
+    #[serde(default)]
+    window: WindowConfig,
+    #[serde(default)]
+    selection: SelectionConfig,
+    #[serde(default)]
+    copy_mode: CopyModeConfig,
+    #[serde(default)]
+    scrollback: ScrollbackConfig,
+    #[serde(default)]
+    cursor: CursorConfig,
+    #[serde(default)]
+    bold_is_bright: bool,
+    #[serde(default = "default_true")]
+    allow_osc52_read: bool,
+    #[serde(default)]
+    process: ProcessSection,
+    #[serde(default)]
+    keys: BTreeMap<String, String>,
+}
+
+fn theme_base_from_name(name: &str) -> ThemeConfig {
+    preset(name).unwrap_or_else(|| {
+        tracing::warn!("preset de tema desconocido: '{name}'");
+        ThemeConfig::default()
+    })
+}
+
+fn apply_theme_overrides(base: &mut ThemeConfig, table: &ThemeTable) {
+    if let Some(v) = &table.foreground {
+        base.foreground.clone_from(v);
+    }
+    if let Some(v) = &table.background {
+        base.background.clone_from(v);
+    }
+    if let Some(v) = &table.cursor {
+        base.cursor.clone_from(v);
+    }
+    if let Some(v) = &table.selection_bg {
+        base.selection_bg = Some(v.clone());
+    }
+    if let Some(v) = &table.selection_fg {
+        base.selection_fg = Some(v.clone());
+    }
+    if let Some(v) = &table.black {
+        base.black.clone_from(v);
+    }
+    if let Some(v) = &table.red {
+        base.red.clone_from(v);
+    }
+    if let Some(v) = &table.green {
+        base.green.clone_from(v);
+    }
+    if let Some(v) = &table.yellow {
+        base.yellow.clone_from(v);
+    }
+    if let Some(v) = &table.blue {
+        base.blue.clone_from(v);
+    }
+    if let Some(v) = &table.magenta {
+        base.magenta.clone_from(v);
+    }
+    if let Some(v) = &table.cyan {
+        base.cyan.clone_from(v);
+    }
+    if let Some(v) = &table.white {
+        base.white.clone_from(v);
+    }
+    if let Some(v) = &table.bright_black {
+        base.bright_black.clone_from(v);
+    }
+    if let Some(v) = &table.bright_red {
+        base.bright_red.clone_from(v);
+    }
+    if let Some(v) = &table.bright_green {
+        base.bright_green.clone_from(v);
+    }
+    if let Some(v) = &table.bright_yellow {
+        base.bright_yellow.clone_from(v);
+    }
+    if let Some(v) = &table.bright_blue {
+        base.bright_blue.clone_from(v);
+    }
+    if let Some(v) = &table.bright_magenta {
+        base.bright_magenta.clone_from(v);
+    }
+    if let Some(v) = &table.bright_cyan {
+        base.bright_cyan.clone_from(v);
+    }
+    if let Some(v) = &table.bright_white {
+        base.bright_white.clone_from(v);
+    }
+    if let Some(v) = table.bold_is_bright {
+        base.bold_is_bright = v;
+    }
+    if let Some(v) = table.dim_alpha {
+        base.dim_alpha = v;
+    }
+}
+
+fn resolve_theme(raw: RawTheme) -> ThemeConfig {
+    match raw {
+        RawTheme::Named(name) => theme_base_from_name(&name),
+        RawTheme::Table(table) => {
+            let mut base = table
+                .name
+                .as_deref()
+                .map(theme_base_from_name)
+                .unwrap_or_default();
+            apply_theme_overrides(&mut base, table.as_ref());
+            base
+        }
+    }
+}
+
+impl From<RawConfig> for Config {
+    fn from(raw: RawConfig) -> Self {
+        Self {
+            theme: resolve_theme(raw.theme),
+            font: raw.font,
+            window: raw.window,
+            selection: raw.selection,
+            copy_mode: raw.copy_mode,
+            scrollback: raw.scrollback,
+            cursor: raw.cursor,
+            bold_is_bright: raw.bold_is_bright,
+            allow_osc52_read: raw.allow_osc52_read,
+            process: raw.process,
+            keys: raw.keys,
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        RawConfig::default().into()
+    }
 }
 
 /// Configuración de la fuente (tipografía y tamaño).
@@ -990,5 +1179,31 @@ background = "#ddeeff"
         assert_eq!(config.font.size, 12);
         // Ventana por defecto
         assert_eq!(config.window.opacity, 1.0);
+    }
+
+    #[test]
+    fn theme_por_nombre_resuelve_preset() {
+        let cfg: Config = toml::from_str("theme = \"nord\"").unwrap();
+        let nord = crate::config::themes::preset("nord").unwrap();
+        assert_eq!(cfg.theme.background, nord.background);
+    }
+
+    #[test]
+    fn theme_nombre_mas_override_inline() {
+        let toml = r##"
+[theme]
+name = "nord"
+background = "#000000"
+"##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let nord = crate::config::themes::preset("nord").unwrap();
+        assert_eq!(cfg.theme.background, "#000000");
+        assert_eq!(cfg.theme.foreground, nord.foreground);
+    }
+
+    #[test]
+    fn theme_inline_sin_nombre_sigue_funcionando() {
+        let cfg: Config = toml::from_str("[theme]\nbackground = \"#123456\"").unwrap();
+        assert_eq!(cfg.theme.background, "#123456");
     }
 }
