@@ -13,6 +13,7 @@ pub mod renderer;
 pub mod search;
 pub mod search_overlay;
 pub mod selection;
+pub mod session;
 pub mod smart_select;
 pub mod theme_picker;
 pub mod window;
