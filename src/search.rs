@@ -14,6 +14,8 @@ pub struct SearchState {
     pub case_insensitive: bool,
     pub matches: Vec<Match>,
     pub current: usize,
+    /// Tras Enter el query queda fijado y n/N navegan sin capturar letras.
+    pub committed: bool,
 }
 
 impl SearchState {

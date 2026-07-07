@@ -1005,6 +1005,19 @@ impl Term {
 
     /// Establece el query de busqueda, recalcula matches y centra la vista.
     pub fn search_set_query(&mut self, query: &str, case_insensitive: bool) {
+        self.search_set_query_inner(query, case_insensitive, false);
+    }
+
+    /// Fija el query actual y habilita navegacion con n/N.
+    pub fn search_commit(&mut self) {
+        if let Some(ref s) = self.search {
+            let q = s.query.clone();
+            let ci = s.case_insensitive;
+            self.search_set_query_inner(&q, ci, true);
+        }
+    }
+
+    fn search_set_query_inner(&mut self, query: &str, case_insensitive: bool, committed: bool) {
         let rows = self.rows_as_text();
         let matches = search::find_matches(&rows, query, case_insensitive);
         let current = 0;
@@ -1013,6 +1026,7 @@ impl Term {
             case_insensitive,
             matches,
             current,
+            committed,
         });
         if let Some(m) = self.search.as_ref().and_then(|s| s.matches.first()) {
             self.scroll_to_show_logical_row(m.row);

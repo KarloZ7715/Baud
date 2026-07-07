@@ -21,6 +21,7 @@ use crate::grid::Cell;
 use crate::input::actions::{normalize_binding_key, Action, Keybindings};
 use crate::input::keymap::{self, Key as KKey, KeyEventKind, KeyModes, Mods};
 use crate::renderer::Renderer;
+use crate::search::SearchState;
 use crate::selection::{Selection, SelectionMode, SelectionPoint};
 use crate::smart_select;
 use crate::theme_picker::ThemePickerState;
@@ -688,6 +689,26 @@ impl App {
         }
     }
 
+    fn toggle_search(&mut self) {
+        if self.theme_picker.is_some() {
+            return;
+        }
+        if let Ok(mut guard) = self.term.lock() {
+            if guard.search.is_some() {
+                guard.search_clear();
+                tracing::info!("KEYBOARD: busqueda desactivada");
+            } else {
+                if guard.copy_mode.is_some() {
+                    guard.copy_mode = None;
+                    guard.clear_selection();
+                }
+                guard.search = Some(SearchState::new());
+                guard.mark_dirty();
+                tracing::info!("KEYBOARD: busqueda activada");
+            }
+        }
+    }
+
     fn toggle_theme_picker(&mut self) {
         if let Some(picker) = self.theme_picker.take() {
             self.cancel_theme_picker(picker);
@@ -879,6 +900,7 @@ impl App {
             Paste => self.handle_paste(),
             PastePrimary => self.handle_paste_primary(),
             ToggleCopyMode => self.toggle_copy_mode(),
+            ToggleSearch => self.toggle_search(),
             ScrollLineUp => self.scroll_lines(1),
             ScrollLineDown => self.scroll_lines(-1),
             ScrollPageUp => self.scroll_page(1),
@@ -952,6 +974,86 @@ impl App {
             }
         }
         drow != 0 || dcol != 0
+    }
+
+    /// Maneja teclas en modo busqueda. Devuelve true si la tecla fue consumida.
+    fn handle_search_mode_key(&mut self, event: &winit::event::KeyEvent, shift: bool) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+
+        let mut consumed = false;
+        if let Ok(mut guard) = self.term.lock() {
+            if guard.search.is_none() {
+                return false;
+            }
+
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    guard.search_clear();
+                    return true;
+                }
+                Key::Named(NamedKey::Enter) => {
+                    guard.search_commit();
+                    return true;
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    if let Some(ref mut s) = guard.search {
+                        s.committed = false;
+                        s.query.pop();
+                        let q = s.query.clone();
+                        let ci = s.case_insensitive;
+                        guard.search_set_query(&q, ci);
+                    }
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowRight) => {
+                    if guard.search.as_ref().is_some_and(|s| s.committed) {
+                        guard.search_next();
+                    }
+                    return true;
+                }
+                Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowLeft) => {
+                    if guard.search.as_ref().is_some_and(|s| s.committed) {
+                        guard.search_prev();
+                    }
+                    return true;
+                }
+                Key::Character(c) if c == "n" && !shift => {
+                    if guard.search.as_ref().is_some_and(|s| s.committed) {
+                        guard.search_next();
+                    } else if let Some(ref mut s) = guard.search {
+                        s.query.push('n');
+                        let q = s.query.clone();
+                        let ci = s.case_insensitive;
+                        guard.search_set_query(&q, ci);
+                    }
+                    return true;
+                }
+                Key::Character(c) if c == "N" || (c == "n" && shift) => {
+                    if guard.search.as_ref().is_some_and(|s| s.committed) {
+                        guard.search_prev();
+                    }
+                    return true;
+                }
+                Key::Character(c) if !shift => {
+                    let ch = c.chars().next().filter(|ch| !ch.is_control());
+                    if let Some(ch) = ch {
+                        if let Some(ref mut s) = guard.search {
+                            if s.committed {
+                                s.committed = false;
+                                s.query.clear();
+                            }
+                            s.query.push(ch);
+                            let q = s.query.clone();
+                            let ci = s.case_insensitive;
+                            guard.search_set_query(&q, ci);
+                            consumed = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        consumed
     }
 
     /// Envia bytes al PTY sin efectos secundarios (seleccion, scrollback).
@@ -1706,6 +1808,21 @@ impl ApplicationHandler<UserEvent> for App {
                     .map(|g| g.copy_mode.is_some())
                     .unwrap_or(false)
                     && self.handle_copy_mode_key(&event, shift)
+                {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
+
+                // Modo busqueda: captura teclas para el query y navegacion n/N.
+                if self
+                    .term
+                    .lock()
+                    .ok()
+                    .map(|g| g.search.is_some())
+                    .unwrap_or(false)
+                    && self.handle_search_mode_key(&event, shift)
                 {
                     if let Some(window) = &self.window {
                         window.request_redraw();

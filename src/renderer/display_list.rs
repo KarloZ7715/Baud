@@ -457,6 +457,8 @@ impl DisplayListBuilder {
             let default_cell = Cell::default();
             let cell = source_row.get(col).unwrap_or(&default_cell);
             let is_sel = term.is_selected(row, col);
+            let search_hit = term.is_search_hit(row, col);
+            let is_search = search_hit.is_some();
             let is_cursor = Self::shell_cursor_here(term, row, col, show_scrollback);
             // El shell cursor se suprime en la fase "off" del parpadeo cuando
             // el parpadeo del cursor esta habilitado en config. Si el usuario
@@ -476,7 +478,7 @@ impl DisplayListBuilder {
 
             let cursor_block = cursor_rendered && matches!(term.cursor_style, CursorStyle::Block);
             let (contrast_bg, skip_contrast) =
-                cell_contrast_context(fg, bg, is_sel, cursor_block, palette);
+                cell_contrast_context(fg, bg, is_sel || is_search, cursor_block, palette);
 
             let box_glyph = builtin_box_drawing && super::builtin::supports(cell.ch);
 
@@ -486,6 +488,19 @@ impl DisplayListBuilder {
                     col,
                     width_cells: cell.width.max(1),
                     color: selection_bg_glyphon(palette.theme),
+                });
+            } else if let Some(current) = search_hit {
+                let base = selection_bg_glyphon(palette.theme);
+                let color = if current {
+                    base
+                } else {
+                    attenuate_glyphon(base)
+                };
+                list.bg_quads.push(BgQuad {
+                    row,
+                    col,
+                    width_cells: cell.width.max(1),
+                    color,
                 });
             } else if cursor_rendered && matches!(term.cursor_style, CursorStyle::Block) {
                 list.bg_quads.push(BgQuad {
@@ -743,9 +758,10 @@ impl DisplayListBuilder {
                     std::mem::swap(&mut fg, &mut bg);
                 }
                 let is_sel = term.is_selected(row, col);
+                let is_search = term.is_search_hit(row, col).is_some();
                 let cursor_block = is_cursor && matches!(term.cursor_style, CursorStyle::Block);
                 let (contrast_bg, skip_contrast) =
-                    cell_contrast_context(fg, bg, is_sel, cursor_block, palette);
+                    cell_contrast_context(fg, bg, is_sel || is_search, cursor_block, palette);
                 let fg_color = if cursor_block {
                     let (r, g, b) = contrast_text_color(palette.cursor_rgb());
                     Color::Rgb(r, g, b)
