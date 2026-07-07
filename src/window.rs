@@ -264,10 +264,16 @@ impl App {
         }
     }
 
-    fn cursor_cell(&self) -> (usize, usize) {
+    fn cursor_visible_cell(&self) -> (usize, usize) {
         self.term
             .lock()
-            .map(|guard| (guard.cursor.row, guard.cursor.col))
+            .map(|guard| {
+                let col = guard.cursor.col;
+                let row =
+                    crate::copy_mode::logical_to_visible_row(&guard, guard.cursor_logical_row())
+                        .unwrap_or(guard.cursor.row);
+                (row, col)
+            })
             .unwrap_or((0, 0))
     }
 
@@ -278,7 +284,7 @@ impl App {
         let Some(renderer) = &self.renderer else {
             return;
         };
-        let (row, col) = self.cursor_cell();
+        let (row, col) = self.cursor_visible_cell();
         let (pad_x, pad_y) = renderer.content_padding();
         let cell_w = renderer.cell_w();
         let cell_h = renderer.cell_h();
@@ -1600,7 +1606,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let preedit = if preedit_empty {
                     None
                 } else {
-                    let (row, col) = self.cursor_cell();
+                    let (row, col) = self.cursor_visible_cell();
                     Some(PreeditState {
                         text: self.preedit.clone(),
                         row,
@@ -1986,6 +1992,9 @@ impl ApplicationHandler<UserEvent> for App {
                     self.preedit.clear();
                     self.preedit_cursor = None;
                     self.update_ime_area();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
                 Ime::Disabled => {
                     self.preedit.clear();
@@ -2003,6 +2012,9 @@ impl ApplicationHandler<UserEvent> for App {
                     .ok()
                     .map(|g| g.keyboard_flags & 2 != 0)
                     .unwrap_or(false);
+                if report_events && !self.preedit.is_empty() {
+                    return;
+                }
                 if report_events {
                     let mods = Mods {
                         shift: self.modifiers.state().shift_key(),
@@ -2021,6 +2033,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if matches!(event.logical_key, Key::Named(NamedKey::Process)) {
+                    return;
+                }
+                if !self.preedit.is_empty() {
+                    return;
+                }
                 let ctrl = self.modifiers.state().control_key();
                 let shift = self.modifiers.state().shift_key();
                 let alt = self.modifiers.state().alt_key();
