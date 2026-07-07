@@ -38,6 +38,23 @@ pub struct GlyphCache {
     entries: HashMap<GlyphKey, CachedGlyph>,
     by_id: HashMap<u16, GlyphKey>,
     next_id: u16,
+    /// Métricas con las que se shapearon las entradas actuales.
+    metrics_key: Option<MetricsCacheKey>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MetricsCacheKey {
+    font_size_bits: u32,
+    cell_w_bits: u32,
+    cell_h_bits: u32,
+}
+
+fn metrics_key_from(metrics: &CellMetrics) -> MetricsCacheKey {
+    MetricsCacheKey {
+        font_size_bits: metrics.font_size.to_bits(),
+        cell_w_bits: metrics.cell_w.to_bits(),
+        cell_h_bits: metrics.cell_h.to_bits(),
+    }
 }
 
 impl Default for GlyphCache {
@@ -55,7 +72,35 @@ impl GlyphCache {
             entries: HashMap::new(),
             by_id: HashMap::new(),
             next_id: Self::FIRST_TEXT_ID,
+            metrics_key: None,
         }
+    }
+
+    /// Invalida entradas si las métricas cambiaron. Devuelve `true` si hay que resetear el atlas GPU.
+    pub fn metrics_changed(&mut self, metrics: &CellMetrics) -> bool {
+        let key = metrics_key_from(metrics);
+        if self.metrics_key == Some(key) {
+            return false;
+        }
+        self.clear_entries();
+        self.next_id = Self::FIRST_TEXT_ID;
+        self.metrics_key = Some(key);
+        true
+    }
+
+    fn ensure_metrics(&mut self, metrics: &CellMetrics) {
+        let key = metrics_key_from(metrics);
+        if self.metrics_key == Some(key) {
+            return;
+        }
+        // Fallback sin atlas (p. ej. tests): conservar next_id para no reutilizar ids en GPU.
+        self.clear_entries();
+        self.metrics_key = Some(key);
+    }
+
+    fn clear_entries(&mut self) {
+        self.entries.clear();
+        self.by_id.clear();
     }
 
     /// Devuelve el glifo cacheado o lo shapea, rasteriza e inserta.
@@ -68,6 +113,8 @@ impl GlyphCache {
         key: GlyphKey,
     ) -> &CachedGlyph {
         use std::collections::hash_map::Entry;
+
+        self.ensure_metrics(metrics);
 
         match self.entries.entry(key) {
             Entry::Occupied(entry) => entry.into_mut(),
@@ -91,10 +138,13 @@ impl GlyphCache {
         &mut self,
         font_system: &mut FontSystem,
         swash_cache: &mut SwashCache,
+        metrics: &CellMetrics,
         key: GlyphKey,
         shaped: ShapedGlyph,
     ) -> &CachedGlyph {
         use std::collections::hash_map::Entry;
+
+        self.ensure_metrics(metrics);
 
         match self.entries.entry(key) {
             Entry::Occupied(entry) => entry.into_mut(),
@@ -122,9 +172,9 @@ impl GlyphCache {
 
     /// Invalida entradas tras cambio de metricas de celda (resize).
     pub fn clear(&mut self) {
-        self.entries.clear();
-        self.by_id.clear();
+        self.clear_entries();
         self.next_id = Self::FIRST_TEXT_ID;
+        self.metrics_key = None;
     }
 
     pub fn get(&self, key: &GlyphKey) -> Option<&CachedGlyph> {
@@ -402,6 +452,51 @@ mod tests {
                 cached.raster.width
             );
         }
+    }
+
+    #[test]
+    fn cache_se_invalida_al_cambiar_metricas() {
+        let mut font_system = create_font_system();
+        let mut swash_cache = SwashCache::new();
+        let family = FontConfig::default().family;
+        use crate::config::GlyphOffset;
+        let offset = GlyphOffset { x: 0.0, y: 0.0 };
+        let metrics_12 = CellMetrics::measure(&mut font_system, &family, 12.0, 1.0, offset);
+        let metrics_14 = CellMetrics::measure(&mut font_system, &family, 14.0, 1.3, offset);
+        let key = GlyphKey {
+            ch: 'M',
+            bold: false,
+            italic: false,
+            dim: false,
+            family: family.clone(),
+        };
+        let mut cache = GlyphCache::new();
+        assert!(cache.metrics_changed(&metrics_12));
+        let a = cache.get_or_insert(
+            &mut font_system,
+            &mut swash_cache,
+            &metrics_12,
+            &family,
+            key.clone(),
+        );
+        let h_12 = a.raster.height;
+        assert!(cache.metrics_changed(&metrics_14));
+        let b = cache.get_or_insert(
+            &mut font_system,
+            &mut swash_cache,
+            &metrics_14,
+            &family,
+            key,
+        );
+        assert_ne!(
+            h_12, b.raster.height,
+            "altura bitmap debe reflejar nuevo tamaño"
+        );
+        assert_eq!(
+            cache.len(),
+            1,
+            "solo debe quedar la entrada del nuevo tamaño"
+        );
     }
 
     #[test]

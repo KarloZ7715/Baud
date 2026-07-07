@@ -14,6 +14,7 @@ pub enum Action {
     FontZoomIn,
     FontZoomOut,
     FontZoomReset,
+    ToggleThemePicker,
 }
 
 /// Mapa de combinaciones de tecla a acciones del terminal.
@@ -77,6 +78,7 @@ impl Default for Keybindings {
                 (Key::Char('='), ctrl, Action::FontZoomIn),
                 (Key::Char('-'), ctrl, Action::FontZoomOut),
                 (Key::Char('0'), ctrl, Action::FontZoomReset),
+                (Key::Char('t'), cs, Action::ToggleThemePicker),
                 (Key::Up, cs, Action::ScrollLineUp),
                 (Key::Down, cs, Action::ScrollLineDown),
                 (Key::Up, alt, Action::ScrollPageUp),
@@ -161,6 +163,7 @@ pub fn parse_action(s: &str) -> Option<Action> {
         "font_zoom_in" => Action::FontZoomIn,
         "font_zoom_out" => Action::FontZoomOut,
         "font_zoom_reset" => Action::FontZoomReset,
+        "toggle_theme_picker" => Action::ToggleThemePicker,
         _ => return None,
     })
 }
@@ -235,6 +238,28 @@ mod tests {
         assert_eq!(parse_binding("f5"), Some((Key::F(5), Mods::NONE)));
         assert_eq!(parse_binding(""), None);
         assert_eq!(parse_binding("ctrl+"), None);
+    }
+
+    #[test]
+    fn test_parse_action_toggle_theme_picker() {
+        assert_eq!(
+            parse_action("toggle_theme_picker"),
+            Some(Action::ToggleThemePicker)
+        );
+    }
+
+    #[test]
+    fn test_default_bindings_theme_picker() {
+        let kb = Keybindings::default();
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            kb.lookup(Key::Char('t'), cs),
+            Some(Action::ToggleThemePicker)
+        );
     }
 
     #[test]

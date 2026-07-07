@@ -6,6 +6,7 @@ use glyphon::{
 };
 
 use super::builtin;
+use super::contrast::ContrastCache;
 use super::decorations::{
     cursor_anchor_offset, line_quad, rasterize_line_mask, LINE_CURLY_GLYPH_ID,
     LINE_DASHED_GLYPH_ID, LINE_DOTTED_GLYPH_ID, LINE_DOUBLE_GLYPH_ID, SOLID_MASK_GLYPH_ID,
@@ -52,6 +53,7 @@ impl CellRenderer {
         glyph_cache: &mut GlyphCache,
         font_system: &mut glyphon::FontSystem,
         swash_cache: &mut glyphon::SwashCache,
+        contrast_cache: &mut ContrastCache,
         out: &mut Vec<CustomGlyph>,
     ) -> Result<(), String> {
         out.clear();
@@ -93,6 +95,7 @@ impl CellRenderer {
                 glyph_cache,
                 font_system,
                 swash_cache,
+                contrast_cache,
             )? {
                 if limits::custom_pixels(glyph.width, glyph.height) <= MAX_CUSTOM_GLYPH_PIXELS {
                     out.push(glyph);
@@ -218,6 +221,7 @@ fn text_glyph_to_custom(
     glyph_cache: &mut GlyphCache,
     font_system: &mut glyphon::FontSystem,
     swash_cache: &mut glyphon::SwashCache,
+    contrast_cache: &mut ContrastCache,
 ) -> Result<Option<CustomGlyph>, String> {
     if text.box_glyph {
         let ch = text.glyph_key.ch as u32;
@@ -232,7 +236,16 @@ fn text_glyph_to_custom(
         let fg_color = if text.selected {
             selection_fg_glyphon(palette.theme)
         } else {
-            resolve_fg_glyphon(text.fg, text.dim, text.bold, palette, dim_alpha)
+            resolve_fg_glyphon(
+                text.fg,
+                text.dim,
+                text.bold,
+                palette,
+                dim_alpha,
+                text.contrast_bg,
+                text.skip_contrast,
+                contrast_cache,
+            )
         };
         // Relleno de celda: mismo anclaje que bg_quads (padding), no glyph_offset de texto.
         let (left, top) = cell_origin(
@@ -255,7 +268,13 @@ fn text_glyph_to_custom(
     }
 
     let cached = if let Some(shaped) = text.run_shaped.clone() {
-        glyph_cache.get_or_insert_shaped(font_system, swash_cache, text.glyph_key.clone(), shaped)
+        glyph_cache.get_or_insert_shaped(
+            font_system,
+            swash_cache,
+            metrics,
+            text.glyph_key.clone(),
+            shaped,
+        )
     } else {
         glyph_cache.get_or_insert(
             font_system,
@@ -278,31 +297,33 @@ fn text_glyph_to_custom(
     }
 
     let left = if let Some(x_offset) = text.x_offset {
-        if text.run_shaped.is_some() {
-            x_offset + metrics.padding_x + cached.shaped.left + cached.raster.placement_left as f32
-        } else {
-            x_offset
-                + metrics.padding_x
-                + metrics.glyph_offset_x
-                + cached.raster.placement_left as f32
-        }
+        x_offset + metrics.padding_x + cached.shaped.left + cached.raster.placement_left as f32
     } else {
         text.col as f32 * metrics.cell_w
             + metrics.padding_x
-            + metrics.glyph_offset_x
+            + cached.shaped.left
             + cached.raster.placement_left as f32
     };
     let top = text.row as f32 * metrics.cell_h
         + metrics.padding_y
         + metrics.glyph_offset_y
-        + cached.shaped.line_y.round()
+        + cached.shaped.line_y
         + cached.shaped.top
         - cached.raster.placement_top as f32;
 
     let fg_color = if text.selected {
         selection_fg_glyphon(palette.theme)
     } else {
-        resolve_fg_glyphon(text.fg, text.dim, text.bold, palette, dim_alpha)
+        resolve_fg_glyphon(
+            text.fg,
+            text.dim,
+            text.bold,
+            palette,
+            dim_alpha,
+            text.contrast_bg,
+            text.skip_contrast,
+            contrast_cache,
+        )
     };
 
     // glyphon: bitmaps a color (emoji) no deben llevar tinte de foreground.
@@ -355,13 +376,13 @@ fn cursor_glyph_to_custom(
     let left = cursor.col as f32 * metrics.cell_w
         + metrics.padding_x
         + anchor_dx
-        + metrics.glyph_offset_x
+        + cached.shaped.left
         + cached.raster.placement_left as f32;
     let top = cursor.row as f32 * metrics.cell_h
         + metrics.padding_y
         + anchor_dy
         + metrics.glyph_offset_y
-        + cached.shaped.line_y.round()
+        + cached.shaped.line_y
         + cached.shaped.top
         - cached.raster.placement_top as f32;
 
@@ -545,6 +566,8 @@ mod tests {
             padding_y: 3.0,
         };
         let ch = '\u{250C}';
+        let bg = crate::config::parse_hex(&theme.background);
+        let mut contrast_cache = ContrastCache::default();
         let text = TextGlyph {
             row: 2,
             col: 1,
@@ -559,6 +582,8 @@ mod tests {
             fg: Color::Green,
             bold: false,
             dim: false,
+            contrast_bg: bg,
+            skip_contrast: false,
             custom_id: 0,
             selected: false,
             box_glyph: true,
@@ -575,6 +600,7 @@ mod tests {
             &mut cache,
             &mut font_system,
             &mut swash_cache,
+            &mut contrast_cache,
         )
         .expect("ok")
         .expect("box glyph");
@@ -642,6 +668,8 @@ mod tests {
         let mut cache = GlyphCache::new();
         let theme = crate::config::ThemeConfig::default();
         let palette = Palette::from_theme(&theme);
+        let bg = crate::config::parse_hex(&theme.background);
+        let mut contrast_cache = ContrastCache::default();
 
         let text = TextGlyph {
             row: 0,
@@ -657,6 +685,8 @@ mod tests {
             fg: Color::Default,
             bold: false,
             dim: false,
+            contrast_bg: bg,
+            skip_contrast: false,
             custom_id: 0,
             selected: false,
             box_glyph: false,
@@ -673,6 +703,7 @@ mod tests {
             &mut cache,
             &mut font_system,
             &mut swash_cache,
+            &mut contrast_cache,
         )
         .expect("ok")
         .expect("Some glyph");
@@ -694,6 +725,8 @@ mod tests {
         let mut cache = GlyphCache::new();
         let theme = crate::config::ThemeConfig::default();
         let palette = Palette::from_theme(&theme);
+        let bg = crate::config::parse_hex(&theme.background);
+        let mut contrast_cache = ContrastCache::default();
 
         let text = TextGlyph {
             row: 0,
@@ -709,6 +742,8 @@ mod tests {
             fg: Color::Default,
             bold: false,
             dim: false,
+            contrast_bg: bg,
+            skip_contrast: false,
             custom_id: 0,
             selected: false,
             box_glyph: false,
@@ -725,6 +760,7 @@ mod tests {
             &mut cache,
             &mut font_system,
             &mut swash_cache,
+            &mut contrast_cache,
         )
         .expect("ok")
         .expect("emoji rasterizado");

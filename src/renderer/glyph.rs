@@ -127,7 +127,8 @@ fn shape_with_style(
     buf.set_text(font_system, &ch_str, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
 
-    let (glyph, line_y, bitmap_h, advance) = match extract_glyph_layout(&buf, metrics) {
+    let (glyph, _line_y_from_layout, bitmap_h, advance) = match extract_glyph_layout(&buf, metrics)
+    {
         Some(layout) => layout,
         None => {
             return ShapedGlyph {
@@ -150,6 +151,9 @@ fn shape_with_style(
             };
         }
     };
+
+    let line_y =
+        super::runs::reference_line_y(font_system, metrics, family, use_bold, key.italic, key.dim);
 
     // cosmic-text: ancla fija dentro de celda para cache_key coherente con grid
     let physical = glyph.physical((metrics.glyph_offset_x, line_y), 1.0);
@@ -242,7 +246,7 @@ mod tests {
                 };
                 let cached =
                     cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &family, key);
-                metrics.glyph_offset_y + cached.shaped.line_y.round() + cached.shaped.top
+                metrics.glyph_offset_y + cached.shaped.line_y + cached.shaped.top
             })
             .collect();
 

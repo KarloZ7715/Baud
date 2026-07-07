@@ -2,7 +2,8 @@ use baud::ansi::Term;
 use baud::config::ThemeConfig;
 use baud::grid::{Cell, DamageSnapshot, Grid};
 use baud::renderer::{
-    clear_builtin_cache, CellGeometry, CellMetrics, DisplayList, DisplayListBuilder, Palette,
+    clear_builtin_cache, CellGeometry, CellMetrics, ContrastCache, DisplayList, DisplayListBuilder,
+    Palette,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
 
@@ -92,6 +93,7 @@ fn bench_display_list_build(c: &mut Criterion) {
 
         c.bench_function(name, |b| {
             let palette = Palette::from_theme(&theme);
+            let mut contrast_cache = ContrastCache::default();
             b.iter(|| {
                 let mut list = DisplayList::default();
                 DisplayListBuilder::build(
@@ -111,6 +113,7 @@ fn bench_display_list_build(c: &mut Criterion) {
                     false,
                     &mut None,
                     &mut None,
+                    &mut contrast_cache,
                 );
             });
         });

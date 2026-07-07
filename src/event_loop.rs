@@ -448,12 +448,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     spawn_blink_timer(Arc::clone(&term), proxy.clone());
 
+    let config_watch = Arc::new(Mutex::new(crate::config::watch::WatchState::new(
+        crate::config::watch::config_mtime(),
+    )));
+    let watch_for_thread = Arc::clone(&config_watch);
     let proxy_cfg = proxy.clone();
-    thread::spawn(move || {
-        let mut state = crate::config::watch::WatchState::new(crate::config::watch::config_mtime());
-        loop {
-            thread::sleep(Duration::from_millis(1000));
-            let now = crate::config::watch::config_mtime();
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(1000));
+        let now = crate::config::watch::config_mtime();
+        if let Ok(mut state) = watch_for_thread.lock() {
             if state.changed(now) {
                 match Config::try_load_from_disk() {
                     Ok(cfg) => {
@@ -469,7 +472,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let pty_tx = Arc::new(Mutex::new(Some(cmd_sender)));
 
-    let mut app = App::new(Arc::clone(&term), Arc::clone(&pty_tx), app_config);
+    let mut app = App::new(
+        Arc::clone(&term),
+        Arc::clone(&pty_tx),
+        app_config,
+        config_watch,
+    );
 
     let wakeup_pty = Arc::clone(&wakeup);
     let pty_thread = thread::spawn(move || {

@@ -3,8 +3,10 @@
 use std::collections::HashSet;
 
 use crate::ansi::{Color, CursorStyle, Term, UnderlineStyle};
+use crate::config::parse_hex;
 use crate::grid::{Cell, DamageSnapshot};
 
+use super::contrast::ContrastCache;
 use super::decorations::cursor_glyph;
 use super::glyph::{is_wide_continuation, resolve_glyph_key, GlyphKey};
 use super::metrics::CellMetrics;
@@ -62,6 +64,10 @@ pub struct TextGlyph {
     pub fg: Color,
     pub bold: bool,
     pub dim: bool,
+    /// Fondo efectivo para ajuste de contraste WCAG.
+    pub contrast_bg: (u8, u8, u8),
+    /// True cuando fg == bg (bloques) o el color ya esta fijado (seleccion/cursor).
+    pub skip_contrast: bool,
     pub custom_id: u16,
     pub selected: bool,
     /// True si se rasteriza con box_mask en vez de fuente.
@@ -116,15 +122,25 @@ pub fn attenuate_glyphon(color: glyphon::Color) -> glyphon::Color {
     )
 }
 
-/// Resuelve fg a glyphon::Color, aplicando dim si corresponde.
+/// Resuelve fg a glyphon::Color, aplicando contraste y dim si corresponde.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "color resolution needs palette, contrast bg and cache"
+)]
 pub fn resolve_fg_glyphon(
     fg: Color,
     dim: bool,
     bold: bool,
     palette: &Palette<'_>,
     dim_alpha: bool,
+    contrast_bg: (u8, u8, u8),
+    skip_contrast: bool,
+    cache: &mut ContrastCache,
 ) -> glyphon::Color {
-    let rgb = palette.rgb(fg, bold);
+    let mut rgb = palette.rgb(fg, bold);
+    if !skip_contrast {
+        rgb = cache.adjust(rgb, contrast_bg, palette.theme.minimum_contrast);
+    }
     let color = rgb_to_glyphon(rgb);
     if !dim {
         return color;
@@ -134,6 +150,31 @@ pub fn resolve_fg_glyphon(
     } else {
         attenuate_glyphon(color)
     }
+}
+
+fn cell_contrast_context(
+    fg: Color,
+    bg: Color,
+    is_sel: bool,
+    cursor_block: bool,
+    palette: &Palette<'_>,
+) -> ((u8, u8, u8), bool) {
+    if fg == bg {
+        return (palette.bg_rgb(bg), true);
+    }
+    if is_sel {
+        let sel_bg = palette
+            .theme
+            .selection_bg
+            .as_deref()
+            .map(parse_hex)
+            .unwrap_or_else(|| parse_hex("#c4704a"));
+        return (sel_bg, true);
+    }
+    if cursor_block {
+        return (palette.cursor_rgb(), true);
+    }
+    (palette.bg_rgb(bg), false)
 }
 
 fn resolve_bg_glyphon(bg: Color, palette: &Palette<'_>, bg_alpha: u8) -> glyphon::Color {
@@ -151,19 +192,38 @@ fn effective_underline_style(cell: &Cell) -> UnderlineStyle {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "underline color shares cell contrast context with fg resolution"
+)]
 fn underline_color_for_cell(
     fg: Color,
+    bg: Color,
     bold: bool,
     cell: &Cell,
     palette: &Palette<'_>,
     dim_alpha: bool,
+    is_sel: bool,
+    cursor_block: bool,
+    cache: &mut ContrastCache,
 ) -> glyphon::Color {
     let color = if cell.attrs.underline_color == Color::Default {
         fg
     } else {
         cell.attrs.underline_color
     };
-    let mut resolved = resolve_fg_glyphon(color, cell.attrs.dim, bold, palette, dim_alpha);
+    let (contrast_bg, skip_contrast) =
+        cell_contrast_context(color, bg, is_sel, cursor_block, palette);
+    let mut resolved = resolve_fg_glyphon(
+        color,
+        cell.attrs.dim,
+        bold,
+        palette,
+        dim_alpha,
+        contrast_bg,
+        skip_contrast,
+        cache,
+    );
     // ponytail: hover lo provee window.rs (mouse cell) en el plan de UX
     if cell.hyperlink.is_some() && cell.attrs.underline_color == Color::Default {
         resolved = attenuate_glyphon(resolved);
@@ -196,6 +256,7 @@ impl DisplayListBuilder {
         ligatures: bool,
         font_system: &mut Option<&mut glyphon::FontSystem>,
         swash_cache: &mut Option<&mut glyphon::SwashCache>,
+        contrast_cache: &mut ContrastCache,
     ) {
         if damage.is_full() {
             for row in 0..rows {
@@ -215,6 +276,7 @@ impl DisplayListBuilder {
                     ligatures,
                     font_system,
                     swash_cache,
+                    contrast_cache,
                 );
             }
         } else {
@@ -239,6 +301,7 @@ impl DisplayListBuilder {
                     ligatures,
                     font_system,
                     swash_cache,
+                    contrast_cache,
                 );
             }
         }
@@ -339,6 +402,7 @@ impl DisplayListBuilder {
         ligatures: bool,
         font_system: &mut Option<&mut glyphon::FontSystem>,
         swash_cache: &mut Option<&mut glyphon::SwashCache>,
+        contrast_cache: &mut ContrastCache,
     ) {
         let source_row = row_sources.get(row).copied().unwrap_or(&[]);
         let cursor_on_row = !show_scrollback
@@ -377,6 +441,7 @@ impl DisplayListBuilder {
                     show_scrollback,
                     builtin_box_drawing,
                     blink_on,
+                    contrast_cache,
                 ),
                 _ => HashSet::new(),
             }
@@ -408,6 +473,10 @@ impl DisplayListBuilder {
             if cell.attrs.reverse {
                 std::mem::swap(&mut fg, &mut bg);
             }
+
+            let cursor_block = cursor_rendered && matches!(term.cursor_style, CursorStyle::Block);
+            let (contrast_bg, skip_contrast) =
+                cell_contrast_context(fg, bg, is_sel, cursor_block, palette);
 
             let box_glyph = builtin_box_drawing && super::builtin::supports(cell.ch);
 
@@ -459,7 +528,17 @@ impl DisplayListBuilder {
                         width_cells: cell.width.max(1),
                         kind: LineKind::Under,
                         style: underline_style,
-                        color: underline_color_for_cell(fg, bold, cell, palette, dim_alpha),
+                        color: underline_color_for_cell(
+                            fg,
+                            bg,
+                            bold,
+                            cell,
+                            palette,
+                            dim_alpha,
+                            is_sel,
+                            cursor_block,
+                            contrast_cache,
+                        ),
                     });
                 }
             }
@@ -471,7 +550,16 @@ impl DisplayListBuilder {
                     width_cells: cell.width.max(1),
                     kind: LineKind::Strike,
                     style: UnderlineStyle::Single,
-                    color: resolve_fg_glyphon(fg, cell.attrs.dim, bold, palette, dim_alpha),
+                    color: resolve_fg_glyphon(
+                        fg,
+                        cell.attrs.dim,
+                        bold,
+                        palette,
+                        dim_alpha,
+                        contrast_bg,
+                        skip_contrast,
+                        contrast_cache,
+                    ),
                 });
             }
 
@@ -482,7 +570,16 @@ impl DisplayListBuilder {
                     width_cells: cell.width.max(1),
                     kind: LineKind::Over,
                     style: UnderlineStyle::Single,
-                    color: resolve_fg_glyphon(fg, cell.attrs.dim, bold, palette, dim_alpha),
+                    color: resolve_fg_glyphon(
+                        fg,
+                        cell.attrs.dim,
+                        bold,
+                        palette,
+                        dim_alpha,
+                        contrast_bg,
+                        skip_contrast,
+                        contrast_cache,
+                    ),
                 });
             }
 
@@ -498,11 +595,16 @@ impl DisplayListBuilder {
                 continue;
             }
 
-            let cursor_fg = if cursor_rendered && matches!(term.cursor_style, CursorStyle::Block) {
+            let cursor_fg = if cursor_block {
                 let (r, g, b) = contrast_text_color(palette.cursor_rgb());
                 Color::Rgb(r, g, b)
             } else {
                 fg
+            };
+            let (text_contrast_bg, text_skip_contrast) = if cursor_block {
+                (contrast_bg, true)
+            } else {
+                (contrast_bg, skip_contrast)
             };
 
             if lig_handled.contains(&col) {
@@ -529,6 +631,8 @@ impl DisplayListBuilder {
                         fg: cursor_fg,
                         bold,
                         dim: cell.attrs.dim,
+                        contrast_bg: text_contrast_bg,
+                        skip_contrast: text_skip_contrast,
                         custom_id: 0,
                         selected: is_sel,
                         box_glyph: false,
@@ -547,6 +651,8 @@ impl DisplayListBuilder {
                 fg: cursor_fg,
                 bold,
                 dim: cell.attrs.dim,
+                contrast_bg: text_contrast_bg,
+                skip_contrast: text_skip_contrast,
                 custom_id: 0,
                 selected: is_sel,
                 box_glyph,
@@ -572,6 +678,7 @@ impl DisplayListBuilder {
         show_scrollback: bool,
         _builtin_box_drawing: bool,
         blink_on: bool,
+        _contrast_cache: &mut ContrastCache,
     ) -> HashSet<usize> {
         use super::glyph_cache::cache_key_rasterizes;
 
@@ -612,14 +719,15 @@ impl DisplayListBuilder {
                 continue;
             }
 
+            for c in run.start_col..run.start_col + run.cols {
+                handled.insert(c);
+            }
+
             let run_x = run.start_col as f32 * metrics.cell_w;
             for (gi, g) in shaped_glyphs.iter().enumerate() {
                 let col = run.start_col + g.col_in_run;
                 if col >= cols {
                     continue;
-                }
-                for c in col..col + g.cluster_cols {
-                    handled.insert(c);
                 }
                 if !rasterizes[gi] {
                     continue;
@@ -634,11 +742,20 @@ impl DisplayListBuilder {
                 if cell_at.attrs.reverse {
                     std::mem::swap(&mut fg, &mut bg);
                 }
-                let fg_color = if is_cursor && matches!(term.cursor_style, CursorStyle::Block) {
+                let is_sel = term.is_selected(row, col);
+                let cursor_block = is_cursor && matches!(term.cursor_style, CursorStyle::Block);
+                let (contrast_bg, skip_contrast) =
+                    cell_contrast_context(fg, bg, is_sel, cursor_block, palette);
+                let fg_color = if cursor_block {
                     let (r, g, b) = contrast_text_color(palette.cursor_rgb());
                     Color::Rgb(r, g, b)
                 } else {
                     fg
+                };
+                let (text_contrast_bg, text_skip_contrast) = if cursor_block {
+                    (contrast_bg, true)
+                } else {
+                    (contrast_bg, skip_contrast)
                 };
                 let glyph_key = GlyphKey {
                     ch: run.text.chars().nth(g.col_in_run).unwrap_or(' '),
@@ -655,8 +772,10 @@ impl DisplayListBuilder {
                     fg: fg_color,
                     bold: cell_at.attrs.bold,
                     dim: cell_at.attrs.dim,
+                    contrast_bg: text_contrast_bg,
+                    skip_contrast: text_skip_contrast,
                     custom_id: 0,
-                    selected: term.is_selected(row, col),
+                    selected: is_sel,
                     box_glyph: false,
                     x_offset: Some(run_x),
                     run_shaped: Some(super::runs::run_glyph_to_shaped(g)),
@@ -684,12 +803,24 @@ fn should_emit_text_glyph(cell: &Cell) -> bool {
 mod tests {
     use super::*;
     use crate::ansi::CursorStyle;
-    use crate::config::{FontConfig, ThemeConfig};
+    use crate::config::{parse_hex, FontConfig, ThemeConfig};
     use crate::grid::GridDamage;
     use crate::renderer::color_to_glyphon;
 
     fn test_palette(theme: &ThemeConfig) -> Palette<'_> {
         Palette::from_theme(theme)
+    }
+
+    fn test_resolve(
+        fg: Color,
+        dim: bool,
+        bold: bool,
+        palette: &Palette<'_>,
+        dim_alpha: bool,
+        cache: &mut ContrastCache,
+    ) -> glyphon::Color {
+        let bg = parse_hex(&palette.theme.background);
+        resolve_fg_glyphon(fg, dim, bold, palette, dim_alpha, bg, false, cache)
     }
 
     fn test_metrics() -> CellMetrics {
@@ -715,6 +846,7 @@ mod tests {
     ) -> DisplayList {
         let palette = test_palette(theme);
         let mut list = DisplayList::default();
+        let mut contrast_cache = ContrastCache::default();
         DisplayListBuilder::build(
             &mut list,
             term,
@@ -732,6 +864,7 @@ mod tests {
             false,
             &mut None,
             &mut None,
+            &mut contrast_cache,
         );
         list
     }
@@ -750,6 +883,7 @@ mod tests {
     ) -> DisplayList {
         let palette = test_palette(theme);
         let mut list = DisplayList::default();
+        let mut contrast_cache = ContrastCache::default();
         DisplayListBuilder::build(
             &mut list,
             term,
@@ -767,6 +901,7 @@ mod tests {
             false,
             &mut None,
             &mut None,
+            &mut contrast_cache,
         );
         list
     }
@@ -977,7 +1112,15 @@ mod tests {
 
         let link_color = link_list.line_quads[0].color;
         let sgr_color = sgr_list.line_quads[0].color;
-        let full = resolve_fg_glyphon(Color::Green, false, false, &palette, theme.dim_alpha);
+        let mut cache = ContrastCache::default();
+        let full = test_resolve(
+            Color::Green,
+            false,
+            false,
+            &palette,
+            theme.dim_alpha,
+            &mut cache,
+        );
 
         assert_eq!(sgr_color, full);
         assert_eq!(link_color, attenuate_glyphon(full));
@@ -1003,7 +1146,10 @@ mod tests {
 
     #[test]
     fn reverse_dim_attenuates_swapped_foreground() {
-        let theme = ThemeConfig::default();
+        let theme = ThemeConfig {
+            minimum_contrast: 1.0,
+            ..ThemeConfig::default()
+        };
         let metrics = test_metrics();
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 1];
@@ -1020,12 +1166,16 @@ mod tests {
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
 
         let expected = attenuate_glyphon(color_to_glyphon(Color::Blue, &theme));
+        let mut cache = ContrastCache::default();
         let actual = resolve_fg_glyphon(
             list.text_glyphs[0].fg,
             list.text_glyphs[0].dim,
             list.text_glyphs[0].bold,
             &palette,
             theme.dim_alpha,
+            list.text_glyphs[0].contrast_bg,
+            list.text_glyphs[0].skip_contrast,
+            &mut cache,
         );
         assert_eq!(actual, expected);
         assert_eq!(list.text_glyphs[0].fg, Color::Blue);
@@ -1033,7 +1183,10 @@ mod tests {
 
     #[test]
     fn underline_emits_quad_with_dimmed_fg() {
-        let theme = ThemeConfig::default();
+        let theme = ThemeConfig {
+            minimum_contrast: 1.0,
+            ..ThemeConfig::default()
+        };
         let metrics = test_metrics();
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 1];
@@ -1069,6 +1222,7 @@ mod tests {
         let term = Term::default();
         let palette = test_palette(&theme);
         let mut list = DisplayList::default();
+        let mut contrast_cache = ContrastCache::default();
 
         DisplayListBuilder::build(
             &mut list,
@@ -1087,6 +1241,7 @@ mod tests {
             false,
             &mut None,
             &mut None,
+            &mut contrast_cache,
         );
         let full_glyphs = list.text_glyphs.len();
         assert_eq!(full_glyphs, 8);
@@ -1113,6 +1268,7 @@ mod tests {
             false,
             &mut None,
             &mut None,
+            &mut contrast_cache,
         );
 
         assert_eq!(list.text_glyphs.len(), full_glyphs);
@@ -1143,7 +1299,10 @@ mod tests {
 
     #[test]
     fn undercurl_usa_underline_color() {
-        let theme = ThemeConfig::default();
+        let theme = ThemeConfig {
+            minimum_contrast: 1.0,
+            ..ThemeConfig::default()
+        };
         let metrics = test_metrics();
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 1];
@@ -1162,7 +1321,20 @@ mod tests {
             .find(|q| q.kind == LineKind::Under)
             .expect("underline quad");
         assert_eq!(under.style, UnderlineStyle::Curly);
-        let expected = resolve_fg_glyphon(Color::Red, false, false, &palette, theme.dim_alpha);
+        let expected = {
+            let mut cache = ContrastCache::default();
+            let bg = parse_hex(&theme.background);
+            resolve_fg_glyphon(
+                Color::Red,
+                false,
+                false,
+                &palette,
+                theme.dim_alpha,
+                bg,
+                false,
+                &mut cache,
+            )
+        };
         assert_eq!(under.color, expected);
     }
 
@@ -1170,6 +1342,7 @@ mod tests {
     fn dim_alpha_attenuates_via_alpha_channel() {
         let theme = ThemeConfig {
             dim_alpha: true,
+            minimum_contrast: 1.0,
             ..ThemeConfig::default()
         };
         let metrics = test_metrics();
@@ -1185,12 +1358,16 @@ mod tests {
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
 
+        let mut cache = ContrastCache::default();
         let actual = resolve_fg_glyphon(
             list.text_glyphs[0].fg,
             list.text_glyphs[0].dim,
             list.text_glyphs[0].bold,
             &palette,
             theme.dim_alpha,
+            list.text_glyphs[0].contrast_bg,
+            list.text_glyphs[0].skip_contrast,
+            &mut cache,
         );
         assert_eq!(actual.a(), (DIM_FACTOR * 255.0) as u8);
         assert_eq!(actual.r(), palette.rgb(Color::Red, false).0);

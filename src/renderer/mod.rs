@@ -17,6 +17,7 @@ mod terminal_fallback;
 
 pub use blink::blink_on;
 pub use contrast::{adjust_fg, ContrastCache};
+pub use decorations::SOLID_MASK_GLYPH_ID;
 pub use palette::{ColorOverrides, Palette};
 
 /// Base de ids reservados para box/block glyphs programaticos (sobre ids de cache).
@@ -75,6 +76,7 @@ use std::time::Instant;
 use crate::ansi::{Color, Term};
 use crate::config::{parse_hex, FontConfig, GlyphOffset, ThemeConfig};
 use crate::grid::{Cell, DamageSnapshot};
+use crate::theme_picker::ThemePickerState;
 use glyphon::cosmic_text::Hinting;
 use winit::window::Window;
 
@@ -96,6 +98,10 @@ pub struct Renderer {
     swash_cache: glyphon::SwashCache,
     /// Buffer para overlay de status (renderizado encima del grid).
     overlay_buffer: glyphon::Buffer,
+    /// Buffers del theme picker overlay.
+    picker_list_buffer: glyphon::Buffer,
+    picker_detail_buffer: glyphon::Buffer,
+    picker_footer_buffer: glyphon::Buffer,
     /// Buffer vacio solo para custom_glyphs de fondo (evita doble dibujo de fila 0).
     bg_buffer: glyphon::Buffer,
     // ponytail: cell_w y cell_h se calculan en new() y se actualizan en resize().
@@ -129,6 +135,8 @@ pub struct Renderer {
     glyph_offset: GlyphOffset,
     builtin_box_drawing: bool,
     ligatures: bool,
+    /// Cache de ajuste de contraste por frame.
+    contrast_cache: ContrastCache,
 }
 
 impl Renderer {
@@ -148,6 +156,37 @@ impl Renderer {
     ) {
         buffer.set_monospace_width(font_system, Some(cell_w));
         buffer.set_hinting(font_system, Hinting::Enabled);
+    }
+
+    fn reset_aux_buffers(&mut self) {
+        let metrics = glyphon::Metrics::new(self.font_size, self.cell_h);
+        self.overlay_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+        Self::configure_buffer(&mut self.font_system, &mut self.overlay_buffer, self.cell_w);
+
+        let picker_m =
+            crate::theme_picker::picker_cell_metrics(&mut self.font_system, &self.font_family);
+        let picker_metrics = glyphon::Metrics::new(picker_m.font_size, picker_m.cell_h);
+        self.picker_list_buffer = glyphon::Buffer::new(&mut self.font_system, picker_metrics);
+        Self::configure_buffer(
+            &mut self.font_system,
+            &mut self.picker_list_buffer,
+            picker_m.cell_w,
+        );
+        self.picker_detail_buffer = glyphon::Buffer::new(&mut self.font_system, picker_metrics);
+        Self::configure_buffer(
+            &mut self.font_system,
+            &mut self.picker_detail_buffer,
+            picker_m.cell_w,
+        );
+        self.picker_footer_buffer = glyphon::Buffer::new(&mut self.font_system, picker_metrics);
+        Self::configure_buffer(
+            &mut self.font_system,
+            &mut self.picker_footer_buffer,
+            picker_m.cell_w,
+        );
+
+        self.bg_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+        Self::configure_buffer(&mut self.font_system, &mut self.bg_buffer, self.cell_w);
     }
 
     pub fn cell_w(&self) -> f32 {
@@ -212,6 +251,15 @@ impl Renderer {
 
         let mut overlay_buffer = glyphon::Buffer::new(&mut font_system, metrics);
         Self::configure_buffer(&mut font_system, &mut overlay_buffer, cell_w);
+
+        let picker_m = crate::theme_picker::picker_cell_metrics(&mut font_system, &font_family);
+        let picker_metrics = glyphon::Metrics::new(picker_m.font_size, picker_m.cell_h);
+        let mut picker_list_buffer = glyphon::Buffer::new(&mut font_system, picker_metrics);
+        Self::configure_buffer(&mut font_system, &mut picker_list_buffer, picker_m.cell_w);
+        let mut picker_detail_buffer = glyphon::Buffer::new(&mut font_system, picker_metrics);
+        Self::configure_buffer(&mut font_system, &mut picker_detail_buffer, picker_m.cell_w);
+        let mut picker_footer_buffer = glyphon::Buffer::new(&mut font_system, picker_metrics);
+        Self::configure_buffer(&mut font_system, &mut picker_footer_buffer, picker_m.cell_w);
         let mut bg_buffer = glyphon::Buffer::new(&mut font_system, metrics);
         Self::configure_buffer(&mut font_system, &mut bg_buffer, cell_w);
 
@@ -227,6 +275,9 @@ impl Renderer {
             text_renderer,
             swash_cache,
             overlay_buffer,
+            picker_list_buffer,
+            picker_detail_buffer,
+            picker_footer_buffer,
             bg_buffer,
             cell_w,
             cell_h,
@@ -245,6 +296,7 @@ impl Renderer {
             glyph_offset,
             builtin_box_drawing,
             ligatures,
+            contrast_cache: ContrastCache::default(),
         }
     }
 
@@ -279,11 +331,7 @@ impl Renderer {
         self.font_size = size as f32;
         self.refresh_cell_metrics();
         self.reset_glyph_pipeline();
-        let metrics = glyphon::Metrics::new(self.font_size, self.cell_h);
-        self.overlay_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
-        Self::configure_buffer(&mut self.font_system, &mut self.overlay_buffer, self.cell_w);
-        self.bg_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
-        Self::configure_buffer(&mut self.font_system, &mut self.bg_buffer, self.cell_w);
+        self.reset_aux_buffers();
         (self.cell_w, self.cell_h)
     }
 
@@ -309,19 +357,20 @@ impl Renderer {
         self.font_size = effective_size as f32;
         self.refresh_cell_metrics();
         self.reset_glyph_pipeline();
-        let metrics = glyphon::Metrics::new(self.font_size, self.cell_h);
-        self.overlay_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
-        Self::configure_buffer(&mut self.font_system, &mut self.overlay_buffer, self.cell_w);
-        self.bg_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
-        Self::configure_buffer(&mut self.font_system, &mut self.bg_buffer, self.cell_w);
+        self.reset_aux_buffers();
     }
 
     /// Invalida caches GPU tras cambio de metricas (resize).
     fn reset_glyph_pipeline(&mut self) {
         self.glyph_cache.clear();
         builtin::clear_cache();
+        self.reset_text_atlas();
         self.swash_cache = glyphon::SwashCache::new();
         self.display_list.clear();
+    }
+
+    /// Recrea atlas y text renderer (p. ej. al alternar métricas terminal/picker).
+    fn reset_text_atlas(&mut self) {
         self.atlas = glyphon::TextAtlas::new(
             &self.device,
             &self.queue,
@@ -336,6 +385,13 @@ impl Renderer {
         );
     }
 
+    /// Sincroniza métricas del cache de glifos y resetea el atlas si cambiaron.
+    fn prepare_glyph_metrics(&mut self, metrics: &CellMetrics) {
+        if self.glyph_cache.metrics_changed(metrics) {
+            self.reset_text_atlas();
+        }
+    }
+
     /// Cambia el tamano de la surface y recrea buffers auxiliares.
     pub fn resize(&mut self, width: u32, height: u32, _rows_count: usize) {
         self.config.width = width.clamp(1, 16_384);
@@ -346,12 +402,7 @@ impl Renderer {
 
         self.refresh_cell_metrics();
         self.reset_glyph_pipeline();
-        let metrics = glyphon::Metrics::new(self.font_size, self.cell_h);
-
-        self.overlay_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
-        Self::configure_buffer(&mut self.font_system, &mut self.overlay_buffer, self.cell_w);
-        self.bg_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
-        Self::configure_buffer(&mut self.font_system, &mut self.bg_buffer, self.cell_w);
+        self.reset_aux_buffers();
     }
 
     /// Renderiza el estado del `term` en la surface.
@@ -362,6 +413,7 @@ impl Renderer {
         theme: &ThemeConfig,
         bold_is_bright: bool,
         window_opacity: f32,
+        picker: Option<&ThemePickerState>,
     ) -> Result<(), String> {
         let t0 = Instant::now();
 
@@ -461,6 +513,8 @@ impl Renderer {
             window_opacity,
             t0,
             get_frame_us,
+            bold_is_bright,
+            picker,
         )
     }
 
@@ -483,7 +537,22 @@ impl Renderer {
         window_opacity: f32,
         t0: Instant,
         get_frame_us: f64,
+        bold_is_bright: bool,
+        picker: Option<&ThemePickerState>,
     ) -> Result<(), String> {
+        if let Some(picker_state) = picker {
+            return self.render_picker_only(
+                picker_state,
+                theme,
+                bold_is_bright,
+                frame,
+                view,
+                encoder,
+                t0,
+                get_frame_us,
+            );
+        }
+
         if show_scrollback {
             damage = DamageSnapshot::Full;
         }
@@ -521,6 +590,9 @@ impl Renderer {
         self.prev_scrollback_offset = term.scrollback_offset;
 
         let t_build = Instant::now();
+        self.contrast_cache.clear();
+        let frame_metrics = self.cell_metrics;
+        self.prepare_glyph_metrics(&frame_metrics);
         let blink_on = crate::renderer::blink_on(
             term.last_blink_reset.elapsed(),
             std::time::Duration::from_millis(term.blink_interval_ms),
@@ -568,6 +640,7 @@ impl Renderer {
             self.ligatures,
             &mut font_system,
             &mut swash_cache,
+            &mut self.contrast_cache,
         );
 
         let mut custom_glyphs = Vec::new();
@@ -580,6 +653,7 @@ impl Renderer {
             &mut self.glyph_cache,
             &mut self.font_system,
             &mut self.swash_cache,
+            &mut self.contrast_cache,
             &mut custom_glyphs,
         )?;
         debug_assert_custom_glyphs_bounded(&custom_glyphs);
@@ -603,7 +677,7 @@ impl Renderer {
         }
 
         let cell_w = self.cell_w;
-        let mut extra_areas: Vec<glyphon::TextArea<'_>> = Vec::with_capacity(1);
+        let mut extra_areas: Vec<glyphon::TextArea<'_>> = Vec::with_capacity(4);
         if self.status_active {
             let overlay_left = self.config.width as f32 - (23.0 * cell_w) - 10.0;
             extra_areas.push(glyphon::TextArea {
@@ -688,9 +762,170 @@ impl Renderer {
         Ok(())
     }
 
+    /// Render exclusivo del theme picker (sin grid del terminal).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "render pass needs frame, timing and picker state"
+    )]
+    fn render_picker_only(
+        &mut self,
+        picker_state: &ThemePickerState,
+        theme: &ThemeConfig,
+        bold_is_bright: bool,
+        frame: wgpu::SurfaceTexture,
+        view: &wgpu::TextureView,
+        mut encoder: wgpu::CommandEncoder,
+        t0: Instant,
+        get_frame_us: f64,
+    ) -> Result<(), String> {
+        let t_build = Instant::now();
+        self.contrast_cache.clear();
+        let picker_m =
+            crate::theme_picker::picker_cell_metrics(&mut self.font_system, &self.font_family);
+        self.prepare_glyph_metrics(&picker_m);
+        crate::theme_picker::configure_picker_buffers(
+            &mut self.font_system,
+            &self.font_family,
+            &mut self.picker_list_buffer,
+            &mut self.picker_detail_buffer,
+            &mut self.picker_footer_buffer,
+        );
+
+        let cell_w = picker_m.cell_w;
+        let cell_h = picker_m.cell_h;
+        let list_w = (self.config.width as f32 * 0.30).max(cell_w * 12.0);
+
+        crate::theme_picker::fill_buffers(
+            picker_state,
+            &mut self.font_system,
+            &self.font_family,
+            cell_w,
+            cell_h,
+            self.config.width,
+            self.config.height,
+            &mut self.picker_list_buffer,
+            &mut self.picker_detail_buffer,
+            &mut self.picker_footer_buffer,
+            &mut self.contrast_cache,
+        );
+
+        let preview_theme = picker_state.preview_theme();
+        let layout = crate::theme_picker::palette_layout(cell_h);
+        let samples_x = list_w + cell_h;
+
+        let mut custom_glyphs = crate::theme_picker::build_custom_glyphs(
+            picker_state,
+            &preview_theme,
+            cell_w,
+            cell_h,
+            self.config.width,
+            self.config.height,
+        );
+
+        let sample_glyphs = crate::theme_picker::build_sample_custom_glyphs(
+            &preview_theme,
+            bold_is_bright || preview_theme.bold_is_bright,
+            &picker_m,
+            &self.font_family,
+            samples_x,
+            layout.samples_y,
+            &mut self.font_system,
+            &mut self.swash_cache,
+            &mut self.glyph_cache,
+            &mut self.contrast_cache,
+        )?;
+        custom_glyphs.extend(sample_glyphs);
+
+        let (fr, fg, fb) = crate::config::parse_hex(&theme.foreground);
+        let default_fg = glyphon::Color::rgb(fr, fg, fb);
+
+        let mut extra_areas: Vec<glyphon::TextArea<'_>> = Vec::with_capacity(3);
+        crate::theme_picker::push_text_areas(
+            &self.picker_list_buffer,
+            &self.picker_detail_buffer,
+            &self.picker_footer_buffer,
+            &mut extra_areas,
+            list_w,
+            self.config.width,
+            self.config.height,
+            cell_h,
+            default_fg,
+        );
+
+        let build_us = t_build.elapsed().as_secs_f64() * 1_000_000.0;
+
+        let t_prepare = Instant::now();
+        CellRenderer::prepare(
+            &custom_glyphs,
+            &mut self.font_system,
+            &mut self.swash_cache,
+            &self.glyph_cache,
+            &mut self.text_renderer,
+            &self.device,
+            &self.queue,
+            &mut self.atlas,
+            &self.viewport,
+            &self.bg_buffer,
+            self.config.width,
+            self.config.height,
+            default_fg,
+            &extra_areas,
+        )?;
+        let prepare_us = t_prepare.elapsed().as_secs_f64() * 1_000_000.0;
+
+        let t_gpu = Instant::now();
+        let (bg_r, bg_g, bg_b) = crate::config::parse_hex(&theme.background);
+        let clear_color = frame_clear_color((bg_r, bg_g, bg_b), 1.0);
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("theme picker pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut render_pass)
+                .map_err(|e| format!("error al renderizar theme picker: {e}"))?;
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        frame.present();
+        let gpu_us = t_gpu.elapsed().as_secs_f64() * 1_000_000.0;
+
+        let total_us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        self.frame_count += 1;
+        if self.frame_count.is_multiple_of(30) {
+            tracing::info!(
+                "[RENDER_PERF] frame={} mode=picker total={:.0}us get_frame={:.0}us build={:.0}us prepare={:.0}us gpu={:.0}us",
+                self.frame_count,
+                total_us,
+                get_frame_us,
+                build_us,
+                prepare_us,
+                gpu_us,
+            );
+        }
+
+        Ok(())
+    }
+
     /// El overlay de status esta activo (requiere frame aunque el term no cambie).
     pub fn status_overlay_active(&self) -> bool {
         self.status_active
+    }
+
+    /// Requiere redraw continuo mientras el theme picker esta activo.
+    pub fn theme_picker_active(&self, picker: Option<&ThemePickerState>) -> bool {
+        picker.is_some()
     }
 
     /// Establece el texto del overlay de status.

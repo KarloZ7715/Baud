@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use crate::ansi::Term;
 use crate::clipboard::{self, CopyTarget};
-use crate::config::{Config, ProcessSection, StartupState};
+use crate::config::watch::WatchState;
+use crate::config::{persist, Config, ProcessSection, StartupState};
 use crate::copy_mode::CopyModeState;
 use crate::event_loop::{PtyCommand, PtyCommandSender};
 use crate::grid::Cell;
@@ -22,6 +23,7 @@ use crate::input::keymap::{self, Key as KKey, KeyEventKind, KeyModes, Mods};
 use crate::renderer::Renderer;
 use crate::selection::{Selection, SelectionMode, SelectionPoint};
 use crate::smart_select;
+use crate::theme_picker::ThemePickerState;
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
 use winit::event::MouseButton;
@@ -185,6 +187,10 @@ pub struct App {
     gui_redraw_metrics: GuiRedrawMetrics,
     /// Momento en que debe ejecutarse copy-on-select pendiente (tras multi-clic).
     copy_on_select_deadline: Option<Instant>,
+    /// Selector interactivo de temas (exclusivo con copy mode).
+    theme_picker: Option<ThemePickerState>,
+    /// Estado del watcher de config (sync mtime tras persistir tema).
+    config_watch: Arc<Mutex<WatchState>>,
 }
 
 impl App {
@@ -193,6 +199,7 @@ impl App {
         term: Arc<Mutex<Term>>,
         pty_tx: Arc<Mutex<Option<PtyCommandSender>>>,
         config: Config,
+        config_watch: Arc<Mutex<WatchState>>,
     ) -> Self {
         let font_size = config.font.size;
         let window_width = config.window.width as f32;
@@ -218,7 +225,16 @@ impl App {
             last_gui_redraw: None,
             gui_redraw_metrics: GuiRedrawMetrics::new(),
             copy_on_select_deadline: None,
+            theme_picker: None,
+            config_watch,
         }
+    }
+
+    fn effective_theme(&self) -> crate::config::ThemeConfig {
+        self.theme_picker
+            .as_ref()
+            .map(ThemePickerState::preview_theme)
+            .unwrap_or_else(|| self.config.theme.clone())
     }
 
     fn process_section_changed(prev: &ProcessSection, next: &ProcessSection) -> bool {
@@ -660,6 +676,9 @@ impl App {
         if !self.config.copy_mode.enabled {
             return;
         }
+        if self.theme_picker.is_some() {
+            return;
+        }
         if let Ok(mut guard) = self.term.lock() {
             if guard.copy_mode.is_none() {
                 guard.copy_mode = Some(CopyModeState::enter(&guard));
@@ -667,6 +686,152 @@ impl App {
                 tracing::info!("KEYBOARD: copy mode activado");
             }
         }
+    }
+
+    fn toggle_theme_picker(&mut self) {
+        if let Some(picker) = self.theme_picker.take() {
+            self.cancel_theme_picker(picker);
+            return;
+        }
+        let saved_copy_mode = self
+            .term
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.copy_mode.take());
+        let preset = self.config.active_preset_name();
+        self.theme_picker = Some(ThemePickerState::open(
+            &self.config.theme,
+            preset,
+            saved_copy_mode,
+        ));
+        if let Ok(mut guard) = self.term.lock() {
+            guard.mark_dirty();
+        }
+        tracing::info!("KEYBOARD: theme picker activado");
+    }
+
+    fn cancel_theme_picker(&mut self, picker: ThemePickerState) {
+        self.config.theme = picker.saved_theme().clone();
+        self.config.theme_preset = picker.saved_preset().map(str::to_string);
+        self.theme_picker = None;
+        if let Ok(mut guard) = self.term.lock() {
+            if let Some(cm) = picker.saved_copy_mode() {
+                guard.copy_mode = Some(cm);
+            }
+            guard.mark_dirty();
+        }
+        tracing::info!("KEYBOARD: theme picker cancelado");
+    }
+
+    fn confirm_theme_picker(&mut self, picker: ThemePickerState) {
+        let Some(name) = picker.try_selected_name() else {
+            self.theme_picker = Some(picker);
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_status("[Theme picker: sin coincidencias para aplicar]");
+            }
+            return;
+        };
+        let name = name.to_string();
+        match persist::write_theme_preset(&name) {
+            Ok(outcome) => {
+                if let Ok(mut watch) = self.config_watch.lock() {
+                    watch.sync(persist::file_mtime(&outcome.path));
+                }
+                self.config.theme = picker.preview_theme();
+                self.config.theme_preset = Some(name.clone());
+                self.theme_picker = None;
+                if let Ok(mut guard) = self.term.lock() {
+                    if let Some(cm) = picker.saved_copy_mode() {
+                        guard.copy_mode = Some(cm);
+                    }
+                    guard.mark_dirty();
+                }
+                if let Some(renderer) = &mut self.renderer {
+                    let status = if outcome.preserved_theme_overrides {
+                        format!("Tema aplicado: {name} (overrides en [theme] conservados)")
+                    } else {
+                        format!("Tema aplicado: {name}")
+                    };
+                    renderer.set_status(&status);
+                }
+                tracing::info!(
+                    "theme picker: preset '{name}' persistido en {}",
+                    outcome.path.display()
+                );
+            }
+            Err(e) => {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_status(&format!("[Error al guardar tema: {e}]"));
+                }
+                self.theme_picker = Some(picker);
+            }
+        }
+    }
+
+    /// Maneja teclas en theme picker. Devuelve true si la tecla fue consumida.
+    fn handle_theme_picker_key(&mut self, event: &winit::event::KeyEvent, shift: bool) -> bool {
+        use winit::keyboard::{Key, NamedKey};
+
+        let Some(picker) = self.theme_picker.as_mut() else {
+            return false;
+        };
+
+        if picker.is_search_mode() {
+            match &event.logical_key {
+                Key::Named(NamedKey::Escape) => picker.cancel_search(),
+                Key::Named(NamedKey::Backspace) => picker.pop_filter_char(),
+                Key::Named(NamedKey::Enter) => picker.commit_search(),
+                Key::Named(NamedKey::ArrowDown) => picker.move_next(),
+                Key::Named(NamedKey::ArrowUp) => picker.move_prev(),
+                Key::Named(NamedKey::PageDown) => picker.page_down(),
+                Key::Named(NamedKey::PageUp) => picker.page_up(),
+                Key::Named(NamedKey::Home) => picker.move_home(),
+                Key::Named(NamedKey::End) => picker.move_end(),
+                Key::Character(c) if !shift => match c.as_str() {
+                    "j" => picker.move_next(),
+                    "k" => picker.move_prev(),
+                    ch => {
+                        if let Some(ch) = ch.chars().next() {
+                            picker.push_filter_char(ch);
+                        }
+                    }
+                },
+                _ => return false,
+            }
+            return true;
+        }
+
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                let picker = self.theme_picker.take().expect("picker activo");
+                self.cancel_theme_picker(picker);
+            }
+            Key::Named(NamedKey::Enter) => {
+                if !picker.can_confirm() {
+                    return true;
+                }
+                let picker = self.theme_picker.take().expect("picker activo");
+                self.confirm_theme_picker(picker);
+            }
+            Key::Named(NamedKey::ArrowDown) => picker.move_next(),
+            Key::Named(NamedKey::ArrowUp) => picker.move_prev(),
+            Key::Named(NamedKey::PageDown) => picker.page_down(),
+            Key::Named(NamedKey::PageUp) => picker.page_up(),
+            Key::Named(NamedKey::Home) => picker.move_home(),
+            Key::Named(NamedKey::End) => picker.move_end(),
+            Key::Character(c) if !shift => match c.as_str() {
+                "j" => picker.move_next(),
+                "k" => picker.move_prev(),
+                "q" => {
+                    let picker = self.theme_picker.take().expect("picker activo");
+                    self.cancel_theme_picker(picker);
+                }
+                "/" => picker.start_search(),
+                _ => return false,
+            },
+            _ => return false,
+        }
+        true
     }
 
     fn font_zoom(&mut self, dir: i8) {
@@ -722,6 +887,7 @@ impl App {
             FontZoomIn => self.font_zoom(1),
             FontZoomOut => self.font_zoom(-1),
             FontZoomReset => self.font_zoom(0),
+            ToggleThemePicker => self.toggle_theme_picker(),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -1141,6 +1307,8 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             WindowEvent::RedrawRequested => {
+                let theme = self.effective_theme();
+                let picker = self.theme_picker.as_ref();
                 let Some(renderer) = &mut self.renderer else {
                     return;
                 };
@@ -1151,7 +1319,10 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                 };
-                if !term_guard.dirty && !renderer.status_overlay_active() {
+                if !term_guard.dirty
+                    && !renderer.status_overlay_active()
+                    && !renderer.theme_picker_active(picker)
+                {
                     tracing::debug!("RedrawRequested: skip (nothing dirty)");
                     return;
                 }
@@ -1160,9 +1331,10 @@ impl ApplicationHandler<UserEvent> for App {
                 let bold = self.config.bold_is_bright || self.config.theme.bold_is_bright;
                 if let Err(e) = renderer.render(
                     &mut term_guard,
-                    &self.config.theme,
+                    &theme,
                     bold,
                     self.config.window.opacity,
+                    picker,
                 ) {
                     tracing::warn!("error al renderizar: {e}");
                 }
@@ -1497,6 +1669,26 @@ impl ApplicationHandler<UserEvent> for App {
                     sup: self.modifiers.state().super_key(),
                 };
 
+                if self.theme_picker.is_some() {
+                    if let Some(k) = winit_to_key(&event.logical_key) {
+                        let k_norm = normalize_binding_key(k, mods);
+                        if matches!(
+                            self.keybindings.lookup(k_norm, mods),
+                            Some(Action::ToggleThemePicker)
+                        ) {
+                            self.run_action(Action::ToggleThemePicker);
+                            return;
+                        }
+                    }
+                    if self.handle_theme_picker_key(&event, shift) {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                        return;
+                    }
+                    return;
+                }
+
                 if let Some(k) = winit_to_key(&event.logical_key) {
                     let k_norm = normalize_binding_key(k, mods);
                     if let Some(action) = self.keybindings.lookup(k_norm, mods) {
@@ -1615,14 +1807,21 @@ impl ApplicationHandler<UserEvent> for App {
                 self.send_input(response);
             }
             UserEvent::ConfigReloaded(cfg) => {
-                let restart_msg = self.apply_config(*cfg);
-                if let Some(renderer) = &mut self.renderer {
-                    let status = if let Some(msg) = restart_msg {
-                        format!("[Config recargada — {msg}]")
-                    } else {
-                        "[Config recargada]".into()
-                    };
-                    renderer.set_status(&status);
+                if self.theme_picker.is_some() {
+                    tracing::debug!("config: reload omitido — theme picker activo");
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.set_status("[Config: reload omitido — theme picker activo]");
+                    }
+                } else {
+                    let restart_msg = self.apply_config(*cfg);
+                    if let Some(renderer) = &mut self.renderer {
+                        let status = if let Some(msg) = restart_msg {
+                            format!("[Config recargada — {msg}]")
+                        } else {
+                            "[Config recargada]".into()
+                        };
+                        renderer.set_status(&status);
+                    }
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();
@@ -1676,7 +1875,32 @@ static VTABLE: RawWakerVTable = RawWakerVTable::new(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::watch::WatchState;
     use crate::renderer::limits::pixel_to_cell_coords;
+
+    fn test_config_watch() -> Arc<Mutex<WatchState>> {
+        Arc::new(Mutex::new(WatchState::new(None)))
+    }
+
+    #[test]
+    fn test_effective_theme_usa_preview() {
+        let mut app = App::new(
+            Arc::new(Mutex::new(Term::new())),
+            Arc::new(Mutex::new(None)),
+            Config::default(),
+            test_config_watch(),
+        );
+        app.theme_picker = Some(ThemePickerState::open(
+            &app.config.theme,
+            Some("dracula"),
+            None,
+        ));
+        let preview = app.effective_theme();
+        assert_eq!(
+            preview.background,
+            crate::config::try_preset("dracula").unwrap().background
+        );
+    }
 
     #[test]
     fn test_font_zoom_clamp() {
@@ -1714,6 +1938,7 @@ mod tests {
             Arc::new(Mutex::new(Term::new())),
             Arc::new(Mutex::new(None)),
             Config::default(),
+            test_config_watch(),
         );
         assert_eq!(
             app.mouse_x, 0.0,
@@ -1829,7 +2054,12 @@ mod tests {
         use crate::ansi::MouseReporting;
 
         let term = Arc::new(Mutex::new(Term::new()));
-        let app = App::new(term.clone(), Arc::new(Mutex::new(None)), Config::default());
+        let app = App::new(
+            term.clone(),
+            Arc::new(Mutex::new(None)),
+            Config::default(),
+            test_config_watch(),
+        );
         assert!(
             !app.should_forward_mouse_to_app(),
             "shell: no reenviar mouse al PTY (seleccion local)"
@@ -1841,7 +2071,12 @@ mod tests {
             any_motion: false,
             sgr: true,
         };
-        let app_vim = App::new(term, Arc::new(Mutex::new(None)), Config::default());
+        let app_vim = App::new(
+            term,
+            Arc::new(Mutex::new(None)),
+            Config::default(),
+            test_config_watch(),
+        );
         assert!(
             app_vim.should_forward_mouse_to_app(),
             "vim: app captura mouse sin modificadores"

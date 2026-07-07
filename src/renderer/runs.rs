@@ -31,7 +31,7 @@ pub struct RunGlyph {
     pub height: f32,
 }
 
-fn reference_line_y(
+pub(crate) fn reference_line_y(
     font_system: &mut glyphon::FontSystem,
     metrics: &CellMetrics,
     family: &str,
@@ -536,7 +536,7 @@ mod tests {
                     dim: false,
                     family: format!("Fira Code#lig:{pattern}:{gi}"),
                 };
-                let cached = cache.get_or_insert_shaped(&mut fs, &mut swash, key, shaped);
+                let cached = cache.get_or_insert_shaped(&mut fs, &mut swash, &m, key, shaped);
                 assert!(!cached.raster.missing, "patron={pattern} gi={gi}");
                 assert!(cached.raster.width > 0 && cached.raster.height > 0);
             }

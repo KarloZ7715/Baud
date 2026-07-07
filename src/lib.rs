@@ -12,4 +12,5 @@ pub mod pty;
 pub mod renderer;
 pub mod selection;
 pub mod smart_select;
+pub mod theme_picker;
 pub mod window;
