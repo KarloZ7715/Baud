@@ -1063,6 +1063,37 @@ impl Term {
         self.mark_dirty();
     }
 
+    /// Recalcula matches si hay busqueda activa (p.ej. tras nuevo output del PTY).
+    pub fn search_refresh_if_active(&mut self) {
+        let Some(ref s) = self.search else {
+            return;
+        };
+        if s.query.is_empty() {
+            return;
+        }
+        let q = s.query.clone();
+        let ci = s.case_insensitive;
+        let committed = s.committed;
+        let prev_current = s.current;
+        let rows = self.rows_as_text();
+        let matches = search::find_matches(&rows, &q, ci);
+        let current = if matches.is_empty() {
+            0
+        } else {
+            prev_current.min(matches.len() - 1)
+        };
+        self.search = Some(SearchState {
+            query: q,
+            case_insensitive: ci,
+            matches,
+            current,
+            committed,
+        });
+        if let Some(m) = self.search.as_ref().and_then(|s| s.matches.get(s.current)) {
+            self.scroll_to_show_logical_row(m.row);
+        }
+    }
+
     /// Indica si una celda visible participa en un match de busqueda.
     /// `Some(true)` = match actual; `Some(false)` = otro match; `None` = sin match.
     pub fn is_search_hit(&self, visible_row: usize, col: usize) -> Option<bool> {

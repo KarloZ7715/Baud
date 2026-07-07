@@ -683,6 +683,7 @@ impl App {
         if let Ok(mut guard) = self.term.lock() {
             if guard.copy_mode.is_none() {
                 guard.copy_mode = Some(CopyModeState::enter(&guard));
+                guard.search_clear();
                 guard.mark_dirty();
                 tracing::info!("KEYBOARD: copy mode activado");
             }
@@ -1020,22 +1021,21 @@ impl App {
                 Key::Character(c) if c == "n" && !shift => {
                     if guard.search.as_ref().is_some_and(|s| s.committed) {
                         guard.search_next();
-                    } else if let Some(ref mut s) = guard.search {
-                        s.query.push('n');
-                        let q = s.query.clone();
-                        let ci = s.case_insensitive;
-                        guard.search_set_query(&q, ci);
+                        return true;
                     }
-                    return true;
                 }
                 Key::Character(c) if c == "N" || (c == "n" && shift) => {
                     if guard.search.as_ref().is_some_and(|s| s.committed) {
                         guard.search_prev();
+                        return true;
                     }
-                    return true;
                 }
-                Key::Character(c) if !shift => {
-                    let ch = c.chars().next().filter(|ch| !ch.is_control());
+                Key::Character(_) => {
+                    let ch = event
+                        .text
+                        .as_deref()
+                        .and_then(|t| t.chars().next())
+                        .filter(|ch| !ch.is_control());
                     if let Some(ch) = ch {
                         if let Some(ref mut s) = guard.search {
                             if s.committed {

@@ -401,6 +401,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     parser.advance(&mut *term_guard, bytes);
                     total_bytes += bytes.len();
                 }
+                term_guard.search_refresh_if_active();
                 term_guard.mark_dirty();
                 term_guard.reset_blink_phase();
                 let response = term_guard.take_pty_response();
