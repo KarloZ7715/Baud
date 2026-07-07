@@ -59,7 +59,16 @@ pub struct Config {
     #[serde(default)]
     pub process: ProcessSection,
     #[serde(default)]
+    pub notifications: NotificationsConfig,
+    #[serde(default)]
     pub keys: BTreeMap<String, String>,
+}
+
+/// Notificaciones de escritorio via OSC 9 / OSC 777. Off por defecto.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct NotificationsConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Configuración de selección de texto.
@@ -247,6 +256,8 @@ struct RawConfig {
     #[serde(default)]
     process: ProcessSection,
     #[serde(default)]
+    notifications: NotificationsConfig,
+    #[serde(default)]
     keys: BTreeMap<String, String>,
 }
 
@@ -295,6 +306,7 @@ impl From<RawConfig> for Config {
             bold_is_bright: raw.bold_is_bright,
             allow_osc52_read: raw.allow_osc52_read,
             process: raw.process,
+            notifications: raw.notifications,
             keys: raw.keys,
         }
     }
@@ -1268,6 +1280,16 @@ dim_alpha = true
         assert_eq!(cfg.theme.background, nord.background);
         assert!(cfg.theme.bold_is_bright);
         assert!(cfg.theme.dim_alpha);
+    }
+
+    #[test]
+    fn test_notifications_config() {
+        let cfg = Config::default();
+        assert!(!cfg.notifications.enabled);
+
+        let toml = "[notifications]\nenabled = true\n";
+        let p: Config = toml::from_str(toml).unwrap();
+        assert!(p.notifications.enabled);
     }
 
     #[test]
