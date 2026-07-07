@@ -3,6 +3,7 @@ use std::time::Instant;
 use crate::copy_mode::CopyModeState;
 use crate::cursor::Cursor;
 use crate::grid::{Grid, DEFAULT_COLS, DEFAULT_ROWS};
+use crate::search::{self, SearchState};
 use crate::selection::Selection;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -170,6 +171,7 @@ pub struct Term {
     pub cursor_color_override: Option<(u8, u8, u8)>,
     pub mouse_reporting: MouseReporting,
     pub copy_mode: Option<CopyModeState>,
+    pub search: Option<SearchState>,
     pub cursor_style: CursorStyle,
     /// Habilita el parpadeo del cursor (config `[cursor] blink`).
     pub cursor_blink_enabled: bool,
@@ -260,6 +262,7 @@ impl Term {
             cursor_color_override: None,
             mouse_reporting: MouseReporting::default(),
             copy_mode: None,
+            search: None,
             cursor_style: CursorStyle::default(),
             cursor_blink_enabled: true,
             blink_interval_ms: 530,
@@ -962,6 +965,109 @@ impl Term {
         } else {
             self.scrollback_offset = 0;
         }
+    }
+
+    /// Convierte celdas de una fila a texto buscable (sin espacios finales).
+    fn cells_to_row_text(cells: &[crate::grid::Cell]) -> String {
+        let end = cells
+            .iter()
+            .rposition(|c| c.ch != ' ')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        let mut s = String::new();
+        for cell in &cells[..end] {
+            if cell.width > 0 {
+                s.push(cell.ch);
+            }
+        }
+        s
+    }
+
+    /// Scrollback + grid como texto por fila logica.
+    pub fn rows_as_text(&self) -> Vec<String> {
+        let active = self.active_grid();
+        let sb_len = if self.alt_screen {
+            0
+        } else {
+            self.grid.scrollback.len()
+        };
+        let total = sb_len + active.rows_count;
+        let mut rows = Vec::with_capacity(total);
+        for logical_row in 0..total {
+            if let Some(cells) = self.row_cells_at_logical(logical_row) {
+                rows.push(Self::cells_to_row_text(&cells));
+            } else {
+                rows.push(String::new());
+            }
+        }
+        rows
+    }
+
+    /// Establece el query de busqueda, recalcula matches y centra la vista.
+    pub fn search_set_query(&mut self, query: &str, case_insensitive: bool) {
+        let rows = self.rows_as_text();
+        let matches = search::find_matches(&rows, query, case_insensitive);
+        let current = 0;
+        self.search = Some(SearchState {
+            query: query.to_string(),
+            case_insensitive,
+            matches,
+            current,
+        });
+        if let Some(m) = self.search.as_ref().and_then(|s| s.matches.first()) {
+            self.scroll_to_show_logical_row(m.row);
+        }
+        self.mark_dirty();
+    }
+
+    pub fn search_next(&mut self) {
+        if let Some(ref mut s) = self.search {
+            if s.matches.is_empty() {
+                return;
+            }
+            s.current = (s.current + 1) % s.matches.len();
+            let row = s.matches[s.current].row;
+            self.scroll_to_show_logical_row(row);
+            self.mark_dirty();
+        }
+    }
+
+    pub fn search_prev(&mut self) {
+        if let Some(ref mut s) = self.search {
+            if s.matches.is_empty() {
+                return;
+            }
+            s.current = s.current.checked_sub(1).unwrap_or(s.matches.len() - 1);
+            let row = s.matches[s.current].row;
+            self.scroll_to_show_logical_row(row);
+            self.mark_dirty();
+        }
+    }
+
+    pub fn search_clear(&mut self) {
+        self.search = None;
+        self.mark_dirty();
+    }
+
+    /// Indica si una celda visible participa en un match de busqueda.
+    /// `Some(true)` = match actual; `Some(false)` = otro match; `None` = sin match.
+    pub fn is_search_hit(&self, visible_row: usize, col: usize) -> Option<bool> {
+        let s = self.search.as_ref()?;
+        if s.matches.is_empty() {
+            return None;
+        }
+        let logical_row = self.visible_to_logical_row(visible_row);
+        let cells = self.row_cells_at_logical(logical_row)?;
+        for (i, m) in s.matches.iter().enumerate() {
+            if m.row != logical_row {
+                continue;
+            }
+            let (start_col, end_col) = search::char_range_to_cols(&cells, m.col, m.len);
+            if col >= start_col && col < end_col {
+                return Some(i == s.current);
+            }
+        }
+        None
     }
 }
 
@@ -1701,6 +1807,16 @@ mod tests {
     fn feed(term: &mut Term, data: &[u8]) {
         let mut parser = vte::Parser::new();
         parser.advance(term, data);
+    }
+
+    #[test]
+    fn term_busca_en_scrollback_y_grid() {
+        let mut term = Term::new();
+        feed(&mut term, b"hola error mundo\r\n");
+        term.search_set_query("error", false);
+        assert_eq!(term.search.as_ref().unwrap().matches.len(), 1);
+        term.search_next();
+        assert_eq!(term.search.as_ref().unwrap().current, 0);
     }
 
     #[test]
