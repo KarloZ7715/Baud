@@ -325,6 +325,7 @@ impl DisplayListBuilder {
 
     fn shell_cursor_here(term: &Term, row: usize, col: usize, show_scrollback: bool) -> bool {
         term.copy_mode.is_none()
+            && term.search.is_none()
             && !show_scrollback
             && term.cursor_visible
             && term.cursor.row == row
@@ -457,7 +458,7 @@ impl DisplayListBuilder {
             let default_cell = Cell::default();
             let cell = source_row.get(col).unwrap_or(&default_cell);
             let is_sel = term.is_selected(row, col);
-            let search_hit = term.is_search_hit(row, col);
+            let search_hit = term.search_hit_at(row, col);
             let is_search = search_hit.is_some();
             let is_cursor = Self::shell_cursor_here(term, row, col, show_scrollback);
             // El shell cursor se suprime en la fase "off" del parpadeo cuando
@@ -758,7 +759,7 @@ impl DisplayListBuilder {
                     std::mem::swap(&mut fg, &mut bg);
                 }
                 let is_sel = term.is_selected(row, col);
-                let is_search = term.is_search_hit(row, col).is_some();
+                let is_search = term.search_hit_at(row, col).is_some();
                 let cursor_block = is_cursor && matches!(term.cursor_style, CursorStyle::Block);
                 let (contrast_bg, skip_contrast) =
                     cell_contrast_context(fg, bg, is_sel || is_search, cursor_block, palette);

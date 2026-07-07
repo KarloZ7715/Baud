@@ -98,6 +98,8 @@ pub struct Renderer {
     swash_cache: glyphon::SwashCache,
     /// Buffer para overlay de status (renderizado encima del grid).
     overlay_buffer: glyphon::Buffer,
+    /// Buffer para la barra inferior de busqueda.
+    search_bar_buffer: glyphon::Buffer,
     /// Buffers del theme picker overlay.
     picker_list_buffer: glyphon::Buffer,
     picker_detail_buffer: glyphon::Buffer,
@@ -162,6 +164,12 @@ impl Renderer {
         let metrics = glyphon::Metrics::new(self.font_size, self.cell_h);
         self.overlay_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
         Self::configure_buffer(&mut self.font_system, &mut self.overlay_buffer, self.cell_w);
+        self.search_bar_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+        Self::configure_buffer(
+            &mut self.font_system,
+            &mut self.search_bar_buffer,
+            self.cell_w,
+        );
 
         let picker_m =
             crate::theme_picker::picker_cell_metrics(&mut self.font_system, &self.font_family);
@@ -251,6 +259,8 @@ impl Renderer {
 
         let mut overlay_buffer = glyphon::Buffer::new(&mut font_system, metrics);
         Self::configure_buffer(&mut font_system, &mut overlay_buffer, cell_w);
+        let mut search_bar_buffer = glyphon::Buffer::new(&mut font_system, metrics);
+        Self::configure_buffer(&mut font_system, &mut search_bar_buffer, cell_w);
 
         let picker_m = crate::theme_picker::picker_cell_metrics(&mut font_system, &font_family);
         let picker_metrics = glyphon::Metrics::new(picker_m.font_size, picker_m.cell_h);
@@ -275,6 +285,7 @@ impl Renderer {
             text_renderer,
             swash_cache,
             overlay_buffer,
+            search_bar_buffer,
             picker_list_buffer,
             picker_detail_buffer,
             picker_footer_buffer,
@@ -441,6 +452,8 @@ impl Renderer {
         let encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+        term.ensure_search_cache();
 
         let overrides = ColorOverrides::from_term(term);
         let palette = Palette {
@@ -696,6 +709,30 @@ impl Renderer {
             });
         }
 
+        if let Some(ref search_state) = term.search {
+            crate::search_overlay::fill_bar_buffer(
+                search_state,
+                &mut self.font_system,
+                &self.font_family,
+                &mut self.search_bar_buffer,
+                cell_w,
+                self.config.width as f32,
+                self.cell_h,
+                theme,
+                &mut self.contrast_cache,
+            );
+            crate::search_overlay::push_bar_overlay(
+                &self.search_bar_buffer,
+                &mut extra_areas,
+                &mut custom_glyphs,
+                self.config.width,
+                self.config.height,
+                self.cell_h,
+                theme,
+                &mut self.contrast_cache,
+            );
+        }
+
         let t_prepare = Instant::now();
         CellRenderer::prepare(
             &custom_glyphs,
@@ -926,6 +963,10 @@ impl Renderer {
     /// Requiere redraw continuo mientras el theme picker esta activo.
     pub fn theme_picker_active(&self, picker: Option<&ThemePickerState>) -> bool {
         picker.is_some()
+    }
+
+    pub fn search_overlay_active(&self, term: &Term) -> bool {
+        term.search.is_some()
     }
 
     /// Establece el texto del overlay de status.

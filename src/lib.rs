@@ -11,6 +11,7 @@ pub mod input;
 pub mod pty;
 pub mod renderer;
 pub mod search;
+pub mod search_overlay;
 pub mod selection;
 pub mod smart_select;
 pub mod theme_picker;

@@ -172,6 +172,7 @@ pub struct Term {
     pub mouse_reporting: MouseReporting,
     pub copy_mode: Option<CopyModeState>,
     pub search: Option<SearchState>,
+    pub search_cache: Option<search::SearchRenderCache>,
     pub cursor_style: CursorStyle,
     /// Habilita el parpadeo del cursor (config `[cursor] blink`).
     pub cursor_blink_enabled: bool,
@@ -263,6 +264,7 @@ impl Term {
             mouse_reporting: MouseReporting::default(),
             copy_mode: None,
             search: None,
+            search_cache: None,
             cursor_style: CursorStyle::default(),
             cursor_blink_enabled: true,
             blink_interval_ms: 530,
@@ -1003,35 +1005,60 @@ impl Term {
         rows
     }
 
-    /// Establece el query de busqueda, recalcula matches y centra la vista.
+    /// Establece el query de busqueda, recalcula matches y desplaza la vista al primer match.
     pub fn search_set_query(&mut self, query: &str, case_insensitive: bool) {
-        self.search_set_query_inner(query, case_insensitive, false);
+        self.search_set_query_inner(query, case_insensitive);
     }
 
-    /// Fija el query actual y habilita navegacion con n/N.
-    pub fn search_commit(&mut self) {
-        if let Some(ref s) = self.search {
-            let q = s.query.clone();
-            let ci = s.case_insensitive;
-            self.search_set_query_inner(&q, ci, true);
-        }
-    }
-
-    fn search_set_query_inner(&mut self, query: &str, case_insensitive: bool, committed: bool) {
+    fn search_set_query_inner(&mut self, query: &str, case_insensitive: bool) {
         let rows = self.rows_as_text();
         let matches = search::find_matches(&rows, query, case_insensitive);
-        let current = 0;
         self.search = Some(SearchState {
             query: query.to_string(),
             case_insensitive,
             matches,
-            current,
-            committed,
+            current: 0,
         });
         if let Some(m) = self.search.as_ref().and_then(|s| s.matches.first()) {
             self.scroll_to_show_logical_row(m.row);
         }
+        self.search_cache = None;
         self.mark_dirty();
+    }
+
+    pub fn search_toggle_case_insensitive(&mut self) {
+        if let Some(ref s) = self.search {
+            let q = s.query.clone();
+            let ci = !s.case_insensitive;
+            let prev_current = s.current;
+            let rows = self.rows_as_text();
+            let matches = search::find_matches(&rows, &q, ci);
+            let current = if matches.is_empty() {
+                0
+            } else {
+                prev_current.min(matches.len() - 1)
+            };
+            self.search = Some(SearchState {
+                query: q,
+                case_insensitive: ci,
+                matches,
+                current,
+            });
+            if let Some(m) = self.search.as_ref().and_then(|s| s.matches.get(s.current)) {
+                self.scroll_to_show_logical_row(m.row);
+            }
+            self.search_cache = None;
+            self.mark_dirty();
+        }
+    }
+
+    pub fn search_append_query(&mut self, extra: &str) {
+        if let Some(ref mut s) = self.search {
+            s.query.push_str(extra);
+            let q = s.query.clone();
+            let ci = s.case_insensitive;
+            self.search_set_query_inner(&q, ci);
+        }
     }
 
     pub fn search_next(&mut self) {
@@ -1042,6 +1069,7 @@ impl Term {
             s.current = (s.current + 1) % s.matches.len();
             let row = s.matches[s.current].row;
             self.scroll_to_show_logical_row(row);
+            self.search_cache = None;
             self.mark_dirty();
         }
     }
@@ -1054,12 +1082,14 @@ impl Term {
             s.current = s.current.checked_sub(1).unwrap_or(s.matches.len() - 1);
             let row = s.matches[s.current].row;
             self.scroll_to_show_logical_row(row);
+            self.search_cache = None;
             self.mark_dirty();
         }
     }
 
     pub fn search_clear(&mut self) {
         self.search = None;
+        self.search_cache = None;
         self.mark_dirty();
     }
 
@@ -1073,7 +1103,6 @@ impl Term {
         }
         let q = s.query.clone();
         let ci = s.case_insensitive;
-        let committed = s.committed;
         let prev_current = s.current;
         let rows = self.rows_as_text();
         let matches = search::find_matches(&rows, &q, ci);
@@ -1087,32 +1116,49 @@ impl Term {
             case_insensitive: ci,
             matches,
             current,
-            committed,
         });
         if let Some(m) = self.search.as_ref().and_then(|s| s.matches.get(s.current)) {
             self.scroll_to_show_logical_row(m.row);
         }
+        self.search_cache = None;
+        self.mark_dirty();
+    }
+
+    /// Reconstruye el cache de resaltado si hace falta (una vez por frame).
+    pub fn ensure_search_cache(&mut self) {
+        let Some(ref s) = self.search else {
+            self.search_cache = None;
+            return;
+        };
+        let needs_rebuild = self.search_cache.as_ref().is_none_or(|c| {
+            c.scrollback_offset != self.scrollback_offset
+                || c.rows_count != self.grid.rows_count
+                || c.match_count != s.matches.len()
+                || c.current != s.current
+        });
+        if needs_rebuild {
+            self.search_cache = Some(search::build_render_cache(self, s));
+        }
+    }
+
+    /// Texto del match actual (para copiar al clipboard).
+    pub fn search_current_match_text(&self) -> Option<String> {
+        let s = self.search.as_ref()?;
+        let m = s.matches.get(s.current)?;
+        let rows = self.rows_as_text();
+        let line = rows.get(m.row)?;
+        let chars: Vec<char> = line.chars().collect();
+        if m.col + m.len > chars.len() {
+            return None;
+        }
+        Some(chars[m.col..m.col + m.len].iter().collect())
     }
 
     /// Indica si una celda visible participa en un match de busqueda.
     /// `Some(true)` = match actual; `Some(false)` = otro match; `None` = sin match.
-    pub fn is_search_hit(&self, visible_row: usize, col: usize) -> Option<bool> {
-        let s = self.search.as_ref()?;
-        if s.matches.is_empty() {
-            return None;
-        }
-        let logical_row = self.visible_to_logical_row(visible_row);
-        let cells = self.row_cells_at_logical(logical_row)?;
-        for (i, m) in s.matches.iter().enumerate() {
-            if m.row != logical_row {
-                continue;
-            }
-            let (start_col, end_col) = search::char_range_to_cols(&cells, m.col, m.len);
-            if col >= start_col && col < end_col {
-                return Some(i == s.current);
-            }
-        }
-        None
+    pub fn search_hit_at(&self, visible_row: usize, col: usize) -> Option<bool> {
+        let cache = self.search_cache.as_ref()?;
+        search::hit_at(cache, visible_row, col)
     }
 }
 
@@ -1862,6 +1908,50 @@ mod tests {
         assert_eq!(term.search.as_ref().unwrap().matches.len(), 1);
         term.search_next();
         assert_eq!(term.search.as_ref().unwrap().current, 0);
+    }
+
+    #[test]
+    fn term_busca_letra_n_en_query() {
+        let mut term = Term::new();
+        feed(&mut term, b"name nine none\r\n");
+        term.search_set_query("n", false);
+        let matches = term.search.as_ref().unwrap().matches.len();
+        assert!(matches >= 3, "debe encontrar varias 'n', got {matches}");
+    }
+
+    #[test]
+    fn term_busca_case_insensitive_toggle() {
+        let mut term = Term::new();
+        feed(&mut term, b"ERROR line\r\n");
+        term.search_set_query("error", false);
+        assert!(term.search.as_ref().unwrap().matches.is_empty());
+        term.search_toggle_case_insensitive();
+        assert_eq!(term.search.as_ref().unwrap().matches.len(), 1);
+        assert!(term.search.as_ref().unwrap().case_insensitive);
+    }
+
+    #[test]
+    fn search_hit_at_usa_cache() {
+        let mut term = Term::new();
+        feed(&mut term, b"foo bar foo\r\n");
+        term.search_set_query("foo", false);
+        term.ensure_search_cache();
+        assert_eq!(term.search_hit_at(0, 0), Some(true));
+        assert_eq!(term.search_hit_at(0, 8), Some(false));
+        assert_eq!(term.search_hit_at(0, 4), None);
+    }
+
+    #[test]
+    fn search_refresh_preserva_current() {
+        let mut term = Term::new();
+        feed(&mut term, b"a1\na2\na3\n");
+        term.search_set_query("a", false);
+        term.search_next();
+        term.search_next();
+        let cur = term.search.as_ref().unwrap().current;
+        feed(&mut term, b"x");
+        term.search_refresh_if_active();
+        assert_eq!(term.search.as_ref().unwrap().current, cur);
     }
 
     #[test]

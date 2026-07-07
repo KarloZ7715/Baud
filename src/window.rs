@@ -370,6 +370,7 @@ impl App {
     }
 
     /// Copia al clipboard: si hay selección activa, copia solo la selección;
+    /// si hay búsqueda activa con match, copia el texto del match;
     /// si no, retorna sin copiar nada.
     fn handle_copy(&mut self) {
         tracing::info!("handle_copy: INICIANDO");
@@ -381,7 +382,14 @@ impl App {
                     return;
                 }
             };
-            if let Some(ref sel) = term_guard.selection {
+            if let Some(search_text) = term_guard.search_current_match_text() {
+                if !search_text.is_empty() {
+                    tracing::info!("handle_copy: copiando match de busqueda");
+                    search_text
+                } else {
+                    return;
+                }
+            } else if let Some(ref sel) = term_guard.selection {
                 tracing::info!(
                     "handle_copy: seleccion DETECTADA: start=({},{}), end=({},{})",
                     sel.start.row,
@@ -513,6 +521,20 @@ impl App {
 
     fn cancel_copy_on_select(&mut self) {
         self.copy_on_select_deadline = None;
+    }
+
+    fn paste_to_search(&mut self, primary: bool) {
+        let text = clipboard::get(primary);
+        if text.is_empty() {
+            return;
+        }
+        let text = text.replace(['\n', '\r'], "");
+        if let Ok(mut guard) = self.term.lock() {
+            guard.search_append_query(&text);
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     /// Obtiene texto del clipboard del sistema, lo filtra y lo envia al PTY.
@@ -898,8 +920,32 @@ impl App {
                     }
                 }
             }
-            Paste => self.handle_paste(),
-            PastePrimary => self.handle_paste_primary(),
+            Paste => {
+                if self
+                    .term
+                    .lock()
+                    .ok()
+                    .map(|g| g.search.is_some())
+                    .unwrap_or(false)
+                {
+                    self.paste_to_search(false);
+                } else {
+                    self.handle_paste();
+                }
+            }
+            PastePrimary => {
+                if self
+                    .term
+                    .lock()
+                    .ok()
+                    .map(|g| g.search.is_some())
+                    .unwrap_or(false)
+                {
+                    self.paste_to_search(true);
+                } else {
+                    self.handle_paste_primary();
+                }
+            }
             ToggleCopyMode => self.toggle_copy_mode(),
             ToggleSearch => self.toggle_search(),
             ScrollLineUp => self.scroll_lines(1),
@@ -978,10 +1024,12 @@ impl App {
     }
 
     /// Maneja teclas en modo busqueda. Devuelve true si la tecla fue consumida.
-    fn handle_search_mode_key(&mut self, event: &winit::event::KeyEvent, shift: bool) -> bool {
+    fn handle_search_mode_key(&mut self, event: &winit::event::KeyEvent) -> bool {
         use winit::keyboard::{Key, NamedKey};
 
-        let mut consumed = false;
+        let ctrl = self.modifiers.state().control_key();
+        let alt = self.modifiers.state().alt_key();
+
         if let Ok(mut guard) = self.term.lock() {
             if guard.search.is_none() {
                 return false;
@@ -992,13 +1040,9 @@ impl App {
                     guard.search_clear();
                     return true;
                 }
-                Key::Named(NamedKey::Enter) => {
-                    guard.search_commit();
-                    return true;
-                }
+                Key::Named(NamedKey::Enter) => return true,
                 Key::Named(NamedKey::Backspace) => {
                     if let Some(ref mut s) = guard.search {
-                        s.committed = false;
                         s.query.pop();
                         let q = s.query.clone();
                         let ci = s.case_insensitive;
@@ -1006,31 +1050,38 @@ impl App {
                     }
                     return true;
                 }
-                Key::Named(NamedKey::ArrowDown) | Key::Named(NamedKey::ArrowRight) => {
-                    if guard.search.as_ref().is_some_and(|s| s.committed) {
+                Key::Named(NamedKey::ArrowDown)
+                | Key::Named(NamedKey::ArrowRight)
+                | Key::Named(NamedKey::PageDown) => {
+                    if guard.search.as_ref().is_some_and(|s| !s.matches.is_empty()) {
                         guard.search_next();
                     }
                     return true;
                 }
-                Key::Named(NamedKey::ArrowUp) | Key::Named(NamedKey::ArrowLeft) => {
-                    if guard.search.as_ref().is_some_and(|s| s.committed) {
+                Key::Named(NamedKey::ArrowUp)
+                | Key::Named(NamedKey::ArrowLeft)
+                | Key::Named(NamedKey::PageUp) => {
+                    if guard.search.as_ref().is_some_and(|s| !s.matches.is_empty()) {
                         guard.search_prev();
                     }
                     return true;
                 }
-                Key::Character(c) if c == "n" && !shift => {
-                    if guard.search.as_ref().is_some_and(|s| s.committed) {
-                        guard.search_next();
-                        return true;
+                Key::Character(c) if ctrl && c == "u" => {
+                    if let Some(ref mut s) = guard.search {
+                        s.query.clear();
+                        let ci = s.case_insensitive;
+                        guard.search_set_query("", ci);
                     }
+                    return true;
                 }
-                Key::Character(c) if c == "N" || (c == "n" && shift) => {
-                    if guard.search.as_ref().is_some_and(|s| s.committed) {
-                        guard.search_prev();
-                        return true;
-                    }
+                Key::Character(c) if alt && c.eq_ignore_ascii_case("c") => {
+                    guard.search_toggle_case_insensitive();
+                    return true;
                 }
                 Key::Character(_) => {
+                    if ctrl || alt {
+                        return false;
+                    }
                     let ch = event
                         .text
                         .as_deref()
@@ -1038,22 +1089,18 @@ impl App {
                         .filter(|ch| !ch.is_control());
                     if let Some(ch) = ch {
                         if let Some(ref mut s) = guard.search {
-                            if s.committed {
-                                s.committed = false;
-                                s.query.clear();
-                            }
                             s.query.push(ch);
                             let q = s.query.clone();
                             let ci = s.case_insensitive;
                             guard.search_set_query(&q, ci);
-                            consumed = true;
+                            return true;
                         }
                     }
                 }
                 _ => {}
             }
         }
-        consumed
+        false
     }
 
     /// Envia bytes al PTY sin efectos secundarios (seleccion, scrollback).
@@ -1424,6 +1471,7 @@ impl ApplicationHandler<UserEvent> for App {
                 if !term_guard.dirty
                     && !renderer.status_overlay_active()
                     && !renderer.theme_picker_active(picker)
+                    && !renderer.search_overlay_active(&term_guard)
                 {
                     tracing::debug!("RedrawRequested: skip (nothing dirty)");
                     return;
@@ -1815,14 +1863,14 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
-                // Modo busqueda: captura teclas para el query y navegacion n/N.
+                // Modo busqueda: captura teclas para el query y navegacion con flechas.
                 if self
                     .term
                     .lock()
                     .ok()
                     .map(|g| g.search.is_some())
                     .unwrap_or(false)
-                    && self.handle_search_mode_key(&event, shift)
+                    && self.handle_search_mode_key(&event)
                 {
                     if let Some(window) = &self.window {
                         window.request_redraw();
