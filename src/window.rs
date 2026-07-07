@@ -194,20 +194,30 @@ pub struct App {
     config_watch: Arc<Mutex<WatchState>>,
 }
 
+fn allowed_open_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    ["http://", "https://", "ftp://", "file://", "mailto:"]
+        .iter()
+        .any(|scheme| lower.starts_with(scheme))
+}
+
 fn open_url(url: &str) {
-    if !(url.starts_with("http://")
-        || url.starts_with("https://")
-        || url.starts_with("file://")
-        || url.starts_with("mailto:"))
-    {
-        tracing::warn!("open_url: esquema no permitido: {}", url);
+    let Some(normalized) = crate::smart_select::normalize_url_for_open(url) else {
+        tracing::warn!("open_url: URL no permitida: {}", url);
+        return;
+    };
+    if !allowed_open_url(&normalized) {
+        tracing::warn!("open_url: esquema no permitido: {}", normalized);
         return;
     }
-    let _ = std::process::Command::new("xdg-open")
-        .arg(url)
+    if let Err(e) = std::process::Command::new("xdg-open")
+        .arg(&normalized)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
+        .spawn()
+    {
+        tracing::warn!("open_url: xdg-open fallo para {}: {e}", normalized);
+    }
 }
 
 impl App {
@@ -688,6 +698,8 @@ impl App {
             guard.scrollback_offset = (guard.scrollback_offset + n).max(0);
         }
         guard.mark_dirty();
+        drop(guard);
+        self.clear_link_hover_state();
     }
 
     fn scroll_page(&mut self, dir: isize) {
@@ -702,12 +714,16 @@ impl App {
             guard.scrollback_offset = (guard.scrollback_offset - page).max(0);
         }
         guard.mark_dirty();
+        drop(guard);
+        self.clear_link_hover_state();
     }
 
     fn scroll_to_bottom(&mut self) {
         let mut guard = self.term.lock().expect("term mutex poisoned");
         guard.scrollback_offset = 0;
         guard.mark_dirty();
+        drop(guard);
+        self.clear_link_hover_state();
     }
 
     /// Entra en copy mode si esta habilitado en config (no sale; usar q/Esc en copy mode).
@@ -1161,6 +1177,60 @@ impl App {
         self.pixel_to_cell(self.mouse_x, self.mouse_y, renderer)
     }
 
+    /// Actualiza `hovered_link` y el cursor segun la celda bajo el puntero.
+    /// Devuelve true si el estado de hover cambio.
+    fn update_link_hover_at(
+        &mut self,
+        pad_x: f32,
+        pad_y: f32,
+        cell_w: f32,
+        cell_h: f32,
+        x: f64,
+        y: f64,
+    ) -> bool {
+        let (visible_row, col) =
+            crate::renderer::limits::pixel_to_cell_coords(x, y, pad_x, pad_y, cell_w, cell_h);
+        let mut link_changed = false;
+        let mut has_link = false;
+        if let Ok(mut guard) = self.term.lock() {
+            let logical_row = guard.visible_to_logical_row(visible_row);
+            let new_hovered = guard
+                .resolve_link_at(logical_row, col)
+                .map(|(_, range)| range);
+            link_changed = guard.hovered_link != new_hovered;
+            has_link = new_hovered.is_some();
+            if link_changed {
+                guard.hovered_link = new_hovered;
+                guard.mark_dirty();
+            }
+        }
+        if let Some(window) = &self.window {
+            window.set_cursor(if has_link {
+                CursorIcon::Pointer
+            } else {
+                CursorIcon::Default
+            });
+            if link_changed {
+                window.request_redraw();
+            }
+        }
+        link_changed
+    }
+
+    fn clear_link_hover_state(&mut self) {
+        let cleared = self
+            .term
+            .lock()
+            .ok()
+            .is_some_and(|mut guard| guard.clear_hovered_link());
+        if cleared {
+            if let Some(window) = &self.window {
+                window.set_cursor(CursorIcon::Default);
+                window.request_redraw();
+            }
+        }
+    }
+
     /// Baud maneja seleccion local; si la app pidio mouse reporting, forward al PTY.
     /// Modificadores de bypass configurables
     /// Default: ["shift"]. Alt queda libre para selección en bloque.
@@ -1541,19 +1611,34 @@ impl ApplicationHandler<UserEvent> for App {
                     position.y,
                     self.mouse_down.load(Ordering::Relaxed),
                 );
-                let Some(renderer) = &self.renderer else {
-                    tracing::warn!("CursorMoved: renderer no disponible");
-                    return;
+                let (pad_x, pad_y, cell_w, cell_h) = {
+                    let Some(renderer) = &self.renderer else {
+                        tracing::warn!("CursorMoved: renderer no disponible");
+                        return;
+                    };
+                    let (pad_x, pad_y) = renderer.content_padding();
+                    (pad_x, pad_y, renderer.cell_w(), renderer.cell_h())
                 };
                 self.mouse_x = position.x;
                 self.mouse_y = position.y;
+
+                if !self.mouse_down.load(Ordering::Relaxed) {
+                    self.update_link_hover_at(pad_x, pad_y, cell_w, cell_h, position.x, position.y);
+                }
 
                 if self.should_forward_mouse_to_app() {
                     let mouse_down = self.mouse_down.load(Ordering::Relaxed);
                     if let Ok(guard) = self.term.lock() {
                         let reporting = guard.mouse_reporting;
                         if reporting.reports_motion() {
-                            let (row, col) = self.mouse_cell_coords(renderer);
+                            let (row, col) = crate::renderer::limits::pixel_to_cell_coords(
+                                self.mouse_x,
+                                self.mouse_y,
+                                pad_x,
+                                pad_y,
+                                cell_w,
+                                cell_h,
+                            );
                             let cell = (row, col);
                             if mouse_down && reporting.drag {
                                 drop(guard);
@@ -1574,19 +1659,21 @@ impl ApplicationHandler<UserEvent> for App {
                 }
 
                 if self.mouse_down.load(Ordering::Relaxed) {
-                    let (_pad_x, pad_y) = renderer.content_padding();
-                    let inner_h = (self.window_height - pad_y * 2.0).max(renderer.cell_h());
-                    let visible_rows = (inner_h / renderer.cell_h()) as usize;
+                    let inner_h = (self.window_height - pad_y * 2.0).max(cell_h);
+                    let visible_rows = (inner_h / cell_h) as usize;
                     let (visible_row, col, needs_scroll_up, needs_scroll_down) =
                         if position.y < pad_y as f64 {
                             (0usize, 0usize, true, false)
                         } else if position.y as f32 >= self.window_height - pad_y {
                             (visible_rows.saturating_sub(1), 0usize, false, true)
                         } else {
-                            let (r, c) = self.pixel_to_cell(position.x, position.y, renderer);
+                            let (r, c) = crate::renderer::limits::pixel_to_cell_coords(
+                                position.x, position.y, pad_x, pad_y, cell_w, cell_h,
+                            );
                             (r, c, r == 0, r >= visible_rows.saturating_sub(1))
                         };
 
+                    let scroll_changed = needs_scroll_up || needs_scroll_down;
                     if let Ok(mut guard) = self.term.lock() {
                         if !guard.alt_screen {
                             if needs_scroll_up {
@@ -1616,34 +1703,11 @@ impl ApplicationHandler<UserEvent> for App {
                             guard.scrollback_offset
                         );
                     }
+                    if scroll_changed {
+                        self.clear_link_hover_state();
+                    }
                     if let Some(window) = &self.window {
                         window.request_redraw();
-                    }
-                } else {
-                    let (visible_row, col) = self.pixel_to_cell(position.x, position.y, renderer);
-                    let mut link_changed = false;
-                    let mut has_link = false;
-                    if let Ok(mut guard) = self.term.lock() {
-                        let logical_row = guard.visible_to_logical_row(visible_row);
-                        let new_hovered = guard
-                            .resolve_link_at(logical_row, col)
-                            .map(|(_, range)| range);
-                        link_changed = guard.hovered_link != new_hovered;
-                        has_link = new_hovered.is_some();
-                        if link_changed {
-                            guard.hovered_link = new_hovered;
-                            guard.mark_dirty();
-                        }
-                    }
-                    if let Some(window) = &self.window {
-                        window.set_cursor(if has_link {
-                            CursorIcon::Pointer
-                        } else {
-                            CursorIcon::Default
-                        });
-                        if link_changed {
-                            window.request_redraw();
-                        }
                     }
                 }
             }
@@ -1683,16 +1747,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 } else {
                     tracing::debug!("CursorLeft: mouse_down=false, no action");
-                    if let Ok(mut guard) = self.term.lock() {
-                        if guard.hovered_link.is_some() {
-                            guard.hovered_link = None;
-                            guard.mark_dirty();
-                        }
-                    }
-                    if let Some(window) = &self.window {
-                        window.set_cursor(CursorIcon::Default);
-                        window.request_redraw();
-                    }
+                    self.clear_link_hover_state();
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -1707,19 +1762,24 @@ impl ApplicationHandler<UserEvent> for App {
                 // copy_on_select diferido: deja completar doble/triple clic antes de copiar.
                 if button == MouseButton::Left && state == ElementState::Pressed {
                     if self.modifiers.state().control_key() {
-                        if let Ok(guard) = self.term.lock() {
-                            if let Some(ref range) = guard.hovered_link {
-                                if let Some((url, _)) =
-                                    guard.resolve_link_at(range.row, range.start_col)
-                                {
-                                    drop(guard);
-                                    open_url(&url);
-                                }
-                            }
+                        let opened = if let Ok(guard) = self.term.lock() {
+                            guard.hovered_link.as_ref().is_some_and(|range| {
+                                guard
+                                    .resolve_link_at(range.row, range.start_col)
+                                    .is_some_and(|(url, _)| {
+                                        open_url(&url);
+                                        true
+                                    })
+                            })
+                        } else {
+                            false
+                        };
+                        if opened {
+                            return;
                         }
-                        return;
+                    } else {
+                        self.cancel_copy_on_select();
                     }
-                    self.cancel_copy_on_select();
                 }
                 if button == MouseButton::Left && state == ElementState::Released {
                     self.schedule_copy_on_select();
@@ -2339,6 +2399,29 @@ mod tests {
         assert!(
             app_vim.should_forward_mouse_to_app(),
             "vim: app captura mouse sin modificadores"
+        );
+    }
+
+    #[test]
+    fn allowed_open_url_acepta_esquemas_conocidos() {
+        assert!(allowed_open_url("https://example.com"));
+        assert!(allowed_open_url("HTTP://EXAMPLE.COM"));
+        assert!(allowed_open_url("ftp://files.example/resource"));
+        assert!(allowed_open_url("file:///tmp/x"));
+        assert!(allowed_open_url("mailto:user@example.com"));
+    }
+
+    #[test]
+    fn allowed_open_url_rechaza_esquemas_peligrosos() {
+        assert!(!allowed_open_url("javascript:alert(1)"));
+        assert!(!allowed_open_url("data:text/html,hi"));
+    }
+
+    #[test]
+    fn normalize_url_agrega_https_antes_de_abrir() {
+        assert_eq!(
+            crate::smart_select::normalize_url_for_open("karloz.dev").as_deref(),
+            Some("https://karloz.dev")
         );
     }
 

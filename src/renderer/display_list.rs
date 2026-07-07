@@ -1418,6 +1418,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hovered_link_sin_osc8_emite_underline() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 20];
+        let text = "see https://ex.com";
+        for (i, ch) in text.chars().enumerate() {
+            row[i].ch = ch;
+        }
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let mut term = Term::new();
+        term.hovered_link = Some(crate::ansi::LinkRange {
+            row: 0,
+            start_col: 4,
+            end_col: 17,
+        });
+
+        let list = build_full(&term, &metrics, &theme, &row_sources, 20, 1, &family);
+
+        assert!(
+            list.line_quads
+                .iter()
+                .any(|q| q.kind == LineKind::Under && q.col >= 4 && q.col <= 17),
+            "hovered_link debe subrayar el rango sin atributo OSC 8"
+        );
+    }
+
     // -----------------------------------------------------------------
     // Parpadeo: cursor y texto SGR 5 se ocultan en fase off.
     // -----------------------------------------------------------------

@@ -840,6 +840,17 @@ impl Term {
         logical_row == range.row && col >= range.start_col && col <= range.end_col
     }
 
+    /// Limpia el enlace bajo hover; devuelve true si habia uno activo.
+    pub fn clear_hovered_link(&mut self) -> bool {
+        if self.hovered_link.is_some() {
+            self.hovered_link = None;
+            self.mark_dirty();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Resuelve el enlace en la celda `(logical_row, col)`: OSC 8 primero, luego URL por smart-select.
     pub fn resolve_link_at(&self, logical_row: usize, col: usize) -> Option<(String, LinkRange)> {
         let row_cells = self.row_cells_at_logical(logical_row)?;
@@ -868,8 +879,7 @@ impl Term {
         }
 
         let line: String = row_cells.iter().map(|c| c.ch).collect();
-        let range = crate::smart_select::url_range_in_line(&line, col)?;
-        let url = crate::smart_select::resolve_url_in_line(&line, col)?;
+        let (url, range) = crate::smart_select::resolve_url_with_range(&line, col)?;
         Some((
             url,
             LinkRange {
@@ -2258,6 +2268,61 @@ mod tests {
         let idx = term.grid.rows[0][0].hyperlink.expect("celda con link");
         assert_eq!(term.hyperlinks[idx as usize], "https://example.com");
         assert!(term.grid.rows[0][4].hyperlink.is_none());
+    }
+
+    #[test]
+    fn resolve_link_at_prefiere_osc8_sobre_smart_select() {
+        let mut term = Term::new();
+        feed(
+            &mut term,
+            b"\x1b]8;;https://osc.example\x07LINK\x1b]8;;\x07 see https://plain.example",
+        );
+        let (url, range) = term.resolve_link_at(0, 0).unwrap();
+        assert_eq!(url, "https://osc.example");
+        assert_eq!(range.start_col, 0);
+        assert_eq!(range.end_col, 3);
+    }
+
+    #[test]
+    fn resolve_link_at_detecta_url_sin_osc8() {
+        let mut term = Term::new();
+        feed(&mut term, b"see https://example.com now");
+        let (url, range) = term.resolve_link_at(0, 8).unwrap();
+        assert_eq!(url, "https://example.com");
+        assert_eq!(
+            &term.grid.rows[0][range.start_col..=range.end_col]
+                .iter()
+                .map(|c| c.ch)
+                .collect::<String>(),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn is_hovered_link_mapea_fila_visible_a_logica() {
+        let mut term = Term::new();
+        term.hovered_link = Some(LinkRange {
+            row: 1,
+            start_col: 2,
+            end_col: 5,
+        });
+        assert!(term.is_hovered_link(1, 3));
+        assert!(!term.is_hovered_link(0, 3));
+        assert!(!term.is_hovered_link(1, 6));
+    }
+
+    #[test]
+    fn clear_hovered_link_solo_cuando_hay_estado() {
+        let mut term = Term::new();
+        assert!(!term.clear_hovered_link());
+        term.hovered_link = Some(LinkRange {
+            row: 0,
+            start_col: 0,
+            end_col: 1,
+        });
+        assert!(term.clear_hovered_link());
+        assert!(term.hovered_link.is_none());
+        assert!(!term.clear_hovered_link());
     }
 
     #[test]
