@@ -28,8 +28,9 @@ use winit::event::MouseButton;
 use winit::event::MouseScrollDelta;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::ControlFlow;
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Fullscreen, Window, WindowId};
+use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 /// Eventos enviados desde el hilo drain al hilo GUI.
 #[derive(Debug)]
@@ -103,6 +104,8 @@ fn clamp_font_size(current: u16, dir: i8) -> u16 {
 }
 
 const GUI_METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
+/// Ventana para doble/triple clic y retardo de copy-on-select.
+const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(200);
 
 struct GuiRedrawMetrics {
     redraws: u64,
@@ -180,6 +183,8 @@ pub struct App {
     keybindings: Keybindings,
     last_gui_redraw: Option<Instant>,
     gui_redraw_metrics: GuiRedrawMetrics,
+    /// Momento en que debe ejecutarse copy-on-select pendiente (tras multi-clic).
+    copy_on_select_deadline: Option<Instant>,
 }
 
 impl App {
@@ -212,6 +217,7 @@ impl App {
             keybindings,
             last_gui_redraw: None,
             gui_redraw_metrics: GuiRedrawMetrics::new(),
+            copy_on_select_deadline: None,
         }
     }
 
@@ -424,17 +430,72 @@ impl App {
         sel.mode = SelectionMode::Word;
     }
 
-    /// copy_on_select: copia la selección actual al destino configurado.
-    fn copy_selection_on_release(&self) {
+    /// True si la selección actual merece copy-on-select (no un clic suelto).
+    fn selection_qualifies_for_copy_on_select(&self) -> bool {
+        let Ok(guard) = self.term.lock() else {
+            return false;
+        };
+        guard
+            .selection
+            .as_ref()
+            .is_some_and(Self::selection_qualifies)
+    }
+
+    fn selection_qualifies(sel: &Selection) -> bool {
+        match sel.mode {
+            SelectionMode::Word | SelectionMode::Smart | SelectionMode::Line => true,
+            SelectionMode::Normal | SelectionMode::Block => {
+                let (sr, sc, er, ec) = sel.normalize();
+                sr != er || sc != ec
+            }
+        }
+    }
+
+    /// Ejecuta copy-on-select: copia, limpia la selección y muestra estado.
+    fn finish_copy_on_select(&mut self) {
+        if !self.config.selection.copy_on_select {
+            return;
+        }
         let text = match self.term.lock() {
             Ok(g) => g.selected_text(),
             Err(_) => return,
         };
         if text.is_empty() {
+            tracing::debug!("copy_on_select: seleccion vacia, sin copiar");
             return;
         }
         let target = CopyTarget::parse(&self.config.selection.copy_on_select_target);
+        tracing::info!("copy_on_select: {} bytes -> {}", text.len(), target.label());
         target.write(&text);
+        if let Ok(mut guard) = self.term.lock() {
+            guard.clear_selection();
+            guard.mark_dirty();
+        }
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_status(&format!("[Copiado ({})]", target.label()));
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn schedule_copy_on_select(&mut self) {
+        if !self.config.selection.copy_on_select {
+            return;
+        }
+        if !self.selection_qualifies_for_copy_on_select() {
+            return;
+        }
+        let delay = self.config.selection.copy_on_select_delay();
+        if delay.is_zero() {
+            self.finish_copy_on_select();
+            return;
+        }
+        self.copy_on_select_deadline = Some(Instant::now() + delay);
+    }
+
+    fn cancel_copy_on_select(&mut self) {
+        self.copy_on_select_deadline = None;
     }
 
     /// Obtiene texto del clipboard del sistema, lo filtra y lo envia al PTY.
@@ -865,6 +926,18 @@ impl App {
 }
 
 impl ApplicationHandler<UserEvent> for App {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(deadline) = self.copy_on_select_deadline else {
+            return;
+        };
+        if Instant::now() >= deadline {
+            self.copy_on_select_deadline = None;
+            self.finish_copy_on_select();
+        } else {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // ponytail: solo inicializar una vez.
         if self.window.is_some() {
@@ -1172,7 +1245,14 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         let abs_row = guard.visible_to_logical_row(visible_row);
                         if let Some(ref mut sel) = guard.selection {
-                            sel.update_end(SelectionPoint { row: abs_row, col });
+                            match sel.mode {
+                                SelectionMode::Word
+                                | SelectionMode::Smart
+                                | SelectionMode::Line => {}
+                                SelectionMode::Normal | SelectionMode::Block => {
+                                    sel.update_end(SelectionPoint { row: abs_row, col });
+                                }
+                            }
                         }
                         guard.mark_dirty();
                         tracing::debug!(
@@ -1234,6 +1314,19 @@ impl ApplicationHandler<UserEvent> for App {
                     self.mouse_y,
                 );
 
+                // copy_on_select diferido: deja completar doble/triple clic antes de copiar.
+                if button == MouseButton::Left && state == ElementState::Pressed {
+                    self.cancel_copy_on_select();
+                }
+                if button == MouseButton::Left && state == ElementState::Released {
+                    self.schedule_copy_on_select();
+                    self.mouse_down.store(false, Ordering::Relaxed);
+                    self.mouse_start = None;
+                    if let Some(window) = &self.window {
+                        let _ = window.set_cursor_grab(CursorGrabMode::None);
+                    }
+                }
+
                 if self.should_forward_mouse_to_app() {
                     let btn = match button {
                         MouseButton::Left => 0,
@@ -1276,7 +1369,7 @@ impl ApplicationHandler<UserEvent> for App {
                             let now = Instant::now();
                             let is_rapid = self
                                 .last_click_time
-                                .map(|t| now.duration_since(t) < Duration::from_millis(500))
+                                .map(|t| now.duration_since(t) < MULTI_CLICK_INTERVAL)
                                 .unwrap_or(false);
 
                             if let Ok(mut guard) = self.term.lock() {
@@ -1293,6 +1386,9 @@ impl ApplicationHandler<UserEvent> for App {
                                         sel.update_end(point);
                                     }
                                 } else if is_rapid {
+                                    if guard.selection.is_none() {
+                                        guard.selection = Some(Selection::new(point));
+                                    }
                                     let cols_count = guard.grid.cols_count;
                                     let row_cells = guard.row_cells_at_logical(abs_row);
                                     let mode = guard
@@ -1328,19 +1424,15 @@ impl ApplicationHandler<UserEvent> for App {
                             }
                             self.mouse_down.store(true, Ordering::Relaxed);
                             self.last_click_time = Some(now);
+                            if let Some(window) = &self.window {
+                                let _ = window.set_cursor_grab(CursorGrabMode::Confined);
+                            }
                             // Bugfix: solicitar redibujo inmediato al crear/modificar seleccion
                             if let Some(window) = &self.window {
                                 window.request_redraw();
                             }
                         }
                         ElementState::Released => {
-                            self.mouse_down.store(false, Ordering::Relaxed);
-                            self.mouse_start = None;
-                            // copy_on_select: copiar al soltar si la config lo pide.
-                            if self.config.selection.copy_on_select {
-                                self.copy_selection_on_release();
-                            }
-                            // Bugfix: redibujar al soltar para fijar estado visual final
                             if let Some(window) = &self.window {
                                 window.request_redraw();
                             }
@@ -1754,5 +1846,23 @@ mod tests {
             app_vim.should_forward_mouse_to_app(),
             "vim: app captura mouse sin modificadores"
         );
+    }
+
+    #[test]
+    fn selection_qualifies_rechaza_clic_suelto() {
+        let point = SelectionPoint { row: 0, col: 3 };
+        let sel = Selection::new(point);
+        assert!(!App::selection_qualifies(&sel));
+    }
+
+    #[test]
+    fn selection_qualifies_acepta_arrastre_y_semantica() {
+        let mut drag = Selection::new(SelectionPoint { row: 0, col: 1 });
+        drag.update_end(SelectionPoint { row: 0, col: 5 });
+        assert!(App::selection_qualifies(&drag));
+
+        let mut word = Selection::new(SelectionPoint { row: 0, col: 0 });
+        word.mode = SelectionMode::Word;
+        assert!(App::selection_qualifies(&word));
     }
 }

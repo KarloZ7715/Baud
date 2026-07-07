@@ -73,4 +73,29 @@ impl CopyTarget {
             }
         }
     }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CopyTarget::Clipboard => "clipboard",
+            CopyTarget::Primary => "primary",
+            CopyTarget::Both => "clipboard y primary",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_target_label() {
+        assert_eq!(CopyTarget::Clipboard.label(), "clipboard");
+        assert_eq!(CopyTarget::Primary.label(), "primary");
+        assert_eq!(CopyTarget::Both.label(), "clipboard y primary");
+    }
+
+    #[test]
+    fn copy_target_parse_desconocido_usa_primary() {
+        assert_eq!(CopyTarget::parse("bogus"), CopyTarget::Primary);
+    }
 }

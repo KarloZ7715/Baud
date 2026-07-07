@@ -61,6 +61,9 @@ pub struct SelectionConfig {
     /// Destino al copiar por selección: "primary" | "clipboard" | "both".
     #[serde(default = "default_copy_on_select_target")]
     pub copy_on_select_target: String,
+    /// Retardo tras soltar el botón izquierdo antes de copiar (ms).
+    #[serde(default = "default_copy_on_select_delay_ms")]
+    pub copy_on_select_delay_ms: u64,
     /// Modificadores que suprimen el mouse reporting de la app.
     /// `bypass_mouse_reporting_modifiers`). Valores: "shift", "alt", "ctrl".
     #[serde(default = "default_bypass_modifiers")]
@@ -496,6 +499,7 @@ impl Default for SelectionConfig {
         Self {
             copy_on_select: false,
             copy_on_select_target: default_copy_on_select_target(),
+            copy_on_select_delay_ms: default_copy_on_select_delay_ms(),
             bypass_mouse_reporting_modifiers: default_bypass_modifiers(),
             smart_selection: default_true(),
             word_delimiters: default_word_delimiters(),
@@ -512,6 +516,11 @@ impl Default for CopyModeConfig {
 }
 
 impl SelectionConfig {
+    /// Retardo configurado antes de ejecutar copy-on-select.
+    pub fn copy_on_select_delay(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.copy_on_select_delay_ms)
+    }
+
     /// True si `modifier` ("shift"|"alt"|"ctrl") está en la lista de bypass.
     pub fn bypass_contains(&self, modifier: &str) -> bool {
         self.bypass_mouse_reporting_modifiers
@@ -621,7 +630,11 @@ fn default_true() -> bool {
     true
 }
 fn default_copy_on_select_target() -> String {
-    "primary".into()
+    "both".into()
+}
+
+fn default_copy_on_select_delay_ms() -> u64 {
+    500
 }
 fn default_bypass_modifiers() -> Vec<String> {
     vec!["shift".into()]
@@ -862,6 +875,7 @@ mod tests {
 
         // Selección por defecto: copy_on_select off, smart on, bypass=[shift]
         assert!(!config.selection.copy_on_select);
+        assert_eq!(config.selection.copy_on_select_delay_ms, 500);
         assert!(config.selection.smart_selection);
         assert!(config.selection.bypass_contains("shift"));
         assert!(!config.selection.bypass_contains("alt"));
@@ -922,6 +936,7 @@ opacity = 0.85
 [selection]
 copy_on_select = true
 copy_on_select_target = "both"
+copy_on_select_delay_ms = 300
 bypass_mouse_reporting_modifiers = ["shift", "alt"]
 smart_selection = false
 word_delimiters = " ,.;"
@@ -929,6 +944,7 @@ word_delimiters = " ,.;"
         let config: Config = toml::from_str(toml_str).expect("TOML selección");
         assert!(config.selection.copy_on_select);
         assert_eq!(config.selection.copy_on_select_target, "both");
+        assert_eq!(config.selection.copy_on_select_delay_ms, 300);
         assert!(config.selection.bypass_contains("shift"));
         assert!(config.selection.bypass_contains("alt"));
         assert!(!config.selection.smart_selection);
