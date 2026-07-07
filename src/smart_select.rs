@@ -37,6 +37,22 @@ pub fn expand_smart(row_cells: &[Cell], col: usize, delimiters: &str) -> Option<
     expand_word(&chars, col, delimiters).map(|(s, e)| SmartRange { start: s, end: e })
 }
 
+/// Devuelve la URL que contiene `col` en `line`, si la hay.
+pub fn resolve_url_in_line(line: &str, col: usize) -> Option<String> {
+    let r = find_url(line, col)?;
+    Some(
+        line.chars()
+            .skip(r.start)
+            .take(r.end - r.start + 1)
+            .collect(),
+    )
+}
+
+/// Rango de la URL que contiene `col` en `line`.
+pub fn url_range_in_line(line: &str, col: usize) -> Option<SmartRange> {
+    find_url(line, col)
+}
+
 /// Detecta una URL que contiene `col`.
 fn find_url(line: &str, col: usize) -> Option<SmartRange> {
     for scheme in ["https://", "http://", "ftp://", "file://"] {
@@ -218,5 +234,17 @@ mod tests {
         assert!(expand_smart(&empty, 0, " ").is_none());
         let cells = cells("hi");
         assert!(expand_smart(&cells, 100, " ").is_none());
+    }
+
+    #[test]
+    fn resuelve_url_por_smart_select() {
+        let line = "ver https://example.com/p?x=1 ahora";
+        let r = resolve_url_in_line(line, 10).unwrap();
+        assert_eq!(r, "https://example.com/p?x=1");
+    }
+
+    #[test]
+    fn fuera_de_url_es_none() {
+        assert!(resolve_url_in_line("hola mundo", 2).is_none());
     }
 }
