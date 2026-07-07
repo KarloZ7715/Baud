@@ -205,6 +205,7 @@ fn underline_color_for_cell(
     dim_alpha: bool,
     is_sel: bool,
     cursor_block: bool,
+    is_link_hover: bool,
     cache: &mut ContrastCache,
 ) -> glyphon::Color {
     let color = if cell.attrs.underline_color == Color::Default {
@@ -224,8 +225,7 @@ fn underline_color_for_cell(
         skip_contrast,
         cache,
     );
-    // ponytail: hover lo provee window.rs (mouse cell) en el plan de UX
-    if cell.hyperlink.is_some() && cell.attrs.underline_color == Color::Default {
+    if cell.hyperlink.is_some() && !is_link_hover && cell.attrs.underline_color == Color::Default {
         resolved = attenuate_glyphon(resolved);
     }
     resolved
@@ -458,6 +458,7 @@ impl DisplayListBuilder {
             let default_cell = Cell::default();
             let cell = source_row.get(col).unwrap_or(&default_cell);
             let is_sel = term.is_selected(row, col);
+            let is_link_hover = term.is_hovered_link(row, col);
             let search_hit = term.search_hit_at(row, col);
             let is_search = search_hit.is_some();
             let is_cursor = Self::shell_cursor_here(term, row, col, show_scrollback);
@@ -536,7 +537,11 @@ impl DisplayListBuilder {
                     color: Self::cursor_color(palette),
                 });
             } else {
-                let underline_style = effective_underline_style(cell);
+                let underline_style = if is_link_hover {
+                    UnderlineStyle::Single
+                } else {
+                    effective_underline_style(cell)
+                };
                 if underline_style != UnderlineStyle::None && cell.ch != ' ' {
                     list.line_quads.push(LineQuad {
                         row,
@@ -553,6 +558,7 @@ impl DisplayListBuilder {
                             dim_alpha,
                             is_sel,
                             cursor_block,
+                            is_link_hover,
                             contrast_cache,
                         ),
                     });

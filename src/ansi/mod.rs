@@ -126,6 +126,14 @@ pub struct Attrs {
     pub underline_color: Color,
 }
 
+/// Rango de un enlace bajo el cursor (fila logica + columnas inclusivas).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkRange {
+    pub row: usize,
+    pub start_col: usize,
+    pub end_col: usize,
+}
+
 /// Estado completo del terminal virtual.
 pub struct Term {
     /// Grid de caracteres (pantalla primaria).
@@ -161,6 +169,8 @@ pub struct Term {
     pub cwd: Option<String>,
     pub hyperlinks: Vec<String>,
     current_link: Option<usize>,
+    /// Enlace bajo el cursor del mouse (hover).
+    pub hovered_link: Option<LinkRange>,
     /// OSC 52 query pendiente: target (`c`/`p`/`s`) y terminador del request.
     pub(crate) clipboard_read_pending: Option<(u8, bool)>,
     /// Si false, ignora peticiones de lectura OSC 52 (`?`).
@@ -255,6 +265,7 @@ impl Term {
             cwd: None,
             hyperlinks: Vec::new(),
             current_link: None,
+            hovered_link: None,
             clipboard_read_pending: None,
             allow_osc52_read: true,
             runtime_palette: [None; 256],
@@ -819,6 +830,54 @@ impl Term {
         };
         let logical_row = self.visible_to_logical_row(row);
         sel.contains(logical_row, col)
+    }
+
+    pub fn is_hovered_link(&self, visible_row: usize, col: usize) -> bool {
+        let Some(ref range) = self.hovered_link else {
+            return false;
+        };
+        let logical_row = self.visible_to_logical_row(visible_row);
+        logical_row == range.row && col >= range.start_col && col <= range.end_col
+    }
+
+    /// Resuelve el enlace en la celda `(logical_row, col)`: OSC 8 primero, luego URL por smart-select.
+    pub fn resolve_link_at(&self, logical_row: usize, col: usize) -> Option<(String, LinkRange)> {
+        let row_cells = self.row_cells_at_logical(logical_row)?;
+        if col >= row_cells.len() {
+            return None;
+        }
+
+        if let Some(idx) = row_cells[col].hyperlink {
+            let url = self.hyperlinks.get(idx as usize)?.clone();
+            let mut start = col;
+            while start > 0 && row_cells[start - 1].hyperlink == Some(idx) {
+                start -= 1;
+            }
+            let mut end = col;
+            while end + 1 < row_cells.len() && row_cells[end + 1].hyperlink == Some(idx) {
+                end += 1;
+            }
+            return Some((
+                url,
+                LinkRange {
+                    row: logical_row,
+                    start_col: start,
+                    end_col: end,
+                },
+            ));
+        }
+
+        let line: String = row_cells.iter().map(|c| c.ch).collect();
+        let range = crate::smart_select::url_range_in_line(&line, col)?;
+        let url = crate::smart_select::resolve_url_in_line(&line, col)?;
+        Some((
+            url,
+            LinkRange {
+                row: logical_row,
+                start_col: range.start,
+                end_col: range.end,
+            },
+        ))
     }
 
     /// Extrae el texto del rango seleccionado como String.

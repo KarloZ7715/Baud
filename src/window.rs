@@ -33,7 +33,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::event_loop::ControlFlow;
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
+use winit::window::{CursorGrabMode, CursorIcon, Fullscreen, Window, WindowId};
 
 /// Eventos enviados desde el hilo drain al hilo GUI.
 #[derive(Debug)]
@@ -192,6 +192,22 @@ pub struct App {
     theme_picker: Option<ThemePickerState>,
     /// Estado del watcher de config (sync mtime tras persistir tema).
     config_watch: Arc<Mutex<WatchState>>,
+}
+
+fn open_url(url: &str) {
+    if !(url.starts_with("http://")
+        || url.starts_with("https://")
+        || url.starts_with("file://")
+        || url.starts_with("mailto:"))
+    {
+        tracing::warn!("open_url: esquema no permitido: {}", url);
+        return;
+    }
+    let _ = std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 impl App {
@@ -1603,6 +1619,32 @@ impl ApplicationHandler<UserEvent> for App {
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
+                } else {
+                    let (visible_row, col) = self.pixel_to_cell(position.x, position.y, renderer);
+                    let mut link_changed = false;
+                    let mut has_link = false;
+                    if let Ok(mut guard) = self.term.lock() {
+                        let logical_row = guard.visible_to_logical_row(visible_row);
+                        let new_hovered = guard
+                            .resolve_link_at(logical_row, col)
+                            .map(|(_, range)| range);
+                        link_changed = guard.hovered_link != new_hovered;
+                        has_link = new_hovered.is_some();
+                        if link_changed {
+                            guard.hovered_link = new_hovered;
+                            guard.mark_dirty();
+                        }
+                    }
+                    if let Some(window) = &self.window {
+                        window.set_cursor(if has_link {
+                            CursorIcon::Pointer
+                        } else {
+                            CursorIcon::Default
+                        });
+                        if link_changed {
+                            window.request_redraw();
+                        }
+                    }
                 }
             }
             // Mouse left: el cursor salio de la ventana.
@@ -1641,6 +1683,16 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 } else {
                     tracing::debug!("CursorLeft: mouse_down=false, no action");
+                    if let Ok(mut guard) = self.term.lock() {
+                        if guard.hovered_link.is_some() {
+                            guard.hovered_link = None;
+                            guard.mark_dirty();
+                        }
+                    }
+                    if let Some(window) = &self.window {
+                        window.set_cursor(CursorIcon::Default);
+                        window.request_redraw();
+                    }
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -1654,6 +1706,19 @@ impl ApplicationHandler<UserEvent> for App {
 
                 // copy_on_select diferido: deja completar doble/triple clic antes de copiar.
                 if button == MouseButton::Left && state == ElementState::Pressed {
+                    if self.modifiers.state().control_key() {
+                        if let Ok(guard) = self.term.lock() {
+                            if let Some(ref range) = guard.hovered_link {
+                                if let Some((url, _)) =
+                                    guard.resolve_link_at(range.row, range.start_col)
+                                {
+                                    drop(guard);
+                                    open_url(&url);
+                                }
+                            }
+                        }
+                        return;
+                    }
                     self.cancel_copy_on_select();
                 }
                 if button == MouseButton::Left && state == ElementState::Released {
