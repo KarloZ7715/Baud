@@ -1,7 +1,8 @@
 //! Sistema de configuración para Baud mediante archivos TOML.
 //!
 //! Los valores por defecto de apariencia corresponden al preset `claude-dark`.
-//! La configuración se carga al inicio del programa (sin hot-reload) desde, por
+//! La configuración se carga al inicio y puede recargarse en caliente (ver
+//! `watch`) desde, por
 //! orden de prioridad:
 //!
 //! 1. `$XDG_CONFIG_HOME/baud/config.toml` (o `~/.config/baud/config.toml` en Linux).
@@ -12,6 +13,7 @@
 //! cualquiera de los dos es `true`, el renderer aplica el mapeo bold→bright.
 
 mod themes;
+pub mod watch;
 
 use std::collections::BTreeMap;
 
