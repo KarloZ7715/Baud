@@ -10,7 +10,12 @@
 //!
 //! `bold_is_bright` puede declararse en la raíz del TOML o en `[theme]`; si
 //! cualquiera de los dos es `true`, el renderer aplica el mapeo bold→bright.
+//!
+//! `[theme].minimum_contrast` (default `3.0`) ajusta dinámicamente el fg sobre
+//! el bg efectivo de cada celda para cumplir contraste WCAG. Use `1.0` para
+//! desactivar el ajuste y conservar colores crudos del tema.
 
+pub mod persist;
 mod themes;
 pub mod watch;
 
@@ -18,7 +23,9 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-pub use themes::{available_presets, preset, try_preset, PresetError};
+pub use crate::color::contrast_ratio_hex as contrast_ratio;
+pub use themes::MIN_COMMENT_CONTRAST;
+pub use themes::{available_presets, preset, try_preset, PresetError, MIN_LEGIBLE_CONTRAST};
 
 // ---------------------------------------------------------------------------
 // Estructuras principales
@@ -30,6 +37,9 @@ pub use themes::{available_presets, preset, try_preset, PresetError};
 pub struct Config {
     #[serde(default)]
     pub theme: ThemeConfig,
+    /// Preset embebido activo si la config lo declara por nombre.
+    #[serde(skip)]
+    pub theme_preset: Option<String>,
     #[serde(default)]
     pub font: FontConfig,
     #[serde(default)]
@@ -85,7 +95,7 @@ pub struct CopyModeConfig {
 }
 
 /// Colores del tema de terminal (ANSI de 16 colores + extras).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ThemeConfig {
     #[serde(default = "default_foreground")]
     pub foreground: String,
@@ -135,6 +145,9 @@ pub struct ThemeConfig {
     /// SGR dim atenua alpha del glifo en vez de oscurecer RGB.
     #[serde(default)]
     pub dim_alpha: bool,
+    /// Contraste mínimo WCAG fg/bg por celda (1.0 = desactivado, default 3.0).
+    #[serde(default = "default_minimum_contrast")]
+    pub minimum_contrast: f64,
 }
 
 /// Tabla `[theme]` con campos opcionales para distinguir ausencia de override.
@@ -148,6 +161,7 @@ macro_rules! define_theme_table {
             $( $field: Option<String>, )+
             bold_is_bright: Option<bool>,
             dim_alpha: Option<bool>,
+            minimum_contrast: Option<f64>,
         }
 
         fn apply_theme_overrides(base: &mut ThemeConfig, table: &ThemeTable) {
@@ -165,6 +179,9 @@ macro_rules! define_theme_table {
             }
             if let Some(v) = table.dim_alpha {
                 base.dim_alpha = v;
+            }
+            if let Some(v) = table.minimum_contrast {
+                base.minimum_contrast = v;
             }
         }
     };
@@ -247,25 +264,28 @@ fn theme_base_from_name(name: &str) -> ThemeConfig {
     }
 }
 
-fn resolve_theme(raw: RawTheme) -> ThemeConfig {
+fn resolve_theme(raw: RawTheme) -> (ThemeConfig, Option<String>) {
     match raw {
-        RawTheme::Named(name) => theme_base_from_name(&name),
+        RawTheme::Named(name) => (theme_base_from_name(&name), Some(name)),
         RawTheme::Table(table) => {
+            let preset_name = table.name.clone();
             let mut base = table
                 .name
                 .as_deref()
                 .map(theme_base_from_name)
                 .unwrap_or_default();
             apply_theme_overrides(&mut base, table.as_ref());
-            base
+            (base, preset_name)
         }
     }
 }
 
 impl From<RawConfig> for Config {
     fn from(raw: RawConfig) -> Self {
+        let (theme, theme_preset) = resolve_theme(raw.theme);
         Self {
-            theme: resolve_theme(raw.theme),
+            theme,
+            theme_preset,
             font: raw.font,
             window: raw.window,
             selection: raw.selection,
@@ -462,6 +482,7 @@ impl Default for ThemeConfig {
             bright_white: default_bright_white(),
             bold_is_bright: false,
             dim_alpha: false,
+            minimum_contrast: default_minimum_contrast(),
         }
     }
 }
@@ -536,6 +557,9 @@ impl SelectionConfig {
 fn default_foreground() -> String {
     "#ececec".into()
 }
+fn default_minimum_contrast() -> f64 {
+    3.0
+}
 fn default_background() -> String {
     "#0a0a0a".into()
 }
@@ -567,7 +591,7 @@ fn default_white() -> String {
     "#ececec".into()
 }
 fn default_bright_black() -> String {
-    "#3d3d3d".into()
+    "#797979".into()
 }
 fn default_bright_red() -> String {
     "#f07070".into()
@@ -727,6 +751,11 @@ impl Config {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         crate::input::actions::Keybindings::from_overrides(&overrides)
+    }
+
+    /// Nombre del preset embebido si la config lo declara (`theme = "…"` o `[theme].name`).
+    pub fn active_preset_name(&self) -> Option<&str> {
+        self.theme_preset.as_deref()
     }
 
     /// Aplica al `Term` los campos de config que tienen efecto al arrancar.

@@ -20,6 +20,11 @@ impl WatchState {
             false
         }
     }
+
+    /// Fija el mtime conocido sin disparar recarga (p. ej. tras escribir desde el picker).
+    pub fn sync(&mut self, current: Option<SystemTime>) {
+        self.last = current;
+    }
 }
 
 /// mtime del primer archivo de config existente (mismo orden que [`super::Config::load`]).
