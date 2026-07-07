@@ -1013,13 +1013,21 @@ impl Term {
     fn search_set_query_inner(&mut self, query: &str, case_insensitive: bool) {
         let rows = self.rows_as_text();
         let matches = search::find_matches(&rows, query, case_insensitive);
+        let prev_current = self.search.as_ref().map(|s| s.current).unwrap_or(0);
+        let current = if matches.is_empty() {
+            0
+        } else {
+            prev_current.min(matches.len() - 1)
+        };
         self.search = Some(SearchState {
             query: query.to_string(),
             case_insensitive,
             matches,
-            current: 0,
+            current,
         });
-        if let Some(m) = self.search.as_ref().and_then(|s| s.matches.first()) {
+        if let Some(m) = self.search.as_ref().and_then(|s| s.matches.get(s.current)) {
+            self.scroll_to_show_logical_row(m.row);
+        } else if let Some(m) = self.search.as_ref().and_then(|s| s.matches.first()) {
             self.scroll_to_show_logical_row(m.row);
         }
         self.search_cache = None;

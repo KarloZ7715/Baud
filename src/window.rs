@@ -1855,11 +1855,30 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
+                let in_search = self
+                    .term
+                    .lock()
+                    .ok()
+                    .map(|g| g.search.is_some())
+                    .unwrap_or(false);
+
                 if let Some(k) = winit_to_key(&event.logical_key) {
                     let k_norm = normalize_binding_key(k, mods);
                     if let Some(action) = self.keybindings.lookup(k_norm, mods) {
-                        self.run_action(action);
-                        return;
+                        if in_search {
+                            use crate::input::actions::Action::*;
+                            match action {
+                                ScrollLineUp | ScrollLineDown | ScrollPageUp | ScrollPageDown
+                                | ScrollToBottom => {}
+                                _ => {
+                                    self.run_action(action);
+                                    return;
+                                }
+                            }
+                        } else {
+                            self.run_action(action);
+                            return;
+                        }
                     }
                 }
 
@@ -1879,15 +1898,9 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
-                // Modo busqueda: captura teclas para el query y navegacion con flechas.
-                if self
-                    .term
-                    .lock()
-                    .ok()
-                    .map(|g| g.search.is_some())
-                    .unwrap_or(false)
-                    && self.handle_search_mode_key(&event)
-                {
+                // Modo busqueda: captura teclas; no enviar al PTY (como theme picker).
+                if in_search {
+                    self.handle_search_mode_key(&event);
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
