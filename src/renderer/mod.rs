@@ -111,9 +111,11 @@ pub struct Renderer {
     prev_selection_bounds: Option<(usize, usize, usize, usize)>,
     /// Offset de scrollback del frame anterior (invalida cache si cambia con seleccion).
     prev_scrollback_offset: isize,
-    /// Familia tipografica desde la configuracion.
+    /// Familia tipográfica desde la configuracion.
     font_family: String,
-    /// Tamano de fuente desde la configuracion (en puntos).
+    /// Fallbacks de fuente configurados por el usuario.
+    font_fallback: Vec<String>,
+    /// Tamaño de fuente desde la configuracion (en puntos).
     font_size: f32,
     /// Metricas de celda (ancho, alto, offsets).
     cell_metrics: CellMetrics,
@@ -232,6 +234,7 @@ impl Renderer {
             prev_selection_bounds: None,
             prev_scrollback_offset: 0,
             font_family,
+            font_fallback: font_config.fallback.clone(),
             font_size,
             cell_metrics,
             glyph_cache: GlyphCache::new(),
@@ -280,6 +283,35 @@ impl Renderer {
         self.bg_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
         Self::configure_buffer(&mut self.font_system, &mut self.bg_buffer, self.cell_w);
         (self.cell_w, self.cell_h)
+    }
+
+    /// Aplica cambios de fuente desde config (familia, metricas o fallback).
+    pub fn apply_font_config(&mut self, font: &FontConfig, effective_size: u16) {
+        let font_changed = self.font_family != font.family
+            || self.font_fallback != font.fallback
+            || self.ligatures != font.ligatures
+            || self.line_height != font.line_height
+            || self.glyph_offset != font.glyph_offset
+            || self.builtin_box_drawing != font.builtin_box_drawing;
+
+        if font_changed {
+            self.font_system = terminal_fallback::create_font_system_with_fallback(&font.fallback);
+            self.font_family = font.family.clone();
+            self.font_fallback = font.fallback.clone();
+            self.ligatures = font.ligatures;
+            self.line_height = font.line_height;
+            self.glyph_offset = font.glyph_offset;
+            self.builtin_box_drawing = font.builtin_box_drawing;
+        }
+
+        self.font_size = effective_size as f32;
+        self.refresh_cell_metrics();
+        self.reset_glyph_pipeline();
+        let metrics = glyphon::Metrics::new(self.font_size, self.cell_h);
+        self.overlay_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+        Self::configure_buffer(&mut self.font_system, &mut self.overlay_buffer, self.cell_w);
+        self.bg_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+        Self::configure_buffer(&mut self.font_system, &mut self.bg_buffer, self.cell_w);
     }
 
     /// Invalida caches GPU tras cambio de metricas (resize).

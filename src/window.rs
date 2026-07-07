@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::ansi::Term;
 use crate::clipboard::{self, CopyTarget};
-use crate::config::{Config, StartupState};
+use crate::config::{Config, ProcessSection, StartupState};
 use crate::copy_mode::CopyModeState;
 use crate::event_loop::{PtyCommand, PtyCommandSender};
 use crate::grid::Cell;
@@ -210,6 +210,81 @@ impl App {
             keybindings,
             last_gui_redraw: None,
             gui_redraw_metrics: GuiRedrawMetrics::new(),
+        }
+    }
+
+    fn process_section_changed(prev: &ProcessSection, next: &ProcessSection) -> bool {
+        prev.program != next.program
+            || prev.args != next.args
+            || prev.working_directory != next.working_directory
+            || prev.env != next.env
+            || prev.startup_command != next.startup_command
+            || prev.login != next.login
+    }
+
+    fn restart_required_fields(prev: &Config, next: &Config) -> Vec<&'static str> {
+        let mut fields = Vec::new();
+        if prev.window.decorations != next.window.decorations {
+            fields.push("window.decorations");
+        }
+        if prev.window.startup != next.window.startup {
+            fields.push("window.startup");
+        }
+        if Self::process_section_changed(&prev.process, &next.process) {
+            fields.push("process");
+        }
+        fields
+    }
+
+    /// Aplica una config recargada: tema, fuente, atajos, cursor, scrollback y toggles.
+    ///
+    /// Devuelve mensaje si hay campos que requieren reinicio.
+    fn apply_config(&mut self, new_cfg: Config) -> Option<String> {
+        let prev = self.config.clone();
+        let restart_fields = Self::restart_required_fields(&prev, &new_cfg);
+
+        self.keybindings = new_cfg.keybindings();
+        self.font_size = new_cfg.font.size;
+
+        if let Ok(mut term) = self.term.lock() {
+            new_cfg.apply_to_term(&mut term);
+            let max = new_cfg.scrollback_max_lines();
+            term.grid.set_max_scrollback(max);
+            term.alt_grid.set_max_scrollback(max);
+            term.mark_dirty();
+        }
+
+        if let Some(renderer) = &mut self.renderer {
+            renderer.apply_font_config(&new_cfg.font, self.font_size);
+            renderer.set_content_padding(new_cfg.window.padding_x, new_cfg.window.padding_y);
+        }
+        if let (Some(renderer), Some(window)) = (&self.renderer, &self.window) {
+            let size = window.inner_size();
+            self.sync_grid_to_window(
+                size.width,
+                size.height,
+                renderer.cell_w,
+                renderer.cell_h,
+                true,
+                false,
+            );
+        }
+
+        self.config = new_cfg;
+
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+
+        if restart_fields.is_empty() {
+            None
+        } else {
+            let msg = format!(
+                "Config: {} requiere reinicio para aplicarse",
+                restart_fields.join(", ")
+            );
+            tracing::info!("{msg}");
+            Some(msg)
         }
     }
 
@@ -1437,8 +1512,15 @@ impl ApplicationHandler<UserEvent> for App {
                 self.send_input(response);
             }
             UserEvent::ConfigReloaded(cfg) => {
-                tracing::info!("config recargada desde disco");
-                let _ = cfg;
+                let restart_msg = self.apply_config(*cfg);
+                if let Some(renderer) = &mut self.renderer {
+                    let status = if let Some(msg) = restart_msg {
+                        format!("[Config recargada — {msg}]")
+                    } else {
+                        "[Config recargada]".into()
+                    };
+                    renderer.set_status(&status);
+                }
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }

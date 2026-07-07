@@ -1,9 +1,8 @@
 //! Sistema de configuración para Baud mediante archivos TOML.
 //!
 //! Los valores por defecto de apariencia corresponden al preset `claude-dark`.
-//! La configuración se carga al inicio y puede recargarse en caliente (ver
-//! `watch`) desde, por
-//! orden de prioridad:
+//! La configuración se carga al inicio y puede recargarse en caliente
+//! desde, por orden de prioridad:
 //!
 //! 1. `$XDG_CONFIG_HOME/baud/config.toml` (o `~/.config/baud/config.toml` en Linux).
 //! 2. `./baud.toml` en el directorio de trabajo.
@@ -307,7 +306,7 @@ pub struct FontConfig {
 }
 
 /// Desplazamiento fino del glifo dentro de la celda.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 pub struct GlyphOffset {
     #[serde(default)]
     pub x: f32,

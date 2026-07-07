@@ -327,6 +327,14 @@ impl Grid {
         self.scrollback.push_back(row);
     }
 
+    /// Actualiza el límite de scrollback y descarta líneas sobrantes.
+    pub fn set_max_scrollback(&mut self, max: usize) {
+        self.max_scrollback = max;
+        while self.scrollback.len() > self.max_scrollback {
+            self.scrollback.pop_front();
+        }
+    }
+
     /// Marca una fila como continuación de la anterior por soft-wrap (true)
     /// o como hard break / Enter explícito (false).
     pub fn set_continuation(&mut self, row: usize, val: bool) {
