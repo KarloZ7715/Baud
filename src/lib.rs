@@ -10,6 +10,7 @@ pub mod grid;
 pub mod input;
 pub mod pty;
 pub mod renderer;
+pub mod search;
 pub mod selection;
 pub mod smart_select;
 pub mod theme_picker;
