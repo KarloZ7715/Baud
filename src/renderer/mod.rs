@@ -70,6 +70,14 @@ pub use glyph::{is_wide_continuation, resolve_glyph_key, shape_glyph, GlyphKey, 
 pub use glyph_cache::{CachedGlyph, CachedRaster, GlyphCache};
 pub use metrics::CellMetrics;
 
+/// Estado del preedit IME para dibujar el overlay sobre el cursor.
+#[derive(Debug)]
+pub struct PreeditState {
+    pub text: String,
+    pub row: usize,
+    pub col: usize,
+}
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -417,7 +425,7 @@ impl Renderer {
     }
 
     /// Renderiza el estado del `term` en la surface.
-    #[tracing::instrument(skip(self, term))]
+    #[tracing::instrument(skip(self, term, preedit))]
     pub fn render(
         &mut self,
         term: &mut Term,
@@ -425,6 +433,7 @@ impl Renderer {
         bold_is_bright: bool,
         window_opacity: f32,
         picker: Option<&ThemePickerState>,
+        preedit: Option<PreeditState>,
     ) -> Result<(), String> {
         let t0 = Instant::now();
 
@@ -528,6 +537,7 @@ impl Renderer {
             get_frame_us,
             bold_is_bright,
             picker,
+            preedit,
         )
     }
 
@@ -552,6 +562,7 @@ impl Renderer {
         get_frame_us: f64,
         bold_is_bright: bool,
         picker: Option<&ThemePickerState>,
+        preedit: Option<PreeditState>,
     ) -> Result<(), String> {
         if let Some(picker_state) = picker {
             return self.render_picker_only(
@@ -691,7 +702,21 @@ impl Renderer {
 
         let cell_w = self.cell_w;
         let mut extra_areas: Vec<glyphon::TextArea<'_>> = Vec::with_capacity(4);
-        if self.status_active {
+        if let Some(pre) = preedit.as_ref().filter(|p| !p.text.is_empty()) {
+            push_preedit_overlay(
+                pre,
+                palette,
+                &self.cell_metrics,
+                self.config.width,
+                self.cell_w,
+                self.cell_h,
+                &self.font_family,
+                &mut self.font_system,
+                &mut self.overlay_buffer,
+                &mut extra_areas,
+                &mut custom_glyphs,
+            );
+        } else if self.status_active {
             let overlay_left = self.config.width as f32 - (23.0 * cell_w) - 10.0;
             extra_areas.push(glyphon::TextArea {
                 buffer: &self.overlay_buffer,
@@ -1006,6 +1031,73 @@ impl Renderer {
         self.status_start = Some(Instant::now());
         self.status_active = true;
     }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "overlay push shares layout metrics with search bar pattern"
+)]
+fn push_preedit_overlay<'a>(
+    preedit: &PreeditState,
+    palette: &Palette<'_>,
+    cell_metrics: &CellMetrics,
+    surface_w: u32,
+    cell_w: f32,
+    cell_h: f32,
+    font_family: &str,
+    font_system: &mut glyphon::FontSystem,
+    overlay_buffer: &'a mut glyphon::Buffer,
+    extra_areas: &mut Vec<glyphon::TextArea<'a>>,
+    custom_glyphs: &mut Vec<glyphon::CustomGlyph>,
+) {
+    let (pad_x, pad_y) = (cell_metrics.padding_x, cell_metrics.padding_y);
+    let left = pad_x + preedit.col as f32 * cell_w;
+    let top = pad_y + preedit.row as f32 * cell_h;
+    let (fg_r, fg_g, fg_b) = palette.rgb(Color::Default, false);
+    let fg = glyphon::Color::rgb(fg_r, fg_g, fg_b);
+    let default_attrs = glyphon::Attrs::new().family(resolve_family(font_family));
+    let mut attrs = glyphon::Attrs::new().family(resolve_family(font_family));
+    attrs = attrs.color(fg);
+    let spans = [(preedit.text.as_str(), attrs)];
+
+    overlay_buffer.set_rich_text(
+        font_system,
+        spans,
+        &default_attrs,
+        glyphon::Shaping::Advanced,
+        None,
+    );
+    // ponytail: el preedit provisional puede extenderse mas alla de la fila visible
+    let overlay_w = (surface_w as f32 - left).max(cell_w);
+    overlay_buffer.set_size(font_system, Some(overlay_w), Some(cell_h));
+    overlay_buffer.set_monospace_width(font_system, Some(cell_w));
+    overlay_buffer.set_hinting(font_system, Hinting::Enabled);
+    overlay_buffer.shape_until_scroll(font_system, false);
+
+    extra_areas.push(glyphon::TextArea {
+        buffer: overlay_buffer,
+        left,
+        top,
+        scale: 1.0,
+        bounds: glyphon::TextBounds {
+            left: 0,
+            top: 0,
+            right: overlay_w as i32,
+            bottom: cell_h as i32,
+        },
+        default_color: fg,
+        custom_glyphs: &[],
+    });
+
+    let width_cells =
+        unicode_width::UnicodeWidthStr::width(preedit.text.as_str()).clamp(1, 255) as u8;
+    custom_glyphs.push(decorations::underline_quad(
+        preedit.row,
+        preedit.col,
+        width_cells,
+        cell_metrics,
+        fg,
+    ));
 }
 
 /// Mapea un `Color` a RGB usando solo el tema (sin overrides runtime).

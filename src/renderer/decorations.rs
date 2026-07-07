@@ -70,7 +70,6 @@ pub fn line_quad(
 }
 
 /// Quad de subrayado de 1px justo bajo la baseline de la celda.
-#[cfg_attr(not(test), expect(dead_code, reason = "usado en tests de decorations"))]
 pub fn underline_quad(
     row: usize,
     col: usize,

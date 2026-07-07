@@ -20,7 +20,7 @@ use crate::event_loop::{PtyCommand, PtyCommandSender};
 use crate::grid::Cell;
 use crate::input::actions::{normalize_binding_key, Action, Keybindings};
 use crate::input::keymap::{self, Key as KKey, KeyEventKind, KeyModes, Mods};
-use crate::renderer::Renderer;
+use crate::renderer::{PreeditState, Renderer};
 use crate::search::SearchState;
 use crate::selection::{Selection, SelectionMode, SelectionPoint};
 use crate::smart_select;
@@ -1591,10 +1591,23 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
+                self.update_ime_area();
             }
             WindowEvent::RedrawRequested => {
                 let theme = self.effective_theme();
                 let picker = self.theme_picker.as_ref();
+                let preedit_empty = self.preedit.is_empty();
+                let preedit = if preedit_empty {
+                    None
+                } else {
+                    let (row, col) = self.cursor_cell();
+                    Some(PreeditState {
+                        text: self.preedit.clone(),
+                        row,
+                        col,
+                    })
+                };
+                self.update_ime_area();
                 let Some(renderer) = &mut self.renderer else {
                     return;
                 };
@@ -1609,6 +1622,7 @@ impl ApplicationHandler<UserEvent> for App {
                     && !renderer.status_overlay_active()
                     && !renderer.theme_picker_active(picker)
                     && !renderer.search_overlay_active(&term_guard)
+                    && preedit_empty
                 {
                     tracing::debug!("RedrawRequested: skip (nothing dirty)");
                     return;
@@ -1622,6 +1636,7 @@ impl ApplicationHandler<UserEvent> for App {
                     bold,
                     self.config.window.opacity,
                     picker,
+                    preedit,
                 ) {
                     tracing::warn!("error al renderizar: {e}");
                 }
