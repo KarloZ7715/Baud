@@ -12,9 +12,13 @@
 //! `bold_is_bright` puede declararse en la raíz del TOML o en `[theme]`; si
 //! cualquiera de los dos es `true`, el renderer aplica el mapeo bold→bright.
 
+mod themes;
+
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
+
+pub use themes::{available_presets, preset};
 
 // ---------------------------------------------------------------------------
 // Estructuras principales
