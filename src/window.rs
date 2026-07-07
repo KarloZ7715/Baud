@@ -44,6 +44,8 @@ pub enum UserEvent {
     SetTitle(String),
     /// OSC 52 query: leer clipboard y responder al PTY (target, bell_terminated).
     ReadClipboard(u8, bool),
+    /// Config recargada desde disco.
+    ConfigReloaded(Box<Config>),
 }
 
 fn winit_to_key(k: &Key) -> Option<KKey> {
@@ -1433,6 +1435,13 @@ impl ApplicationHandler<UserEvent> for App {
                 let encoded = crate::base64::encode(text.as_bytes());
                 let response = Term::format_osc52_read_response(target, &encoded, bell_terminated);
                 self.send_input(response);
+            }
+            UserEvent::ConfigReloaded(cfg) => {
+                tracing::info!("config recargada desde disco");
+                let _ = cfg;
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
             }
         }
     }

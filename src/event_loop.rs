@@ -446,7 +446,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .lock()
         .expect("proxy mutex poisoned al setear") = Some(proxy.clone());
 
-    spawn_blink_timer(Arc::clone(&term), proxy);
+    spawn_blink_timer(Arc::clone(&term), proxy.clone());
+
+    let proxy_cfg = proxy.clone();
+    thread::spawn(move || {
+        let mut state = crate::config::watch::WatchState::new(crate::config::watch::config_mtime());
+        loop {
+            thread::sleep(Duration::from_millis(1000));
+            let now = crate::config::watch::config_mtime();
+            if state.changed(now) {
+                let cfg = Config::load();
+                let _ = proxy_cfg.send_event(UserEvent::ConfigReloaded(Box::new(cfg)));
+            }
+        }
+    });
 
     let pty_tx = Arc::new(Mutex::new(Some(cmd_sender)));
 
