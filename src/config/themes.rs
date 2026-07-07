@@ -18,6 +18,20 @@ presets!(
     ("gruvbox-dark", include_str!("themes/gruvbox-dark.toml")),
     ("nord", include_str!("themes/nord.toml")),
     ("claude-dark", include_str!("themes/claude-dark.toml")),
+    ("dracula", include_str!("themes/dracula.toml")),
+    ("rose-pine", include_str!("themes/rose-pine.toml")),
+    ("monokai", include_str!("themes/monokai.toml")),
+    ("one-dark", include_str!("themes/one-dark.toml")),
+    ("solarized-dark", include_str!("themes/solarized-dark.toml")),
+    (
+        "everforest-dark",
+        include_str!("themes/everforest-dark.toml")
+    ),
+    ("kanagawa-wave", include_str!("themes/kanagawa-wave.toml")),
+    ("ayu-dark", include_str!("themes/ayu-dark.toml")),
+    ("github-dark", include_str!("themes/github-dark.toml")),
+    ("cobalt2", include_str!("themes/cobalt2.toml")),
+    ("flexoki-dark", include_str!("themes/flexoki-dark.toml")),
 );
 
 /// Error al resolver un preset embebido.
