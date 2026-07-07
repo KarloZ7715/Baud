@@ -175,6 +175,10 @@ pub struct Term {
     pub(crate) clipboard_read_pending: Option<(u8, bool)>,
     /// Si false, ignora peticiones de lectura OSC 52 (`?`).
     pub allow_osc52_read: bool,
+    /// Si true, OSC 9 / 777 lanzan notificaciones de escritorio.
+    pub notifications_enabled: bool,
+    #[cfg(test)]
+    last_notification: Option<(String, String)>,
     pub runtime_palette: [Option<(u8, u8, u8)>; 256],
     pub fg_override: Option<(u8, u8, u8)>,
     pub bg_override: Option<(u8, u8, u8)>,
@@ -268,6 +272,9 @@ impl Term {
             hovered_link: None,
             clipboard_read_pending: None,
             allow_osc52_read: true,
+            notifications_enabled: false,
+            #[cfg(test)]
+            last_notification: None,
             runtime_palette: [None; 256],
             fg_override: None,
             bg_override: None,
@@ -2212,6 +2219,34 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"\x1b]7;file://localhost/home/u/proj\x07");
         assert_eq!(term.cwd.as_deref(), Some("/home/u/proj"));
+    }
+
+    #[test]
+    fn osc_9_y_777_no_panic_y_respetan_flag() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]9;build terminado\x07");
+        feed(&mut term, b"\x1b]777;notify;Titulo;Cuerpo\x07");
+        assert!(term.last_notification.is_none());
+
+        let mut term2 = Term::new();
+        term2.notifications_enabled = true;
+        feed(&mut term2, b"\x1b]9;hola\x07");
+        assert_eq!(
+            term2
+                .last_notification
+                .as_ref()
+                .map(|(t, b)| (t.as_str(), b.as_str())),
+            Some(("baud", "hola"))
+        );
+
+        feed(&mut term2, b"\x1b]777;notify;Titulo;Cuerpo\x07");
+        assert_eq!(
+            term2
+                .last_notification
+                .as_ref()
+                .map(|(t, b)| (t.as_str(), b.as_str())),
+            Some(("Titulo", "Cuerpo"))
+        );
     }
 
     #[test]

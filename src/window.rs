@@ -27,6 +27,7 @@ use crate::smart_select;
 use crate::theme_picker::ThemePickerState;
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
+use winit::event::Ime;
 use winit::event::MouseButton;
 use winit::event::MouseScrollDelta;
 use winit::event::WindowEvent;
@@ -192,6 +193,10 @@ pub struct App {
     theme_picker: Option<ThemePickerState>,
     /// Estado del watcher de config (sync mtime tras persistir tema).
     config_watch: Arc<Mutex<WatchState>>,
+    /// Texto provisional del IME (preedit) antes del commit.
+    preedit: String,
+    /// Rango del cursor dentro del preedit, en bytes (inicio, fin).
+    preedit_cursor: Option<(usize, usize)>,
 }
 
 fn allowed_open_url(url: &str) -> bool {
@@ -254,7 +259,35 @@ impl App {
             copy_on_select_deadline: None,
             theme_picker: None,
             config_watch,
+            preedit: String::new(),
+            preedit_cursor: None,
         }
+    }
+
+    fn cursor_cell(&self) -> (usize, usize) {
+        self.term
+            .lock()
+            .map(|guard| (guard.cursor.row, guard.cursor.col))
+            .unwrap_or((0, 0))
+    }
+
+    fn update_ime_area(&self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let Some(renderer) = &self.renderer else {
+            return;
+        };
+        let (row, col) = self.cursor_cell();
+        let (pad_x, pad_y) = renderer.content_padding();
+        let cell_w = renderer.cell_w();
+        let cell_h = renderer.cell_h();
+        let x = pad_x + col as f32 * cell_w;
+        let y = pad_y + row as f32 * cell_h;
+        window.set_ime_cursor_area(
+            winit::dpi::PhysicalPosition::new(x as i32, y as i32),
+            winit::dpi::PhysicalSize::new(cell_w as u32, cell_h as u32),
+        );
     }
 
     fn effective_theme(&self) -> crate::config::ThemeConfig {
@@ -1391,6 +1424,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .expect("no se pudo crear la ventana"),
         );
         self.window = Some(window.clone());
+        window.set_ime_allowed(true);
 
         // 2. Obtener display handle para wgpu (evita el lifetime de ActiveEventLoop).
         let display_handle = event_loop.owned_display_handle();
@@ -1470,6 +1504,7 @@ impl ApplicationHandler<UserEvent> for App {
         // evitando que el compositor (Hyprland) marque la ventana como
         // "no responde" mientras espera output.
         window.request_redraw();
+        self.update_ime_area();
 
         let cfg = self.config.clone();
         self.apply_config(cfg);
@@ -1915,6 +1950,36 @@ impl ApplicationHandler<UserEvent> for App {
                     self.forward_mouse_button(button, false);
                 }
             }
+            WindowEvent::Ime(ime) => match ime {
+                Ime::Commit(text) => {
+                    self.send_input(text.into_bytes());
+                    self.preedit.clear();
+                    self.preedit_cursor = None;
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                Ime::Preedit(text, cursor) => {
+                    self.preedit = text;
+                    self.preedit_cursor = cursor;
+                    self.update_ime_area();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+                Ime::Enabled => {
+                    self.preedit.clear();
+                    self.preedit_cursor = None;
+                    self.update_ime_area();
+                }
+                Ime::Disabled => {
+                    self.preedit.clear();
+                    self.preedit_cursor = None;
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+            },
             // Input de teclado completo: letras, Enter, Backspace, Tab, Ctrl+letter, etc.
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Released => {
                 let report_events = self
