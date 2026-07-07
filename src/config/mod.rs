@@ -775,6 +775,7 @@ impl Config {
         use crate::ansi::CursorStyle;
 
         term.allow_osc52_read = self.allow_osc52_read;
+        term.notifications_enabled = self.notifications.enabled;
         term.cursor_style = match self.cursor.style.as_str() {
             "bar" => CursorStyle::Bar,
             "underline" => CursorStyle::Underline,
@@ -1280,6 +1281,19 @@ dim_alpha = true
         assert_eq!(cfg.theme.background, nord.background);
         assert!(cfg.theme.bold_is_bright);
         assert!(cfg.theme.dim_alpha);
+    }
+
+    #[test]
+    fn test_apply_to_term_notifications() {
+        use crate::ansi::Term;
+
+        let mut term = Term::new();
+        assert!(!term.notifications_enabled);
+
+        let toml = "[notifications]\nenabled = true\n";
+        let cfg: Config = toml::from_str(toml).unwrap();
+        cfg.apply_to_term(&mut term);
+        assert!(term.notifications_enabled);
     }
 
     #[test]
