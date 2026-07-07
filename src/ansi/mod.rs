@@ -525,6 +525,23 @@ impl Term {
         self.title_dirty = true;
     }
 
+    fn emit_notification(&mut self, title: &str, body: &str) {
+        if !self.notifications_enabled {
+            tracing::debug!("notificación de escritorio ignorada: {title}: {body}");
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.last_notification = Some((title.to_owned(), body.to_owned()));
+        }
+        let _ = std::process::Command::new("notify-send")
+            .arg(title)
+            .arg(body)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+
     pub fn take_title_if_dirty(&mut self) -> Option<String> {
         if self.title_dirty {
             self.title_dirty = false;
@@ -1956,6 +1973,26 @@ impl vte::Perform for Term {
                             target.first() == Some(&b'p') || target.first() == Some(&b's');
                         crate::clipboard::set(text, primary);
                     }
+                }
+            }
+            9 => {
+                let body = params
+                    .get(1)
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .unwrap_or_default();
+                self.emit_notification("baud", &body);
+            }
+            777 => {
+                if params.get(1).map(|b| b == b"notify").unwrap_or(false) {
+                    let title = params
+                        .get(2)
+                        .map(|b| String::from_utf8_lossy(b).into_owned())
+                        .unwrap_or_default();
+                    let body = params
+                        .get(3)
+                        .map(|b| String::from_utf8_lossy(b).into_owned())
+                        .unwrap_or_default();
+                    self.emit_notification(&title, &body);
                 }
             }
             _ => tracing::debug!("OSC {} no implementado", osc_num),
