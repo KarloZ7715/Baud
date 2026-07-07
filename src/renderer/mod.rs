@@ -3,6 +3,7 @@
 mod blink;
 mod builtin;
 mod cell_renderer;
+mod contrast;
 mod decorations;
 mod display_list;
 mod geometry;
@@ -15,6 +16,7 @@ mod runs;
 mod terminal_fallback;
 
 pub use blink::blink_on;
+pub use contrast::{adjust_fg, ContrastCache};
 pub use palette::{ColorOverrides, Palette};
 
 /// Base de ids reservados para box/block glyphs programaticos (sobre ids de cache).

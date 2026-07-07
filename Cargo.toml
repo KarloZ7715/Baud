@@ -16,7 +16,9 @@ unicode-script = "0.5"
 unicode-width = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+toml_edit = "0.22"
 dirs = "6"
+oklab = "1.1.2"
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
