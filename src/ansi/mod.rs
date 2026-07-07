@@ -526,20 +526,25 @@ impl Term {
     }
 
     fn emit_notification(&mut self, title: &str, body: &str) {
-        if !self.notifications_enabled {
-            tracing::debug!("notificación de escritorio ignorada: {title}: {body}");
-            return;
-        }
         #[cfg(test)]
         {
             self.last_notification = Some((title.to_owned(), body.to_owned()));
         }
-        let _ = std::process::Command::new("notify-send")
-            .arg(title)
-            .arg(body)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        if !self.notifications_enabled {
+            tracing::debug!("notificación de escritorio ignorada: {title}: {body}");
+        } else {
+            #[cfg(not(test))]
+            match std::process::Command::new("notify-send")
+                .arg(title)
+                .arg(body)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(_) => {}
+                Err(e) => tracing::warn!("notify-send no disponible: {e}"),
+            }
+        }
     }
 
     pub fn take_title_if_dirty(&mut self) -> Option<String> {
@@ -2262,8 +2267,20 @@ mod tests {
     fn osc_9_y_777_no_panic_y_respetan_flag() {
         let mut term = Term::new();
         feed(&mut term, b"\x1b]9;build terminado\x07");
+        assert_eq!(
+            term.last_notification
+                .as_ref()
+                .map(|(t, b)| (t.as_str(), b.as_str())),
+            Some(("baud", "build terminado"))
+        );
+
         feed(&mut term, b"\x1b]777;notify;Titulo;Cuerpo\x07");
-        assert!(term.last_notification.is_none());
+        assert_eq!(
+            term.last_notification
+                .as_ref()
+                .map(|(t, b)| (t.as_str(), b.as_str())),
+            Some(("Titulo", "Cuerpo"))
+        );
 
         let mut term2 = Term::new();
         term2.notifications_enabled = true;
