@@ -30,6 +30,7 @@ use crate::selection::{Selection, SelectionMode, SelectionPoint};
 use crate::session::{Session, SessionId};
 use crate::smart_select;
 use crate::theme_picker::ThemePickerState;
+use crate::watchdog::EventLoopWatchdog;
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
 use winit::event::Ime;
@@ -258,6 +259,8 @@ pub struct App {
     pending_pane_sync: bool,
     /// Feedback de carga de config pendiente hasta que exista renderer.
     pending_config_source: Option<ConfigSource>,
+    /// Vigilancia de bloqueos del event loop.
+    watchdog: EventLoopWatchdog,
     /// Pane activo para animacion de parpadeo (solo uno redibuja por blink).
     blink_focus: Arc<BlinkFocus>,
 }
@@ -297,6 +300,7 @@ impl App {
         proxy: Option<EventLoopProxy<UserEvent>>,
         blink_focus: Arc<BlinkFocus>,
         config_source: ConfigSource,
+        watchdog: EventLoopWatchdog,
     ) -> Self {
         debug_assert!(!sessions.is_empty(), "App requiere al menos una sesion");
         let font_size = config.font.size;
@@ -341,6 +345,7 @@ impl App {
             tab_anim_last: Instant::now(),
             pending_pane_sync: false,
             pending_config_source: Some(config_source),
+            watchdog,
             blink_focus,
         }
     }
@@ -2360,6 +2365,7 @@ impl App {
 
 impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.watchdog.ping();
         if self.pending_exit {
             event_loop.exit();
             return;
@@ -2436,13 +2442,21 @@ impl ApplicationHandler<UserEvent> for App {
             .create_surface(window.clone())
             .expect("no se pudo crear la surface wgpu");
 
+        let t_gpu_init = Instant::now();
+        tracing::info!("wgpu: solicitando adaptador GPU...");
         let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
             compatible_surface: Some(&surface),
             ..Default::default()
         }))
         .expect("no se encontro adaptador GPU compatible");
+        tracing::info!(
+            "wgpu: adaptador listo en {}ms",
+            t_gpu_init.elapsed().as_millis()
+        );
 
+        let t_device = Instant::now();
+        tracing::info!("wgpu: solicitando device...");
         let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: None,
             required_features: wgpu::Features::empty(),
@@ -2453,6 +2467,11 @@ impl ApplicationHandler<UserEvent> for App {
             trace: wgpu::Trace::Off,
         }))
         .expect("no se pudo crear el device GPU");
+        tracing::info!(
+            "wgpu: device listo en {}ms (init GPU total {}ms)",
+            t_device.elapsed().as_millis(),
+            t_gpu_init.elapsed().as_millis()
+        );
 
         let size = window.inner_size();
         let surface_w = size.width.clamp(1, 16_384);
@@ -2709,6 +2728,7 @@ impl ApplicationHandler<UserEvent> for App {
                 );
                 let bold = self.config.bold_is_bright || self.config.theme.bold_is_bright;
                 let layout = self.tabs[self.focused].layout().clone();
+                let t_render = Instant::now();
                 match renderer.render(
                     &panes,
                     terminal_area,
@@ -2731,6 +2751,16 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     Err(e) => tracing::warn!("error al renderizar: {e}"),
+                }
+                let render_ms = t_render.elapsed().as_millis();
+                if render_ms > 250 {
+                    tracing::warn!(
+                        "render lento: {}ms ({} panes, status={}, search={})",
+                        render_ms,
+                        panes.len(),
+                        status_active,
+                        search_active
+                    );
                 }
             }
             // Track modifier state (Ctrl, Shift, Alt, etc.) for keyboard shortcuts.
@@ -3403,6 +3433,7 @@ mod tests {
             None,
             BlinkFocus::new(id),
             ConfigSource::Ok,
+            EventLoopWatchdog::noop(),
         )
     }
 
@@ -3419,6 +3450,7 @@ mod tests {
             None,
             BlinkFocus::new(id_b),
             ConfigSource::Ok,
+            EventLoopWatchdog::noop(),
         );
         app.focused = 1;
 
@@ -3439,6 +3471,7 @@ mod tests {
             None,
             BlinkFocus::new(id_b),
             ConfigSource::Ok,
+            EventLoopWatchdog::noop(),
         );
         app.sessions[0].session.dirty = true;
         app.focused = 1;
@@ -3462,6 +3495,7 @@ mod tests {
             None,
             BlinkFocus::new(id0),
             ConfigSource::Ok,
+            EventLoopWatchdog::noop(),
         );
         app.run_action(Action::GotoTab(2));
         assert_eq!(app.focused, 1);

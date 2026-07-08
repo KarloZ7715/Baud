@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::grid::{DEFAULT_COLS, DEFAULT_ROWS};
 use crate::pty::{self, PtyCommand, PtyCommandSender};
 use crate::session::{Session, SessionId};
+use crate::watchdog::EventLoopWatchdog;
 use crate::window::{App, SessionHost, UserEvent};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
@@ -547,6 +548,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let watchdog = EventLoopWatchdog::spawn();
+    tracing::info!(
+        "watchdog de event loop activo (intervalo {:?})",
+        Duration::from_secs(2)
+    );
+
     let mut app = App::new(
         vec![SessionHost::from_spawned(spawned)],
         app_config,
@@ -554,6 +561,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Some(proxy),
         blink_focus,
         load_result.source,
+        watchdog,
     );
 
     if let Some(cmd) = startup_command {

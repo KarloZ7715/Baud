@@ -17,4 +17,5 @@ pub mod selection;
 pub mod session;
 pub mod smart_select;
 pub mod theme_picker;
+pub mod watchdog;
 pub mod window;
