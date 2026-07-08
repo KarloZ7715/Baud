@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
 use std::os::fd::AsFd;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -22,9 +23,6 @@ use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use nix::sys::eventfd::{EfdFlags, EventFd};
 use winit::event_loop::EventLoop;
-
-// ponytail: throttle a 16ms (~60fps); bajar intervalo si se quiere 120Hz.
-const REDRAW_MIN_INTERVAL: Duration = Duration::from_millis(16);
 
 const METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -65,9 +63,13 @@ pub enum PtyEvent {
     IoError(String),
 }
 
-/// Retorna true si paso el intervalo minimo desde el ultimo redraw.
-pub(crate) fn should_redraw(last: Instant, now: Instant) -> bool {
-    now.duration_since(last) >= REDRAW_MIN_INTERVAL
+/// Retorna true si pasó el intervalo mínimo desde el último redraw.
+/// `interval_nanos = 0` desactiva el límite.
+pub(crate) fn should_redraw(last: Instant, now: Instant, interval_nanos: u64) -> bool {
+    if interval_nanos == 0 {
+        return true;
+    }
+    now.duration_since(last).as_nanos() >= interval_nanos as u128
 }
 
 struct DrainMetrics {
@@ -313,6 +315,7 @@ pub fn spawn_session(
     rows: u16,
     cols: u16,
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+    redraw_interval_nanos: Arc<AtomicU64>,
 ) -> std::io::Result<SpawnedSession> {
     let process_cfg = cfg.process_config();
     let session_id = SessionId::next();
@@ -346,7 +349,8 @@ pub fn spawn_session(
         let mut output_backlog: VecDeque<Vec<u8>> = VecDeque::new();
 
         loop {
-            if pending_redraw && should_redraw(last_redraw, Instant::now()) {
+            let interval_nanos = redraw_interval_nanos.load(Ordering::Relaxed);
+            if pending_redraw && should_redraw(last_redraw, Instant::now(), interval_nanos) {
                 send_redraw(&proxy_for_drain, session_id);
                 metrics.record_redraw();
                 last_redraw = Instant::now();
@@ -354,7 +358,11 @@ pub fn spawn_session(
             }
 
             let timeout = if pending_redraw {
-                REDRAW_MIN_INTERVAL.saturating_sub(last_redraw.elapsed())
+                if interval_nanos == 0 {
+                    Duration::ZERO
+                } else {
+                    Duration::from_nanos(interval_nanos).saturating_sub(last_redraw.elapsed())
+                }
             } else if output_backlog.is_empty() {
                 Duration::from_secs(3600)
             } else {
@@ -408,7 +416,8 @@ pub fn spawn_session(
             }
             send_title_and_clipboard(&proxy_for_drain, session_id, title, clipboard_pending);
 
-            if should_redraw(last_redraw, Instant::now()) {
+            let interval_nanos = redraw_interval_nanos.load(Ordering::Relaxed);
+            if should_redraw(last_redraw, Instant::now(), interval_nanos) {
                 send_redraw(&proxy_for_drain, session_id);
                 metrics.record_redraw();
                 last_redraw = Instant::now();
@@ -509,12 +518,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
+    let redraw_interval_nanos = Arc::new(AtomicU64::new(app_config.render.redraw_interval_nanos()));
 
     let spawned = spawn_session(
         &app_config,
         DEFAULT_ROWS as u16,
         DEFAULT_COLS as u16,
         proxy.clone(),
+        Arc::clone(&redraw_interval_nanos),
     )?;
 
     let blink_focus = BlinkFocus::new(spawned.session.id);
@@ -563,6 +574,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         load_result.source,
         watchdog,
     );
+    app.set_redraw_interval_handle(redraw_interval_nanos);
 
     if let Some(cmd) = startup_command {
         app.send_startup_input(format!("{cmd}\n").into_bytes());
@@ -599,10 +611,14 @@ mod tests {
     }
 
     #[test]
-    fn test_should_redraw_respeta_16ms() {
+    fn test_dynamic_redraw_interval() {
         let t0 = Instant::now();
-        assert!(!should_redraw(t0, t0 + Duration::from_millis(5)));
-        assert!(should_redraw(t0, t0 + Duration::from_millis(20)));
+        let fps60 = Duration::from_secs_f64(1.0 / 60.0).as_nanos() as u64;
+        let fps120 = Duration::from_secs_f64(1.0 / 120.0).as_nanos() as u64;
+        assert!(!should_redraw(t0, t0 + Duration::from_millis(5), fps60));
+        assert!(should_redraw(t0, t0 + Duration::from_millis(20), fps60));
+        assert!(should_redraw(t0, t0 + Duration::from_millis(9), fps120));
+        assert!(should_redraw(t0, t0 + Duration::from_millis(1), 0));
     }
 
     #[test]
