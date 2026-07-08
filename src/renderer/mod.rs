@@ -139,7 +139,7 @@ pub struct Renderer {
     pub cell_w: f32,
     pub cell_h: f32,
     // ponytail: flag del overlay. Se activa con set_status(), se desactiva
-    // cuando se llama con texto vacio o cuando se hace render() sin status.
+    // con texto vacio o tras duration_ms en render().
     status_active: bool,
     /// Instant en que se activo el status overlay, para auto-desaparicion.
     status_start: Option<Instant>,
@@ -1314,24 +1314,37 @@ pub(crate) struct FormattedStatusPill {
     pub pill_cols: usize,
 }
 
-fn truncate_to_width(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
+fn truncate_to_display_width(s: &str, max_cols: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    use unicode_width::UnicodeWidthStr;
+
+    if UnicodeWidthStr::width(s) <= max_cols {
         return s.to_string();
     }
-    let ellipsis_len = '…'.len_utf8();
-    if max_bytes <= ellipsis_len {
+    if max_cols == 0 {
+        return String::new();
+    }
+    if max_cols == 1 {
         return "…".to_string();
     }
-    let budget = max_bytes - ellipsis_len;
-    let mut end = budget.min(s.len());
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
+    let budget = max_cols - 1;
+    let mut end = 0;
+    let mut width = 0;
+    for (i, ch) in s.char_indices() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + cw > budget {
+            break;
+        }
+        width += cw;
+        end = i + ch.len_utf8();
     }
     format!("{}…", &s[..end])
 }
 
 /// Formatea un mensaje de status como pill centrado en `cols` columnas.
 fn format_status_pill(icon: &str, message: &str, cols: usize) -> FormattedStatusPill {
+    use unicode_width::UnicodeWidthStr;
+
     let prefix = if icon.is_empty() {
         String::new()
     } else {
@@ -1339,12 +1352,13 @@ fn format_status_pill(icon: &str, message: &str, cols: usize) -> FormattedStatus
     };
     let max_content = cols.saturating_sub(4);
     let full = format!("{prefix}{message}");
-    let content = if full.len() > max_content {
-        truncate_to_width(&full, max_content)
+    let content = if UnicodeWidthStr::width(full.as_str()) > max_content {
+        truncate_to_display_width(&full, max_content)
     } else {
         full
     };
-    let pill_cols = content.len() + 2;
+    let content_width = UnicodeWidthStr::width(content.as_str());
+    let pill_cols = content_width + 2;
     let left_pad = (cols.saturating_sub(pill_cols)) / 2;
     let right_pad = cols.saturating_sub(left_pad + pill_cols);
     let line = format!(
@@ -2515,21 +2529,38 @@ mod tests {
 
     #[test]
     fn test_status_text_formato_pill() {
+        use unicode_width::UnicodeWidthStr;
+
         let pill = format_status_pill("✓", "Copiado al clipboard", 80);
         assert!(pill.line.contains('✓'));
         assert!(pill.line.contains("Copiado al clipboard"));
-        assert_eq!(pill.line.len(), 80);
+        assert_eq!(UnicodeWidthStr::width(pill.line.as_str()), 80);
         assert!(pill.line.starts_with(' '));
+        let inner = " ✓ Copiado al clipboard ";
+        assert_eq!(
+            pill.pill_cols,
+            UnicodeWidthStr::width(inner),
+            "pill_cols usa ancho de visualizacion, no bytes"
+        );
     }
 
     #[test]
     fn test_status_text_truncado() {
+        use unicode_width::UnicodeWidthStr;
+
         let pill = format_status_pill(
             "✗",
             "mensaje muy largo que excede el ancho maximo del pill y debe truncarse con puntos suspensivos en un terminal de 40 columnas",
             40,
         );
-        assert!(pill.line.len() <= 40);
+        assert!(UnicodeWidthStr::width(pill.line.as_str()) <= 40);
         assert!(pill.line.contains('…'));
+    }
+
+    #[test]
+    fn truncate_to_display_width_respeta_limite_unicode() {
+        let s = truncate_to_display_width("✓ mensaje largo", 5);
+        assert!(unicode_width::UnicodeWidthStr::width(s.as_str()) <= 5);
+        assert!(s.ends_with('…'));
     }
 }

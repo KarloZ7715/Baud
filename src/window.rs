@@ -2482,7 +2482,7 @@ impl ApplicationHandler<UserEvent> for App {
                 match source {
                     ConfigSource::NotFound => {
                         renderer.set_status_with_config(
-                            "Sin config.toml, usando defaults",
+                            "Sin archivo de config, usando defaults",
                             "⚡",
                             &self.config.theme,
                             &self.config.status,
