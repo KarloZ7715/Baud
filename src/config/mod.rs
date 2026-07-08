@@ -63,6 +63,8 @@ pub struct Config {
     #[serde(default)]
     pub panes: PanesConfig,
     #[serde(default)]
+    pub status: StatusConfig,
+    #[serde(default)]
     pub keys: BTreeMap<String, String>,
 }
 
@@ -71,6 +73,34 @@ pub struct Config {
 pub struct NotificationsConfig {
     #[serde(default)]
     pub enabled: bool,
+}
+
+/// Apariencia del overlay de status (duración y colores opcionales).
+#[derive(Debug, Clone, Deserialize)]
+pub struct StatusConfig {
+    /// Duración del overlay en ms (`0` = sin auto-dismiss).
+    #[serde(default = "default_status_duration")]
+    pub duration_ms: u64,
+    /// Color de fondo opcional. Si es `None`, usa `theme.selection_bg`.
+    #[serde(default)]
+    pub bg_color: Option<String>,
+    /// Color de foreground opcional. Si es `None`, usa `theme.selection_fg`.
+    #[serde(default)]
+    pub fg_color: Option<String>,
+}
+
+fn default_status_duration() -> u64 {
+    2000
+}
+
+impl Default for StatusConfig {
+    fn default() -> Self {
+        Self {
+            duration_ms: default_status_duration(),
+            bg_color: None,
+            fg_color: None,
+        }
+    }
 }
 
 /// Configuración de selección de texto.
@@ -262,6 +292,8 @@ struct RawConfig {
     #[serde(default)]
     panes: PanesConfig,
     #[serde(default)]
+    status: StatusConfig,
+    #[serde(default)]
     keys: BTreeMap<String, String>,
 }
 
@@ -312,6 +344,7 @@ impl From<RawConfig> for Config {
             process: raw.process,
             notifications: raw.notifications,
             panes: raw.panes,
+            status: raw.status,
             keys: raw.keys,
         }
     }
@@ -1417,6 +1450,17 @@ dim_alpha = true
         let toml = "[notifications]\nenabled = true\n";
         let p: Config = toml::from_str(toml).unwrap();
         assert!(p.notifications.enabled);
+    }
+
+    #[test]
+    fn test_status_config_defaults() {
+        let cfg = Config::default();
+        assert_eq!(cfg.status.duration_ms, 2000);
+        assert!(cfg.status.bg_color.is_none());
+        assert!(cfg.status.fg_color.is_none());
+        let toml = "[status]\nduration_ms = 4000\n";
+        let p: Config = toml::from_str(toml).unwrap();
+        assert_eq!(p.status.duration_ms, 4000);
     }
 
     #[test]
