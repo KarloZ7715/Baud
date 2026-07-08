@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::ansi::Term;
 use crate::clipboard::{self, CopyTarget};
 use crate::config::watch::WatchState;
-use crate::config::{persist, Config, ProcessSection, StartupState};
+use crate::config::{persist, Config, ConfigSource, ProcessSection, StartupState};
 use crate::copy_mode::CopyModeState;
 use crate::event_loop::BlinkFocus;
 use crate::grid::Cell;
@@ -256,6 +256,8 @@ pub struct App {
     tab_anim_last: Instant,
     /// Reintenta sync de grids cuando un pane estaba bloqueado por el drain.
     pending_pane_sync: bool,
+    /// Feedback de carga de config pendiente hasta que exista renderer.
+    pending_config_source: Option<ConfigSource>,
     /// Pane activo para animacion de parpadeo (solo uno redibuja por blink).
     blink_focus: Arc<BlinkFocus>,
 }
@@ -294,6 +296,7 @@ impl App {
         config_watch: Arc<Mutex<WatchState>>,
         proxy: Option<EventLoopProxy<UserEvent>>,
         blink_focus: Arc<BlinkFocus>,
+        config_source: ConfigSource,
     ) -> Self {
         debug_assert!(!sessions.is_empty(), "App requiere al menos una sesion");
         let font_size = config.font.size;
@@ -337,6 +340,7 @@ impl App {
             tab_close_alpha: 0.0,
             tab_anim_last: Instant::now(),
             pending_pane_sync: false,
+            pending_config_source: Some(config_source),
             blink_focus,
         }
     }
@@ -1354,7 +1358,12 @@ impl App {
 
         // Mostrar feedback visual.
         if let Some(renderer) = &mut self.renderer {
-            renderer.set_status("[Copiado al clipboard]");
+            renderer.set_status_with_config(
+                "Copiado al clipboard",
+                "✓",
+                &self.config.theme,
+                &self.config.status,
+            );
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -1430,7 +1439,12 @@ impl App {
             guard.mark_dirty();
         }
         if let Some(renderer) = &mut self.renderer {
-            renderer.set_status(&format!("[Copiado ({})]", target.label()));
+            renderer.set_status_with_config(
+                &format!("Copiado ({})", target.label()),
+                "✓",
+                &self.config.theme,
+                &self.config.status,
+            );
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -2464,6 +2478,28 @@ impl ApplicationHandler<UserEvent> for App {
         ));
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_content_padding(wcfg.padding_x, wcfg.padding_y);
+            if let Some(source) = self.pending_config_source.take() {
+                match source {
+                    ConfigSource::NotFound => {
+                        renderer.set_status_with_config(
+                            "Sin config.toml, usando defaults",
+                            "⚡",
+                            &self.config.theme,
+                            &self.config.status,
+                        );
+                    }
+                    ConfigSource::ParseError { path, message } => {
+                        let msg = format!("Error en {path}: {message}");
+                        renderer.set_status_with_config(
+                            &msg,
+                            "✗",
+                            &self.config.theme,
+                            &self.config.status,
+                        );
+                    }
+                    ConfigSource::Ok => {}
+                }
+            }
         }
         tracing::info!("renderer inicializado");
 
@@ -3366,6 +3402,7 @@ mod tests {
             test_config_watch(),
             None,
             BlinkFocus::new(id),
+            ConfigSource::Ok,
         )
     }
 
@@ -3381,6 +3418,7 @@ mod tests {
             test_config_watch(),
             None,
             BlinkFocus::new(id_b),
+            ConfigSource::Ok,
         );
         app.focused = 1;
 
@@ -3400,6 +3438,7 @@ mod tests {
             test_config_watch(),
             None,
             BlinkFocus::new(id_b),
+            ConfigSource::Ok,
         );
         app.sessions[0].session.dirty = true;
         app.focused = 1;
@@ -3422,6 +3461,7 @@ mod tests {
             test_config_watch(),
             None,
             BlinkFocus::new(id0),
+            ConfigSource::Ok,
         );
         app.run_action(Action::GotoTab(2));
         assert_eq!(app.focused, 1);

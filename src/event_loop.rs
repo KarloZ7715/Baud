@@ -553,6 +553,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         config_watch,
         Some(proxy),
         blink_focus,
+        load_result.source,
     );
 
     if let Some(cmd) = startup_command {
