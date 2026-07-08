@@ -501,7 +501,8 @@ pub fn spawn_session(
 /// Crea el PTY, lanza el shell configurado, y arranca los hilos necesarios.
 /// Retorna cuando se cierra la ventana (event_loop.exit()).
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let app_config = Config::load();
+    let load_result = Config::load();
+    let app_config = load_result.config;
     let process_cfg = app_config.process_config();
     let startup_command = process_cfg.startup_command.clone();
 

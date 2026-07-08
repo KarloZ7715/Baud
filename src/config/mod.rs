@@ -756,8 +756,26 @@ pub fn parse_hex(s: &str) -> (u8, u8, u8) {
 }
 
 // ---------------------------------------------------------------------------
-// Config::load()
+// Carga de config con metadata de origen
 // ---------------------------------------------------------------------------
+
+/// Origen de la configuración cargada desde disco.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// Archivo encontrado y parseado correctamente.
+    Ok,
+    /// Ningún archivo de config encontrado en los paths, usando defaults.
+    NotFound,
+    /// Archivo encontrado pero el TOML tiene errores de sintaxis o no se pudo leer.
+    ParseError { path: String, message: String },
+}
+
+/// Resultado de carga: config resuelta más metadata de origen.
+#[derive(Debug, Clone)]
+pub struct LoadResult {
+    pub config: Config,
+    pub source: ConfigSource,
+}
 
 impl Config {
     /// Límite efectivo de scrollback en líneas (`usize::MAX` si `unlimited`).
@@ -859,42 +877,66 @@ impl Config {
     ///
     /// Si el archivo existe pero no puede parsearse, se emite una advertencia
     /// con `tracing::warn!` y se retorna la configuración por defecto.
-    pub fn load() -> Self {
-        // 1. directorio de configuración del sistema
+    pub fn load() -> LoadResult {
         let paths = [
             dirs::config_dir()
                 .map(|d| d.join("baud").join("config.toml"))
                 .unwrap_or_default(),
             std::path::PathBuf::from("baud.toml"),
         ];
+        Self::load_from_paths(&paths)
+    }
 
-        for path in &paths {
-            if path.exists() {
-                match std::fs::read_to_string(path) {
-                    Ok(content) => match toml::from_str::<Config>(&content) {
-                        Ok(config) => return config,
-                        Err(e) => {
-                            tracing::warn!(
-                                "Config: error al parsear '{}': {}. Usando defaults.",
-                                path.display(),
-                                e
-                            );
-                            return Self::default();
-                        }
-                    },
+    /// Carga config desde una lista de paths en orden de prioridad.
+    pub fn load_from_paths(paths: &[std::path::PathBuf]) -> LoadResult {
+        for path in paths {
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+            if !path.exists() {
+                continue;
+            }
+            let path_display = path.display().to_string();
+            match std::fs::read_to_string(path) {
+                Ok(content) => match toml::from_str::<Config>(&content) {
+                    Ok(config) => {
+                        return LoadResult {
+                            config,
+                            source: ConfigSource::Ok,
+                        };
+                    }
                     Err(e) => {
                         tracing::warn!(
-                            "Config: no se pudo leer '{}': {}. Usando defaults.",
-                            path.display(),
-                            e
+                            "Config: error al parsear '{path_display}': {e}. Usando defaults."
                         );
-                        return Self::default();
+                        return LoadResult {
+                            config: Self::default(),
+                            source: ConfigSource::ParseError {
+                                path: path_display,
+                                message: e.to_string(),
+                            },
+                        };
                     }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        "Config: no se pudo leer '{path_display}': {e}. Usando defaults."
+                    );
+                    return LoadResult {
+                        config: Self::default(),
+                        source: ConfigSource::ParseError {
+                            path: path_display,
+                            message: e.to_string(),
+                        },
+                    };
                 }
             }
         }
 
-        Self::default()
+        LoadResult {
+            config: Self::default(),
+            source: ConfigSource::NotFound,
+        }
     }
 
     /// Carga config desde disco para hot-reload.
@@ -1375,6 +1417,27 @@ dim_alpha = true
         let toml = "[notifications]\nenabled = true\n";
         let p: Config = toml::from_str(toml).unwrap();
         assert!(p.notifications.enabled);
+    }
+
+    #[test]
+    fn test_load_result_describe_failure() {
+        let r = Config::load_from_paths(&["/tmp/baud_no_existe.toml".into()]);
+        assert!(matches!(r.source, ConfigSource::NotFound));
+
+        use std::io::Write;
+        let dir = std::env::temp_dir().join("baud_test_config");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("invalid.toml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "theme = [invalid").unwrap();
+        let r = Config::load_from_paths(&[path]);
+        assert!(matches!(r.source, ConfigSource::ParseError { .. }));
+
+        let valid = dir.join("valid.toml");
+        let mut f = std::fs::File::create(&valid).unwrap();
+        writeln!(f, "theme = \"claude-dark\"").unwrap();
+        let r = Config::load_from_paths(&[valid]);
+        assert!(matches!(r.source, ConfigSource::Ok));
     }
 
     #[test]
