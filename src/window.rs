@@ -2424,6 +2424,25 @@ impl ApplicationHandler<UserEvent> for App {
             ));
             return;
         }
+        if self.fps_overlay_visible && self.config.debug.fps_counter_enabled {
+            let now = Instant::now();
+            if let Some(window) = &self.window {
+                let interval_nanos = self.redraw_interval_nanos.load(Ordering::Relaxed);
+                if interval_nanos == 0 {
+                    window.request_redraw();
+                    return;
+                }
+                let interval = Duration::from_nanos(interval_nanos);
+                let deadline = self.last_gui_redraw.map(|t| t + interval).unwrap_or(now);
+                if now >= deadline {
+                    window.request_redraw();
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(now + interval));
+                } else {
+                    event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+                }
+                return;
+            }
+        }
         let Some(deadline) = self.copy_on_select_deadline else {
             return;
         };
@@ -2812,9 +2831,6 @@ impl ApplicationHandler<UserEvent> for App {
                             &self.config.theme,
                             &self.config.status,
                         );
-                    }
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
                     }
                 }
                 let render_ms = t_render.elapsed().as_millis();
