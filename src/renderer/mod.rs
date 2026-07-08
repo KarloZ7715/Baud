@@ -34,6 +34,10 @@ pub const BOX_GLYPH_ID_BASE: u16 = 0xF000;
 pub const BOX_GLYPH_ID_COUNT: u16 = 0xA0;
 
 use limits::{custom_pixels, MAX_CUSTOM_GLYPH_PIXELS};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Instant;
 
 /// Alpha del clear de frame (0..=1), lineal con `window.opacity`.
 pub fn frame_clear_alpha(window_opacity: f32) -> f64 {
@@ -88,18 +92,18 @@ pub struct PreeditState {
 
 /// Un pane del layout activo a dibujar en un frame.
 pub struct PaneRender {
+    pub session_id: crate::session::SessionId,
     pub term: Arc<Mutex<Term>>,
     pub rect: crate::layout::Rect,
     pub focused: bool,
+    /// Si false, reutiliza display list cacheada salvo que falte cache.
+    pub rebuild: bool,
 }
-
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Instant;
 
 use crate::ansi::{Color, Term};
 use crate::config::{parse_hex, FontConfig, GlyphOffset, ThemeConfig};
 use crate::grid::{Cell, DamageSnapshot};
+use crate::session::SessionId;
 use crate::theme_picker::ThemePickerState;
 use glyphon::cosmic_text::Hinting;
 use winit::window::Window;
@@ -155,8 +159,8 @@ pub struct Renderer {
     cell_metrics: CellMetrics,
     /// Cache de glifos para el renderer celda-determinista.
     glyph_cache: GlyphCache,
-    /// Display list reutilizada entre frames.
-    display_list: DisplayList,
+    /// Display list por sesion, reutilizada entre frames para damage parcial.
+    pane_display_lists: HashMap<SessionId, DisplayList>,
     line_height: f32,
     glyph_offset: GlyphOffset,
     builtin_box_drawing: bool,
@@ -371,7 +375,7 @@ impl Renderer {
             font_size,
             cell_metrics,
             glyph_cache: GlyphCache::new(),
-            display_list: DisplayList::default(),
+            pane_display_lists: HashMap::new(),
             line_height,
             glyph_offset,
             builtin_box_drawing,
@@ -471,7 +475,7 @@ impl Renderer {
         builtin::clear_cache();
         self.reset_text_atlas();
         self.swash_cache = glyphon::SwashCache::new();
-        self.display_list.clear();
+        self.pane_display_lists.clear();
     }
 
     /// Recrea atlas y text renderer (p. ej. al alternar métricas terminal/picker).
@@ -527,7 +531,7 @@ impl Renderer {
         picker: Option<&ThemePickerState>,
         preedit: Option<PreeditState>,
         tabs: Option<&TabBarLayout>,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<SessionId>, String> {
         let t0 = Instant::now();
 
         let t_frame_start = Instant::now();
@@ -535,11 +539,11 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Success(tex)
             | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return Ok(())
+                return Ok(Vec::new());
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return Ok(());
+                return Ok(Vec::new());
             }
             wgpu::CurrentSurfaceTexture::Validation => {
                 return Err("error: validacion de surface fallo".to_string());
@@ -555,7 +559,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         if let Some(picker_state) = picker {
-            return self.render_picker_only(
+            self.render_picker_only(
                 picker_state,
                 theme,
                 bold_is_bright,
@@ -564,7 +568,8 @@ impl Renderer {
                 encoder,
                 t0,
                 get_frame_us,
-            );
+            )?;
+            return Ok(Vec::new());
         }
 
         let focused = panes
@@ -573,13 +578,11 @@ impl Renderer {
             .or_else(|| panes.first())
             .expect("render requiere al menos un pane");
 
-        let overrides = {
-            let guard = focused
-                .term
-                .lock()
-                .map_err(|e| format!("term mutex poisoned: {e}"))?;
-            ColorOverrides::from_term(&guard)
-        };
+        let overrides = focused
+            .term
+            .try_lock()
+            .map(|guard| ColorOverrides::from_term(&guard))
+            .unwrap_or_default();
         let palette = Palette {
             theme,
             overrides: &overrides,
@@ -595,32 +598,62 @@ impl Renderer {
 
         let t_build = Instant::now();
         let mut all_custom_glyphs = Vec::new();
+        let mut updated_panes = Vec::with_capacity(panes.len());
+        let mut rebuild_count = 0usize;
         for pane in panes {
-            let mut term = pane
-                .term
-                .lock()
-                .map_err(|e| format!("term mutex poisoned: {e}"))?;
             let mut pane_metrics = base_metrics;
             pane_metrics.padding_x += pane.rect.x as f32 * self.cell_w;
             pane_metrics.padding_y += pane.rect.y as f32 * self.cell_h;
-            self.append_pane_glyphs(
-                &mut term,
-                pane.focused,
-                &pane_metrics,
-                pane.rect.cols,
-                pane.rect.rows,
-                theme,
-                bold_is_bright,
-                &mut all_custom_glyphs,
-            )?;
+
+            if !pane.rebuild
+                && self.emit_cached_pane_glyphs(
+                    pane.session_id,
+                    &pane_metrics,
+                    &palette,
+                    theme,
+                    &mut all_custom_glyphs,
+                )?
+            {
+                updated_panes.push(pane.session_id);
+                continue;
+            }
+
+            rebuild_count += 1;
+            match pane.term.try_lock() {
+                Ok(mut term) => {
+                    self.append_pane_glyphs(
+                        pane.session_id,
+                        &mut term,
+                        pane.focused,
+                        &pane_metrics,
+                        pane.rect.cols,
+                        pane.rect.rows,
+                        theme,
+                        bold_is_bright,
+                        &mut all_custom_glyphs,
+                    )?;
+                    updated_panes.push(pane.session_id);
+                }
+                Err(_) => {
+                    if self.emit_cached_pane_glyphs(
+                        pane.session_id,
+                        &pane_metrics,
+                        &palette,
+                        theme,
+                        &mut all_custom_glyphs,
+                    )? {
+                        updated_panes.push(pane.session_id);
+                    }
+                }
+            }
         }
 
-        let (dr, dg, db) = palette.rgb(Color::BrightBlack, false);
-        let divider_color = glyphon::Color::rgb(dr, dg, db);
-        push_divider_glyphs(
-            &layout.divider_rects(terminal_area),
+        push_pane_chrome(
+            terminal_area,
+            layout,
+            panes,
             &base_metrics,
-            divider_color,
+            &palette,
             &mut all_custom_glyphs,
         );
 
@@ -702,32 +735,30 @@ impl Renderer {
         }
 
         if let Some(focused_pane) = panes.iter().find(|p| p.focused) {
-            let guard = focused_pane
-                .term
-                .lock()
-                .map_err(|e| format!("term mutex poisoned: {e}"))?;
-            if let Some(ref search_state) = guard.search {
-                crate::search_overlay::fill_bar_buffer(
-                    search_state,
-                    &mut self.font_system,
-                    &self.font_family,
-                    &mut self.search_bar_buffer,
-                    cell_w,
-                    self.config.width as f32,
-                    self.cell_h,
-                    theme,
-                    &mut self.contrast_cache,
-                );
-                crate::search_overlay::push_bar_overlay(
-                    &self.search_bar_buffer,
-                    &mut extra_areas,
-                    &mut all_custom_glyphs,
-                    self.config.width,
-                    self.config.height,
-                    self.cell_h,
-                    theme,
-                    &mut self.contrast_cache,
-                );
+            if let Ok(guard) = focused_pane.term.try_lock() {
+                if let Some(ref search_state) = guard.search {
+                    crate::search_overlay::fill_bar_buffer(
+                        search_state,
+                        &mut self.font_system,
+                        &self.font_family,
+                        &mut self.search_bar_buffer,
+                        cell_w,
+                        self.config.width as f32,
+                        self.cell_h,
+                        theme,
+                        &mut self.contrast_cache,
+                    );
+                    crate::search_overlay::push_bar_overlay(
+                        &self.search_bar_buffer,
+                        &mut extra_areas,
+                        &mut all_custom_glyphs,
+                        self.config.width,
+                        self.config.height,
+                        self.cell_h,
+                        theme,
+                        &mut self.contrast_cache,
+                    );
+                }
             }
         }
 
@@ -784,7 +815,7 @@ impl Renderer {
         self.frame_count += 1;
         if self.frame_count.is_multiple_of(30) {
             tracing::info!(
-                "[RENDER_PERF] frame={} mode=cell total={:.0}us get_frame={:.0}us build={:.0}us prepare={:.0}us gpu={:.0}us panes={}",
+                "[RENDER_PERF] frame={} mode=cell total={:.0}us get_frame={:.0}us build={:.0}us prepare={:.0}us gpu={:.0}us panes={} rebuild={}",
                 self.frame_count,
                 total_us,
                 get_frame_us,
@@ -792,16 +823,55 @@ impl Renderer {
                 prepare_us,
                 gpu_us,
                 panes.len(),
+                rebuild_count,
             );
         }
 
-        Ok(())
+        Ok(updated_panes)
+    }
+
+    pub fn has_pane_cache(&self, id: SessionId) -> bool {
+        self.pane_display_lists
+            .get(&id)
+            .is_some_and(DisplayList::is_populated)
+    }
+
+    fn emit_cached_pane_glyphs(
+        &mut self,
+        session_id: SessionId,
+        metrics: &CellMetrics,
+        palette: &Palette<'_>,
+        theme: &ThemeConfig,
+        out: &mut Vec<glyphon::CustomGlyph>,
+    ) -> Result<bool, String> {
+        let Some(list) = self.pane_display_lists.get(&session_id) else {
+            return Ok(false);
+        };
+        if !list.is_populated() {
+            return Ok(false);
+        }
+        let mut pane_glyphs = Vec::new();
+        CellRenderer::build_custom_glyphs(
+            list,
+            metrics,
+            palette,
+            theme.dim_alpha,
+            &self.font_family,
+            &mut self.glyph_cache,
+            &mut self.font_system,
+            &mut self.swash_cache,
+            &mut self.contrast_cache,
+            &mut pane_glyphs,
+        )?;
+        out.extend(pane_glyphs);
+        Ok(true)
     }
 
     /// Construye custom glyphs de un pane y los agrega a `out`.
     #[allow(clippy::too_many_arguments)]
     fn append_pane_glyphs(
         &mut self,
+        session_id: SessionId,
         term: &mut Term,
         track_selection: bool,
         metrics: &CellMetrics,
@@ -824,6 +894,12 @@ impl Renderer {
             damage = DamageSnapshot::Full;
         }
         if !damage.is_full() && !damage.has_any_dirty() {
+            let needs_blink = track_selection && term.has_blink_stuff();
+            if !needs_blink
+                && self.emit_cached_pane_glyphs(session_id, metrics, &palette, theme, out)?
+            {
+                return Ok(());
+            }
             damage = DamageSnapshot::Full;
         }
 
@@ -894,11 +970,29 @@ impl Renderer {
             .collect();
 
         self.prepare_glyph_metrics(metrics);
-        let blink_on = crate::renderer::blink_on(
-            term.last_blink_reset.elapsed(),
-            std::time::Duration::from_millis(term.blink_interval_ms),
-        );
-        self.display_list.clear();
+        let blink_on = if track_selection {
+            crate::renderer::blink_on(
+                term.last_blink_reset.elapsed(),
+                std::time::Duration::from_millis(term.blink_interval_ms),
+            )
+        } else {
+            true
+        };
+
+        let list = self.pane_display_lists.entry(session_id).or_default();
+        if damage.is_full() {
+            list.clear();
+        }
+        let bg_cap = list.bg_quads.capacity();
+        let line_cap = list.line_quads.capacity();
+        let glyph_cap = list.text_glyphs.capacity();
+        list.bg_quads
+            .reserve(bg_cap.min(limits::MAX_GRID_DIM * limits::MAX_GRID_DIM));
+        list.line_quads
+            .reserve(line_cap.min(limits::MAX_GRID_DIM * limits::MAX_GRID_DIM));
+        list.text_glyphs
+            .reserve(glyph_cap.min(limits::MAX_GRID_DIM * limits::MAX_GRID_DIM));
+
         let mut font_system = if self.ligatures {
             Some(&mut self.font_system)
         } else {
@@ -910,7 +1004,7 @@ impl Renderer {
             None
         };
         DisplayListBuilder::build(
-            &mut self.display_list,
+            list,
             term,
             metrics,
             &palette,
@@ -931,7 +1025,7 @@ impl Renderer {
 
         let mut pane_glyphs = Vec::new();
         CellRenderer::build_custom_glyphs(
-            &self.display_list,
+            list,
             metrics,
             &palette,
             theme.dim_alpha,
@@ -1155,33 +1249,154 @@ impl Renderer {
     }
 }
 
-fn push_divider_glyphs(
-    dividers: &[crate::layout::Rect],
-    metrics: &CellMetrics,
+/// Tamano maximo de losa para `CustomGlyph` solido (limite de `safe_mask_len`).
+const SOLID_QUAD_MAX_TILE: f32 = 512.0;
+
+/// Particiona un rectangulo en losas `(x, y, w, h)` relativas al origen.
+fn solid_quad_tiles(width: f32, height: f32) -> Vec<(f32, f32, f32, f32)> {
+    let mut tiles = Vec::new();
+    if width <= 0.0 || height <= 0.0 {
+        return tiles;
+    }
+    let mut y0 = 0.0;
+    while y0 < height - f32::EPSILON {
+        let th = (height - y0).clamp(1.0, SOLID_QUAD_MAX_TILE);
+        let mut x0 = 0.0;
+        while x0 < width - f32::EPSILON {
+            let tw = (width - x0).clamp(1.0, SOLID_QUAD_MAX_TILE);
+            tiles.push((x0, y0, tw, th));
+            x0 += tw;
+        }
+        y0 += th;
+    }
+    tiles
+}
+
+fn push_solid_quad(
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
     color: glyphon::Color,
     out: &mut Vec<glyphon::CustomGlyph>,
 ) {
-    let gw = metrics.geometry.cell_w as f32;
-    let gh = metrics.geometry.cell_h as f32;
-    for div in dividers {
-        let width = limits::clamp_custom_dimension(gw * div.cols as f32, gw, div.cols as u32);
-        let height = limits::clamp_custom_dimension(gh * div.rows as f32, gh, div.rows as u32);
-        if limits::custom_pixels(width, height) > limits::MAX_CUSTOM_GLYPH_PIXELS {
+    for (x0, y0, tw, th) in solid_quad_tiles(width, height) {
+        if limits::custom_pixels(tw, th) > limits::MAX_CUSTOM_GLYPH_PIXELS {
             continue;
         }
-        let left = div.x as f32 * gw + metrics.padding_x;
-        let top = div.y as f32 * gh + metrics.padding_y;
         out.push(glyphon::CustomGlyph {
             id: SOLID_MASK_GLYPH_ID,
-            left,
-            top,
-            width,
-            height,
+            left: left + x0,
+            top: top + y0,
+            width: tw,
+            height: th,
             color: Some(color),
             snap_to_physical_pixel: true,
             metadata: 1,
         });
     }
+}
+
+/// Chrome de panes: divisores finos (estilo wezterm/kitty), borde inset del foco e
+/// overlay sutil en panes inactivos (inspirado en wezterm inactive_pane_brightness).
+fn push_pane_chrome(
+    area: crate::layout::Rect,
+    layout: &crate::layout::Layout,
+    panes: &[PaneRender],
+    metrics: &CellMetrics,
+    palette: &Palette<'_>,
+    out: &mut Vec<glyphon::CustomGlyph>,
+) {
+    if panes.len() <= 1 {
+        return;
+    }
+
+    const DIVIDER_ALPHA: u8 = 55;
+    const INACTIVE_OVERLAY_ALPHA: u8 = 48;
+    const FOCUS_INSET_ALPHA: u8 = 100;
+    const FOCUS_INSET_PX: f32 = 1.0;
+
+    let (ir, ig, ib) = palette.rgb(Color::BrightBlack, false);
+    let divider = glyphon::Color::rgba(ir, ig, ib, DIVIDER_ALPHA);
+
+    let (wr, wg, wb) = palette.rgb(Color::BrightWhite, false);
+    let focus_border = glyphon::Color::rgba(wr, wg, wb, FOCUS_INSET_ALPHA);
+
+    for pane in panes {
+        if !pane.focused {
+            push_inactive_overlay(&pane.rect, metrics, INACTIVE_OVERLAY_ALPHA, out);
+        }
+    }
+
+    for div in layout.divider_rects(area) {
+        push_thin_divider(&div, metrics, divider, out);
+    }
+
+    for pane in panes {
+        if pane.focused {
+            push_focus_inset(&pane.rect, metrics, focus_border, FOCUS_INSET_PX, out);
+        }
+    }
+}
+
+fn push_thin_divider(
+    div: &crate::layout::Rect,
+    metrics: &CellMetrics,
+    color: glyphon::Color,
+    out: &mut Vec<glyphon::CustomGlyph>,
+) {
+    // Usar cell_w/h flotantes (mismo origen que el grid de terminales), no geometry
+    // entera: en panes grandes el redondeo por celda dejaba overlays/bordes cortos.
+    let gw = metrics.cell_w;
+    let gh = metrics.cell_h;
+    if div.cols == 1 && div.rows > 0 {
+        let height = gh * div.rows as f32;
+        let left = div.x as f32 * gw + metrics.padding_x + (gw * 0.5 - 0.5).max(0.0);
+        let top = div.y as f32 * gh + metrics.padding_y;
+        push_solid_quad(left, top, 1.0, height, color, out);
+    } else if div.rows == 1 && div.cols > 0 {
+        let width = gw * div.cols as f32;
+        let left = div.x as f32 * gw + metrics.padding_x;
+        let top = div.y as f32 * gh + metrics.padding_y + (gh * 0.5 - 0.5).max(0.0);
+        push_solid_quad(left, top, width, 1.0, color, out);
+    }
+}
+
+fn push_focus_inset(
+    rect: &crate::layout::Rect,
+    metrics: &CellMetrics,
+    color: glyphon::Color,
+    inset: f32,
+    out: &mut Vec<glyphon::CustomGlyph>,
+) {
+    let gw = metrics.cell_w;
+    let gh = metrics.cell_h;
+    let left = rect.x as f32 * gw + metrics.padding_x + inset;
+    let top = rect.y as f32 * gh + metrics.padding_y + inset;
+    let w = rect.cols as f32 * gw - inset * 2.0;
+    let h = rect.rows as f32 * gh - inset * 2.0;
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    push_solid_quad(left, top, w, inset, color, out);
+    push_solid_quad(left, top + h - inset, w, inset, color, out);
+    push_solid_quad(left, top, inset, h, color, out);
+    push_solid_quad(left + w - inset, top, inset, h, color, out);
+}
+
+fn push_inactive_overlay(
+    rect: &crate::layout::Rect,
+    metrics: &CellMetrics,
+    alpha: u8,
+    out: &mut Vec<glyphon::CustomGlyph>,
+) {
+    let gw = metrics.cell_w;
+    let gh = metrics.cell_h;
+    let left = rect.x as f32 * gw + metrics.padding_x;
+    let top = rect.y as f32 * gh + metrics.padding_y;
+    let w = rect.cols as f32 * gw;
+    let h = rect.rows as f32 * gh;
+    push_solid_quad(left, top, w, h, glyphon::Color::rgba(0, 0, 0, alpha), out);
 }
 
 #[expect(
@@ -2168,5 +2383,21 @@ mod tests {
             bg_quads.is_empty(),
             "Filas vacias no deben generar CustomGlyph"
         );
+    }
+
+    #[test]
+    fn solid_quad_tiles_linea_ancha_no_se_recorta_a_512() {
+        let tiles = solid_quad_tiles(1200.0, 1.0);
+        assert_eq!(tiles.len(), 3);
+        let total_w: f32 = tiles.iter().map(|(_, _, w, _)| *w).sum();
+        assert!((total_w - 1200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn solid_quad_tiles_cubren_overlay_grande() {
+        let tiles = solid_quad_tiles(960.0, 540.0);
+        let total_area: f32 = tiles.iter().map(|(_, _, w, h)| w * h).sum();
+        assert!((total_area - 960.0 * 540.0).abs() < 1.0);
+        assert!(tiles.iter().all(|(_, _, w, h)| *w <= 512.0 && *h <= 512.0));
     }
 }

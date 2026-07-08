@@ -96,6 +96,13 @@ impl DisplayList {
         self.cursor = None;
         self.cursor_bars.clear();
     }
+
+    pub fn is_populated(&self) -> bool {
+        !self.bg_quads.is_empty()
+            || !self.text_glyphs.is_empty()
+            || self.cursor.is_some()
+            || !self.cursor_bars.is_empty()
+    }
 }
 
 /// Elige negro o blanco para texto sobre un fondo RGB dado (luminancia).
