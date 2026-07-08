@@ -16,7 +16,7 @@ use crate::config::Config;
 use crate::grid::{DEFAULT_COLS, DEFAULT_ROWS};
 use crate::pty::{self, PtyCommand, PtyCommandSender};
 use crate::session::{Session, SessionId};
-use crate::window::{App, UserEvent};
+use crate::window::{App, SessionHost, UserEvent};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use nix::sys::eventfd::{EfdFlags, EventFd};
@@ -215,9 +215,7 @@ fn read_master_available(
 /// celdas SGR 5 que parpadean, marca el term dirty y envia `RedrawNeeded` por
 /// el proxy. cuando el parpadeo esta desactivado (`blink_interval_ms == 0` o
 /// nada que parpadear), el hilo duerme sin enviar eventos.
-// ponytail: hilo detached; muere al salir del proceso. stop flag si se quiere
-// shutdown explicito, sobra para una app interactiva.
-fn spawn_blink_timer(
+pub(crate) fn spawn_blink_timer(
     term: Arc<Mutex<Term>>,
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     session_id: SessionId,
@@ -485,18 +483,18 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
 
-    let SpawnedSession {
-        session,
-        drain_handle,
-        pty_handle,
-    } = spawn_session(
+    let spawned = spawn_session(
         &app_config,
         DEFAULT_ROWS as u16,
         DEFAULT_COLS as u16,
         proxy.clone(),
     )?;
 
-    spawn_blink_timer(Arc::clone(&session.term), proxy.clone(), session.id);
+    spawn_blink_timer(
+        Arc::clone(&spawned.session.term),
+        proxy.clone(),
+        spawned.session.id,
+    );
 
     let config_watch = Arc::new(Mutex::new(crate::config::watch::WatchState::new(
         crate::config::watch::config_mtime(),
@@ -520,7 +518,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let mut app = App::new(vec![session], app_config, config_watch);
+    let mut app = App::new(
+        vec![SessionHost::from_spawned(spawned)],
+        app_config,
+        config_watch,
+        Some(proxy),
+    );
 
     if let Some(cmd) = startup_command {
         app.send_startup_input(format!("{cmd}\n").into_bytes());
@@ -530,8 +533,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     event_loop.run_app(&mut app)?;
 
-    let _ = pty_handle.join();
-    let _ = drain_handle.join();
+    app.join_session_threads();
 
     Ok(())
 }

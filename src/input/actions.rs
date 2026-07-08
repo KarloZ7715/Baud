@@ -16,6 +16,11 @@ pub enum Action {
     FontZoomOut,
     FontZoomReset,
     ToggleThemePicker,
+    NewTab,
+    CloseTab,
+    NextTab,
+    PrevTab,
+    GotoTab(u8),
 }
 
 /// Mapa de combinaciones de tecla a acciones del terminal.
@@ -71,6 +76,11 @@ impl Default for Keybindings {
             alt: true,
             ..Mods::NONE
         };
+        let alt_ctrl = Mods {
+            ctrl: true,
+            alt: true,
+            ..Mods::NONE
+        };
         Self {
             bindings: vec![
                 (Key::Char('c'), cs, Action::Copy),
@@ -80,7 +90,11 @@ impl Default for Keybindings {
                 (Key::Char('='), ctrl, Action::FontZoomIn),
                 (Key::Char('-'), ctrl, Action::FontZoomOut),
                 (Key::Char('0'), ctrl, Action::FontZoomReset),
-                (Key::Char('t'), cs, Action::ToggleThemePicker),
+                (Key::Char('t'), alt_ctrl, Action::ToggleThemePicker),
+                (Key::Char('t'), cs, Action::NewTab),
+                (Key::Char('w'), cs, Action::CloseTab),
+                (Key::PageDown, ctrl, Action::NextTab),
+                (Key::PageUp, ctrl, Action::PrevTab),
                 (Key::Up, cs, Action::ScrollLineUp),
                 (Key::Down, cs, Action::ScrollLineDown),
                 (Key::Up, alt, Action::ScrollPageUp),
@@ -167,6 +181,13 @@ pub fn parse_action(s: &str) -> Option<Action> {
         "font_zoom_out" => Action::FontZoomOut,
         "font_zoom_reset" => Action::FontZoomReset,
         "toggle_theme_picker" => Action::ToggleThemePicker,
+        "new_tab" => Action::NewTab,
+        "close_tab" => Action::CloseTab,
+        "next_tab" => Action::NextTab,
+        "prev_tab" => Action::PrevTab,
+        s if let Some(n) = s.strip_prefix("goto_tab_").and_then(|d| d.parse().ok()) => {
+            Action::GotoTab(n)
+        }
         _ => return None,
     })
 }
@@ -254,15 +275,39 @@ mod tests {
     #[test]
     fn test_default_bindings_theme_picker() {
         let kb = Keybindings::default();
+        let alt_ctrl = Mods {
+            ctrl: true,
+            alt: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            kb.lookup(Key::Char('t'), alt_ctrl),
+            Some(Action::ToggleThemePicker)
+        );
         let cs = Mods {
             ctrl: true,
             shift: true,
             ..Mods::NONE
         };
-        assert_eq!(
-            kb.lookup(Key::Char('t'), cs),
-            Some(Action::ToggleThemePicker)
-        );
+        assert_eq!(kb.lookup(Key::Char('t'), cs), Some(Action::NewTab));
+    }
+
+    #[test]
+    fn default_bindings_tabs() {
+        let kb = Keybindings::default();
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(kb.lookup(Key::Char('t'), cs), Some(Action::NewTab));
+        assert_eq!(kb.lookup(Key::Char('w'), cs), Some(Action::CloseTab));
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        assert_eq!(kb.lookup(Key::PageDown, ctrl), Some(Action::NextTab));
+        assert_eq!(kb.lookup(Key::PageUp, ctrl), Some(Action::PrevTab));
     }
 
     #[test]

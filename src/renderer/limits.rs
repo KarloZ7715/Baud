@@ -38,6 +38,8 @@ pub fn clamp_grid_dimension(value: usize) -> usize {
 }
 
 /// Calcula filas/columnas del grid de forma segura (cell_w/h nunca 0).
+///
+/// `reserved_rows` resta filas del area util (p. ej. barra de tabs).
 #[inline]
 pub fn compute_grid_dims(
     win_w: u32,
@@ -46,13 +48,18 @@ pub fn compute_grid_dims(
     cell_h: f32,
     padding_x: u16,
     padding_y: u16,
+    reserved_rows: usize,
 ) -> (usize, usize) {
     let inner_w = win_w.saturating_sub(2 * u32::from(padding_x)).max(1);
     let inner_h = win_h.saturating_sub(2 * u32::from(padding_y)).max(1);
     let cw = cell_w.max(1.0);
     let ch = cell_h.max(1.0);
+    let reserved_h = (reserved_rows as f32 * ch)
+        .min(inner_h as f32 - ch)
+        .max(0.0);
+    let usable_h = (inner_h as f32 - reserved_h).max(ch);
     let cols = clamp_grid_dimension((inner_w as f32 / cw).max(1.0) as usize);
-    let rows = clamp_grid_dimension((inner_h as f32 / ch).max(1.0) as usize);
+    let rows = clamp_grid_dimension((usable_h / ch).max(1.0) as usize);
     (rows, cols)
 }
 
@@ -96,8 +103,8 @@ mod tests {
 
     #[test]
     fn compute_grid_dims_respects_padding() {
-        let (rows_no_pad, cols_no_pad) = compute_grid_dims(800, 600, 10.0, 20.0, 0, 0);
-        let (rows_pad, cols_pad) = compute_grid_dims(800, 600, 10.0, 20.0, 8, 6);
+        let (rows_no_pad, cols_no_pad) = compute_grid_dims(800, 600, 10.0, 20.0, 0, 0, 0);
+        let (rows_pad, cols_pad) = compute_grid_dims(800, 600, 10.0, 20.0, 8, 6, 0);
         assert!(cols_pad < cols_no_pad);
         assert!(rows_pad < rows_no_pad);
         assert_eq!(cols_no_pad, 80);
@@ -125,7 +132,7 @@ mod tests {
 
     #[test]
     fn zero_cell_w_does_not_explode_grid_dims() {
-        let (rows, cols) = compute_grid_dims(3840, 2160, 0.0, 0.0, 0, 0);
+        let (rows, cols) = compute_grid_dims(3840, 2160, 0.0, 0.0, 0, 0, 0);
         assert!(cols <= MAX_GRID_DIM);
         assert!(rows <= MAX_GRID_DIM);
         assert!(cols > 0);
@@ -149,5 +156,12 @@ mod tests {
     fn clamp_grid_dimension_never_returns_zero() {
         assert_eq!(clamp_grid_dimension(0), 1);
         assert_eq!(clamp_grid_dimension(usize::MAX), MAX_GRID_DIM);
+    }
+
+    #[test]
+    fn compute_grid_dims_reserved_rows() {
+        let (rows_full, _) = compute_grid_dims(800, 600, 10.0, 20.0, 0, 0, 0);
+        let (rows_tab, _) = compute_grid_dims(800, 600, 10.0, 20.0, 0, 0, 1);
+        assert_eq!(rows_tab, rows_full.saturating_sub(1));
     }
 }

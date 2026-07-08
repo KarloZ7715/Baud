@@ -13,12 +13,14 @@ pub mod limits;
 mod metrics;
 mod palette;
 mod runs;
+mod tab_bar;
 mod terminal_fallback;
 
 pub use blink::blink_on;
 pub use contrast::{adjust_fg, ContrastCache};
 pub use decorations::SOLID_MASK_GLYPH_ID;
 pub use palette::{ColorOverrides, Palette};
+pub use tab_bar::{compute_layout, shorten_tab_title, tab_index_at, TabBarLayout};
 
 /// Base de ids reservados para box/block glyphs programaticos (sobre ids de cache).
 pub const BOX_GLYPH_ID_BASE: u16 = 0xF000;
@@ -147,6 +149,10 @@ pub struct Renderer {
     ligatures: bool,
     /// Cache de ajuste de contraste por frame.
     contrast_cache: ContrastCache,
+    /// Desplazamiento vertical extra del grid (p. ej. fila de tabs).
+    grid_top_offset: f32,
+    /// Buffer de texto para la barra de tabs.
+    tab_bar_buffer: glyphon::Buffer,
 }
 
 impl Renderer {
@@ -203,6 +209,8 @@ impl Renderer {
 
         self.bg_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
         Self::configure_buffer(&mut self.font_system, &mut self.bg_buffer, self.cell_w);
+        self.tab_bar_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+        Self::configure_buffer(&mut self.font_system, &mut self.tab_bar_buffer, self.cell_w);
     }
 
     pub fn cell_w(&self) -> f32 {
@@ -280,6 +288,8 @@ impl Renderer {
         Self::configure_buffer(&mut font_system, &mut picker_footer_buffer, picker_m.cell_w);
         let mut bg_buffer = glyphon::Buffer::new(&mut font_system, metrics);
         Self::configure_buffer(&mut font_system, &mut bg_buffer, cell_w);
+        let mut tab_bar_buffer = glyphon::Buffer::new(&mut font_system, metrics);
+        Self::configure_buffer(&mut font_system, &mut tab_bar_buffer, cell_w);
 
         Self {
             device,
@@ -316,6 +326,8 @@ impl Renderer {
             builtin_box_drawing,
             ligatures,
             contrast_cache: ContrastCache::default(),
+            grid_top_offset: 0.0,
+            tab_bar_buffer,
         }
     }
 
@@ -343,6 +355,19 @@ impl Renderer {
 
     pub fn content_padding(&self) -> (f32, f32) {
         (self.cell_metrics.padding_x, self.cell_metrics.padding_y)
+    }
+
+    /// Padding del area de celdas del terminal (incluye offset de barra de tabs).
+    pub fn grid_padding(&self) -> (f32, f32) {
+        (
+            self.cell_metrics.padding_x,
+            self.cell_metrics.padding_y + self.grid_top_offset,
+        )
+    }
+
+    /// Reserva espacio vertical encima del grid para la barra de tabs.
+    pub fn set_grid_top_offset(&mut self, offset: f32) {
+        self.grid_top_offset = offset.max(0.0);
     }
 
     /// Aplica un nuevo tamano de fuente y recalcula metricas de celda.
@@ -426,6 +451,10 @@ impl Renderer {
 
     /// Renderiza el estado del `term` en la surface.
     #[tracing::instrument(skip(self, term, preedit))]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "render frame needs term, theme, overlays"
+    )]
     pub fn render(
         &mut self,
         term: &mut Term,
@@ -434,6 +463,7 @@ impl Renderer {
         window_opacity: f32,
         picker: Option<&ThemePickerState>,
         preedit: Option<PreeditState>,
+        tabs: Option<&TabBarLayout>,
     ) -> Result<(), String> {
         let t0 = Instant::now();
 
@@ -538,6 +568,7 @@ impl Renderer {
             bold_is_bright,
             picker,
             preedit,
+            tabs,
         )
     }
 
@@ -563,6 +594,7 @@ impl Renderer {
         bold_is_bright: bool,
         picker: Option<&ThemePickerState>,
         preedit: Option<PreeditState>,
+        tabs: Option<&TabBarLayout>,
     ) -> Result<(), String> {
         if let Some(picker_state) = picker {
             return self.render_picker_only(
@@ -615,7 +647,8 @@ impl Renderer {
 
         let t_build = Instant::now();
         self.contrast_cache.clear();
-        let frame_metrics = self.cell_metrics;
+        let mut frame_metrics = self.cell_metrics;
+        frame_metrics.padding_y += self.grid_top_offset;
         self.prepare_glyph_metrics(&frame_metrics);
         let blink_on = crate::renderer::blink_on(
             term.last_blink_reset.elapsed(),
@@ -650,7 +683,7 @@ impl Renderer {
         DisplayListBuilder::build(
             &mut self.display_list,
             term,
-            &self.cell_metrics,
+            &frame_metrics,
             palette,
             theme.dim_alpha,
             row_sources,
@@ -670,7 +703,7 @@ impl Renderer {
         let mut custom_glyphs = Vec::new();
         CellRenderer::build_custom_glyphs(
             &self.display_list,
-            &self.cell_metrics,
+            &frame_metrics,
             palette,
             theme.dim_alpha,
             &self.font_family,
@@ -701,12 +734,29 @@ impl Renderer {
         }
 
         let cell_w = self.cell_w;
+        let cell_h = self.cell_h;
         let mut extra_areas: Vec<glyphon::TextArea<'_>> = Vec::with_capacity(4);
+        if let Some(layout) = tabs.filter(|l| !l.segments.is_empty()) {
+            push_tab_bar(
+                layout,
+                palette,
+                theme,
+                &self.cell_metrics,
+                self.config.width,
+                cell_w,
+                cell_h,
+                &self.font_family,
+                &mut self.font_system,
+                &mut self.tab_bar_buffer,
+                &mut extra_areas,
+                &mut custom_glyphs,
+            );
+        }
         if let Some(pre) = preedit.as_ref().filter(|p| !p.text.is_empty()) {
             push_preedit_overlay(
                 pre,
                 palette,
-                &self.cell_metrics,
+                &frame_metrics,
                 self.config.width,
                 self.cell_w,
                 self.cell_h,
@@ -1031,6 +1081,91 @@ impl Renderer {
         self.status_start = Some(Instant::now());
         self.status_active = true;
     }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "tab bar shares overlay layout metrics with status bar"
+)]
+fn push_tab_bar<'a>(
+    layout: &TabBarLayout,
+    palette: &Palette<'_>,
+    theme: &ThemeConfig,
+    cell_metrics: &CellMetrics,
+    surface_w: u32,
+    cell_w: f32,
+    cell_h: f32,
+    font_family: &str,
+    font_system: &mut glyphon::FontSystem,
+    tab_bar_buffer: &'a mut glyphon::Buffer,
+    extra_areas: &mut Vec<glyphon::TextArea<'a>>,
+    custom_glyphs: &mut Vec<glyphon::CustomGlyph>,
+) {
+    let (pad_x, pad_y) = (cell_metrics.padding_x, cell_metrics.padding_y);
+    let (fg_r, fg_g, fg_b) = palette.rgb(Color::Default, false);
+    let fg = glyphon::Color::rgb(fg_r, fg_g, fg_b);
+    let default_attrs = glyphon::Attrs::new().family(resolve_family(font_family));
+    let sel_bg = selection_bg_glyphon(theme);
+    let (inr, ing, inb) = parse_hex(&theme.black);
+    let inactive_bg = glyphon::Color::rgba(inr, ing, inb, 220);
+    let accent_hex = theme.selection_bg.as_deref().unwrap_or(&theme.cursor);
+    let (ar, ag, ab) = parse_hex(accent_hex);
+    let active_accent = glyphon::Color::rgb(ar, ag, ab);
+
+    for seg in &layout.segments {
+        custom_glyphs.push(glyphon::CustomGlyph {
+            id: SOLID_MASK_GLYPH_ID,
+            left: seg.x_px,
+            top: pad_y,
+            width: seg.width_px,
+            height: cell_h,
+            color: Some(if seg.active { sel_bg } else { inactive_bg }),
+            snap_to_physical_pixel: true,
+            metadata: 0,
+        });
+        if seg.active {
+            custom_glyphs.push(glyphon::CustomGlyph {
+                id: SOLID_MASK_GLYPH_ID,
+                left: seg.x_px,
+                top: pad_y + cell_h - 2.0,
+                width: seg.width_px,
+                height: 2.0,
+                color: Some(active_accent),
+                snap_to_physical_pixel: true,
+                metadata: 0,
+            });
+        }
+    }
+
+    let mut attrs = glyphon::Attrs::new().family(resolve_family(font_family));
+    attrs = attrs.color(fg);
+    tab_bar_buffer.set_rich_text(
+        font_system,
+        vec![(layout.line.as_str(), attrs)],
+        &default_attrs,
+        glyphon::Shaping::Advanced,
+        None,
+    );
+    let bar_w = (surface_w as f32 - pad_x).max(cell_w);
+    tab_bar_buffer.set_size(font_system, Some(bar_w), Some(cell_h));
+    tab_bar_buffer.set_monospace_width(font_system, Some(cell_w));
+    tab_bar_buffer.set_hinting(font_system, Hinting::Enabled);
+    tab_bar_buffer.shape_until_scroll(font_system, false);
+
+    extra_areas.push(glyphon::TextArea {
+        buffer: tab_bar_buffer,
+        left: layout.segments.first().map(|s| s.x_px).unwrap_or(pad_x),
+        top: pad_y,
+        scale: 1.0,
+        bounds: glyphon::TextBounds {
+            left: 0,
+            top: 0,
+            right: bar_w as i32,
+            bottom: cell_h as i32,
+        },
+        default_color: fg,
+        custom_glyphs: &[],
+    });
 }
 
 #[expect(
