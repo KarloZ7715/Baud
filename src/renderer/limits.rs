@@ -39,8 +39,12 @@ pub fn clamp_grid_dimension(value: usize) -> usize {
 
 /// Calcula filas/columnas del grid de forma segura (cell_w/h nunca 0).
 ///
-/// `reserved_rows` resta filas del area util (p. ej. barra de tabs).
+/// `reserved_extra_px` suma pixeles ademas de las filas reservadas (p. ej. hueco de tabs).
 #[inline]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dimensiones de ventana y grid en un solo helper"
+)]
 pub fn compute_grid_dims(
     win_w: u32,
     win_h: u32,
@@ -49,12 +53,13 @@ pub fn compute_grid_dims(
     padding_x: u16,
     padding_y: u16,
     reserved_rows: usize,
+    reserved_extra_px: f32,
 ) -> (usize, usize) {
     let inner_w = win_w.saturating_sub(2 * u32::from(padding_x)).max(1);
     let inner_h = win_h.saturating_sub(2 * u32::from(padding_y)).max(1);
     let cw = cell_w.max(1.0);
     let ch = cell_h.max(1.0);
-    let reserved_h = (reserved_rows as f32 * ch)
+    let reserved_h = (reserved_rows as f32 * ch + reserved_extra_px.max(0.0))
         .min(inner_h as f32 - ch)
         .max(0.0);
     let usable_h = (inner_h as f32 - reserved_h).max(ch);
@@ -103,8 +108,8 @@ mod tests {
 
     #[test]
     fn compute_grid_dims_respects_padding() {
-        let (rows_no_pad, cols_no_pad) = compute_grid_dims(800, 600, 10.0, 20.0, 0, 0, 0);
-        let (rows_pad, cols_pad) = compute_grid_dims(800, 600, 10.0, 20.0, 8, 6, 0);
+        let (rows_no_pad, cols_no_pad) = compute_grid_dims(800, 600, 10.0, 20.0, 0, 0, 0, 0.0);
+        let (rows_pad, cols_pad) = compute_grid_dims(800, 600, 10.0, 20.0, 8, 6, 0, 0.0);
         assert!(cols_pad < cols_no_pad);
         assert!(rows_pad < rows_no_pad);
         assert_eq!(cols_no_pad, 80);
@@ -132,7 +137,7 @@ mod tests {
 
     #[test]
     fn zero_cell_w_does_not_explode_grid_dims() {
-        let (rows, cols) = compute_grid_dims(3840, 2160, 0.0, 0.0, 0, 0, 0);
+        let (rows, cols) = compute_grid_dims(3840, 2160, 0.0, 0.0, 0, 0, 0, 0.0);
         assert!(cols <= MAX_GRID_DIM);
         assert!(rows <= MAX_GRID_DIM);
         assert!(cols > 0);
@@ -160,8 +165,10 @@ mod tests {
 
     #[test]
     fn compute_grid_dims_reserved_rows() {
-        let (rows_full, _) = compute_grid_dims(800, 600, 10.0, 20.0, 0, 0, 0);
-        let (rows_tab, _) = compute_grid_dims(800, 600, 10.0, 20.0, 0, 0, 1);
+        let (rows_full, _) = compute_grid_dims(800, 600, 10.0, 20.0, 0, 0, 0, 0.0);
+        let (rows_tab, _) = compute_grid_dims(800, 600, 10.0, 20.0, 0, 0, 1, 0.0);
         assert_eq!(rows_tab, rows_full.saturating_sub(1));
+        let (rows_tab_gap, _) = compute_grid_dims(800, 600, 10.0, 20.0, 0, 0, 1, 3.0);
+        assert!(rows_tab_gap <= rows_tab);
     }
 }

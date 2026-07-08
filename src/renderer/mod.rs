@@ -20,7 +20,13 @@ pub use blink::blink_on;
 pub use contrast::{adjust_fg, ContrastCache};
 pub use decorations::SOLID_MASK_GLYPH_ID;
 pub use palette::{ColorOverrides, Palette};
-pub use tab_bar::{compute_layout, shorten_tab_title, tab_index_at, TabBarLayout};
+pub use tab_bar::{
+    build_inactive_hover_chrome, build_segment_chrome, build_tab_track, compute_layout,
+    format_tab_label, push_close_scrub, segment_close_left_px, segment_title_label,
+    shorten_tab_title, tab_bar_height_px, tab_bar_inner_width, tab_chrome_reserve_px, tab_close_at,
+    tab_index_at, TabBarLayout, TabBarMouseState, TabSegment, TAB_BAR_HEIGHT_ROWS,
+    TAB_CLOSE_WIDTH_CELLS, TAB_CONTENT_GAP_PX, TAB_LABEL_PAD_CELLS,
+};
 
 /// Base de ids reservados para box/block glyphs programaticos (sobre ids de cache).
 pub const BOX_GLYPH_ID_BASE: u16 = 0xF000;
@@ -153,6 +159,18 @@ pub struct Renderer {
     grid_top_offset: f32,
     /// Buffer de texto para la barra de tabs.
     tab_bar_buffer: glyphon::Buffer,
+    /// Segundo buffer para indicador de scroll derecho.
+    tab_scroll_buffer: glyphon::Buffer,
+    /// Boton × de la tab en hover (una sola visible por frame).
+    tab_close_buffer: glyphon::Buffer,
+    /// Buffers por tab visible.
+    tab_segment_buffers: Vec<glyphon::Buffer>,
+    /// Chrome por segmento (slice estable por frame).
+    tab_bar_seg_glyphs: Vec<Vec<glyphon::CustomGlyph>>,
+    /// Pista de fondo de la barra de tabs.
+    tab_bar_track_glyphs: Vec<glyphon::CustomGlyph>,
+    /// Chrome del boton × (scrub acorde a tab activa/inactiva).
+    tab_close_glyphs: Vec<glyphon::CustomGlyph>,
 }
 
 impl Renderer {
@@ -172,6 +190,15 @@ impl Renderer {
     ) {
         buffer.set_monospace_width(font_system, Some(cell_w));
         buffer.set_hinting(font_system, Hinting::Enabled);
+    }
+
+    fn configure_tab_buffer(
+        font_system: &mut glyphon::FontSystem,
+        buffer: &mut glyphon::Buffer,
+        cell_w: f32,
+    ) {
+        Self::configure_buffer(font_system, buffer, cell_w);
+        buffer.set_wrap(font_system, glyphon::cosmic_text::Wrap::None);
     }
 
     fn reset_aux_buffers(&mut self) {
@@ -211,6 +238,18 @@ impl Renderer {
         Self::configure_buffer(&mut self.font_system, &mut self.bg_buffer, self.cell_w);
         self.tab_bar_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
         Self::configure_buffer(&mut self.font_system, &mut self.tab_bar_buffer, self.cell_w);
+        self.tab_scroll_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+        Self::configure_tab_buffer(
+            &mut self.font_system,
+            &mut self.tab_scroll_buffer,
+            self.cell_w,
+        );
+        self.tab_close_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+        Self::configure_tab_buffer(
+            &mut self.font_system,
+            &mut self.tab_close_buffer,
+            self.cell_w,
+        );
     }
 
     pub fn cell_w(&self) -> f32 {
@@ -290,6 +329,10 @@ impl Renderer {
         Self::configure_buffer(&mut font_system, &mut bg_buffer, cell_w);
         let mut tab_bar_buffer = glyphon::Buffer::new(&mut font_system, metrics);
         Self::configure_buffer(&mut font_system, &mut tab_bar_buffer, cell_w);
+        let mut tab_scroll_buffer = glyphon::Buffer::new(&mut font_system, metrics);
+        Self::configure_tab_buffer(&mut font_system, &mut tab_scroll_buffer, cell_w);
+        let mut tab_close_buffer = glyphon::Buffer::new(&mut font_system, metrics);
+        Self::configure_tab_buffer(&mut font_system, &mut tab_close_buffer, cell_w);
 
         Self {
             device,
@@ -328,6 +371,12 @@ impl Renderer {
             contrast_cache: ContrastCache::default(),
             grid_top_offset: 0.0,
             tab_bar_buffer,
+            tab_scroll_buffer,
+            tab_close_buffer,
+            tab_segment_buffers: Vec::new(),
+            tab_bar_seg_glyphs: Vec::new(),
+            tab_bar_track_glyphs: Vec::new(),
+            tab_close_glyphs: Vec::new(),
         }
     }
 
@@ -735,21 +784,28 @@ impl Renderer {
 
         let cell_w = self.cell_w;
         let cell_h = self.cell_h;
-        let mut extra_areas: Vec<glyphon::TextArea<'_>> = Vec::with_capacity(4);
+        let mut extra_areas: Vec<glyphon::TextArea<'_>> = Vec::with_capacity(8);
         if let Some(layout) = tabs.filter(|l| !l.segments.is_empty()) {
             push_tab_bar(
                 layout,
-                palette,
                 theme,
                 &self.cell_metrics,
                 self.config.width,
+                self.config.height,
+                self.font_size,
                 cell_w,
                 cell_h,
                 &self.font_family,
                 &mut self.font_system,
+                &self.bg_buffer,
                 &mut self.tab_bar_buffer,
+                &mut self.tab_scroll_buffer,
+                &mut self.tab_close_buffer,
+                &mut self.tab_close_glyphs,
+                &mut self.tab_segment_buffers,
+                &mut self.tab_bar_seg_glyphs,
+                &mut self.tab_bar_track_glyphs,
                 &mut extra_areas,
-                &mut custom_glyphs,
             );
         }
         if let Some(pre) = preedit.as_ref().filter(|p| !p.text.is_empty()) {
@@ -1089,83 +1145,227 @@ impl Renderer {
 )]
 fn push_tab_bar<'a>(
     layout: &TabBarLayout,
-    palette: &Palette<'_>,
     theme: &ThemeConfig,
     cell_metrics: &CellMetrics,
     surface_w: u32,
+    surface_h: u32,
+    font_size: f32,
     cell_w: f32,
     cell_h: f32,
     font_family: &str,
     font_system: &mut glyphon::FontSystem,
-    tab_bar_buffer: &'a mut glyphon::Buffer,
+    empty_buffer: &'a glyphon::Buffer,
+    scroll_left_buffer: &'a mut glyphon::Buffer,
+    scroll_right_buffer: &'a mut glyphon::Buffer,
+    close_buffer: &'a mut glyphon::Buffer,
+    close_glyphs: &'a mut Vec<glyphon::CustomGlyph>,
+    segment_buffers: &'a mut Vec<glyphon::Buffer>,
+    seg_glyphs: &'a mut Vec<Vec<glyphon::CustomGlyph>>,
+    track_glyphs: &'a mut Vec<glyphon::CustomGlyph>,
     extra_areas: &mut Vec<glyphon::TextArea<'a>>,
-    custom_glyphs: &mut Vec<glyphon::CustomGlyph>,
 ) {
     let (pad_x, pad_y) = (cell_metrics.padding_x, cell_metrics.padding_y);
-    let (fg_r, fg_g, fg_b) = palette.rgb(Color::Default, false);
-    let fg = glyphon::Color::rgb(fg_r, fg_g, fg_b);
-    let default_attrs = glyphon::Attrs::new().family(resolve_family(font_family));
-    let sel_bg = selection_bg_glyphon(theme);
-    let (inr, ing, inb) = parse_hex(&theme.black);
-    let inactive_bg = glyphon::Color::rgba(inr, ing, inb, 220);
-    let accent_hex = theme.selection_bg.as_deref().unwrap_or(&theme.cursor);
-    let (ar, ag, ab) = parse_hex(accent_hex);
-    let active_accent = glyphon::Color::rgb(ar, ag, ab);
+    let bar_h = crate::renderer::tab_bar::tab_bar_height_px(cell_h);
+    let inner_w = crate::renderer::tab_bar::tab_bar_inner_width(surface_w as f32, pad_x);
+    let full_bounds = glyphon::TextBounds {
+        left: 0,
+        top: 0,
+        right: surface_w as i32,
+        bottom: surface_h as i32,
+    };
 
-    for seg in &layout.segments {
-        custom_glyphs.push(glyphon::CustomGlyph {
-            id: SOLID_MASK_GLYPH_ID,
-            left: seg.x_px,
-            top: pad_y,
-            width: seg.width_px,
-            height: cell_h,
-            color: Some(if seg.active { sel_bg } else { inactive_bg }),
-            snap_to_physical_pixel: true,
-            metadata: 0,
-        });
-        if seg.active {
-            custom_glyphs.push(glyphon::CustomGlyph {
-                id: SOLID_MASK_GLYPH_ID,
-                left: seg.x_px,
-                top: pad_y + cell_h - 2.0,
-                width: seg.width_px,
-                height: 2.0,
-                color: Some(active_accent),
-                snap_to_physical_pixel: true,
-                metadata: 0,
-            });
-        }
-    }
-
-    let mut attrs = glyphon::Attrs::new().family(resolve_family(font_family));
-    attrs = attrs.color(fg);
-    tab_bar_buffer.set_rich_text(
-        font_system,
-        vec![(layout.line.as_str(), attrs)],
-        &default_attrs,
-        glyphon::Shaping::Advanced,
-        None,
-    );
-    let bar_w = (surface_w as f32 - pad_x).max(cell_w);
-    tab_bar_buffer.set_size(font_system, Some(bar_w), Some(cell_h));
-    tab_bar_buffer.set_monospace_width(font_system, Some(cell_w));
-    tab_bar_buffer.set_hinting(font_system, Hinting::Enabled);
-    tab_bar_buffer.shape_until_scroll(font_system, false);
-
+    crate::renderer::build_tab_track(inner_w, bar_h, theme, track_glyphs);
     extra_areas.push(glyphon::TextArea {
-        buffer: tab_bar_buffer,
-        left: layout.segments.first().map(|s| s.x_px).unwrap_or(pad_x),
+        buffer: empty_buffer,
+        left: pad_x,
         top: pad_y,
         scale: 1.0,
-        bounds: glyphon::TextBounds {
-            left: 0,
-            top: 0,
-            right: bar_w as i32,
-            bottom: cell_h as i32,
-        },
-        default_color: fg,
-        custom_glyphs: &[],
+        bounds: full_bounds,
+        default_color: glyphon::Color::rgb(0xff, 0xff, 0xff),
+        custom_glyphs: track_glyphs,
     });
+
+    let (fr, fg, fb) = parse_hex(&theme.foreground);
+    let inactive_fg = glyphon::Color::rgba(fr, fg, fb, 120);
+    let active_fg = glyphon::Color::rgb(fr, fg, fb);
+    let family = resolve_family(font_family);
+    let default_attrs = glyphon::Attrs::new().family(family);
+    let metrics = glyphon::Metrics::new(font_size, cell_h);
+
+    while segment_buffers.len() < layout.segments.len() {
+        let mut buf = glyphon::Buffer::new(font_system, metrics);
+        Renderer::configure_tab_buffer(font_system, &mut buf, cell_w);
+        segment_buffers.push(buf);
+    }
+    while seg_glyphs.len() < layout.segments.len() {
+        seg_glyphs.push(Vec::new());
+    }
+
+    let close_cell_w = cell_w * TAB_CLOSE_WIDTH_CELLS as f32;
+    let mut close_target: Option<&TabSegment> = None;
+    let close_alpha = layout.mouse.close_alpha;
+
+    for (seg, (buf, chrome)) in layout
+        .segments
+        .iter()
+        .zip(segment_buffers.iter_mut().zip(seg_glyphs.iter_mut()))
+    {
+        let show_close = layout.mouse.close_tab == Some(seg.index)
+            && close_alpha > 0.02
+            && seg.width_cells > TAB_CLOSE_WIDTH_CELLS;
+        if show_close {
+            close_target = Some(seg);
+        }
+
+        chrome.clear();
+        if seg.active {
+            crate::renderer::build_segment_chrome(seg.width_px, bar_h, true, theme, chrome);
+        } else if show_close {
+            crate::renderer::build_inactive_hover_chrome(
+                seg.width_px,
+                bar_h,
+                close_alpha,
+                theme,
+                chrome,
+            );
+        }
+        if !chrome.is_empty() {
+            extra_areas.push(glyphon::TextArea {
+                buffer: empty_buffer,
+                left: seg.x_px,
+                top: pad_y,
+                scale: 1.0,
+                bounds: full_bounds,
+                default_color: glyphon::Color::rgb(0xff, 0xff, 0xff),
+                custom_glyphs: chrome,
+            });
+        }
+
+        let label = crate::renderer::segment_title_label(
+            seg.index + 1,
+            &seg.title_short,
+            seg.width_cells,
+            show_close,
+        );
+        let label_pad_px = cell_w * TAB_LABEL_PAD_CELLS as f32;
+        let text_w_px = if show_close {
+            seg.width_px - label_pad_px * 2.0 - close_cell_w
+        } else {
+            seg.width_px - label_pad_px * 2.0
+        };
+        let body_attrs = if seg.active {
+            glyphon::Attrs::new().family(family).color(active_fg)
+        } else {
+            glyphon::Attrs::new().family(family).color(inactive_fg)
+        };
+        buf.set_rich_text(
+            font_system,
+            vec![(label.as_str(), body_attrs)],
+            &default_attrs,
+            glyphon::Shaping::Advanced,
+            None,
+        );
+        buf.set_size(font_system, Some(text_w_px.max(cell_w)), Some(cell_h));
+        buf.set_monospace_width(font_system, Some(cell_w));
+        buf.set_hinting(font_system, Hinting::Enabled);
+        buf.shape_until_scroll(font_system, false);
+
+        extra_areas.push(glyphon::TextArea {
+            buffer: buf,
+            left: seg.x_px + label_pad_px,
+            top: pad_y,
+            scale: 1.0,
+            bounds: full_bounds,
+            default_color: if seg.active { active_fg } else { inactive_fg },
+            custom_glyphs: &[],
+        });
+    }
+
+    if let Some(seg) = close_target {
+        let close_a = (close_alpha.clamp(0.0, 1.0) * 255.0) as u8;
+        let close_attrs = glyphon::Attrs::new()
+            .family(family)
+            .color(glyphon::Color::rgba(fr, fg, fb, close_a.max(140)));
+        close_glyphs.clear();
+        crate::renderer::push_close_scrub(
+            bar_h,
+            cell_w,
+            close_alpha,
+            seg.active,
+            theme,
+            close_glyphs,
+        );
+        close_buffer.set_rich_text(
+            font_system,
+            vec![("×", close_attrs)],
+            &default_attrs,
+            glyphon::Shaping::Advanced,
+            None,
+        );
+        close_buffer.set_size(font_system, Some(close_cell_w), Some(cell_h));
+        close_buffer.set_monospace_width(font_system, Some(cell_w));
+        close_buffer.set_hinting(font_system, Hinting::Enabled);
+        close_buffer.shape_until_scroll(font_system, false);
+        extra_areas.push(glyphon::TextArea {
+            buffer: close_buffer,
+            left: crate::renderer::segment_close_left_px(seg, cell_w),
+            top: pad_y,
+            scale: 1.0,
+            bounds: full_bounds,
+            default_color: glyphon::Color::rgba(fr, fg, fb, close_a.max(140)),
+            custom_glyphs: close_glyphs,
+        });
+    }
+
+    let ind_cells = crate::renderer::tab_bar::SCROLL_INDICATOR_CELLS;
+    let ind_w = ind_cells as f32 * cell_w;
+    let dim = glyphon::Attrs::new()
+        .family(family)
+        .color(glyphon::Color::rgba(fr, fg, fb, 100));
+
+    if layout.show_scroll_left {
+        scroll_left_buffer.set_rich_text(
+            font_system,
+            vec![("‹", dim.clone())],
+            &default_attrs,
+            glyphon::Shaping::Advanced,
+            None,
+        );
+        scroll_left_buffer.set_size(font_system, Some(ind_w), Some(cell_h));
+        scroll_left_buffer.set_monospace_width(font_system, Some(cell_w));
+        scroll_left_buffer.shape_until_scroll(font_system, false);
+        extra_areas.push(glyphon::TextArea {
+            buffer: scroll_left_buffer,
+            left: pad_x,
+            top: pad_y,
+            scale: 1.0,
+            bounds: full_bounds,
+            default_color: inactive_fg,
+            custom_glyphs: &[],
+        });
+    }
+    if layout.show_scroll_right {
+        scroll_right_buffer.set_rich_text(
+            font_system,
+            vec![("›", dim)],
+            &default_attrs,
+            glyphon::Shaping::Advanced,
+            None,
+        );
+        scroll_right_buffer.set_size(font_system, Some(ind_w), Some(cell_h));
+        scroll_right_buffer.set_monospace_width(font_system, Some(cell_w));
+        scroll_right_buffer.shape_until_scroll(font_system, false);
+        let right_x = (surface_w as f32 - pad_x - ind_w).max(pad_x);
+        extra_areas.push(glyphon::TextArea {
+            buffer: scroll_right_buffer,
+            left: right_x,
+            top: pad_y,
+            scale: 1.0,
+            bounds: full_bounds,
+            default_color: inactive_fg,
+            custom_glyphs: &[],
+        });
+    }
 }
 
 #[expect(

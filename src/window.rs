@@ -20,7 +20,7 @@ use crate::grid::Cell;
 use crate::input::actions::{normalize_binding_key, Action, Keybindings};
 use crate::input::keymap::{self, Key as KKey, KeyEventKind, KeyModes, Mods};
 use crate::pty::PtyCommand;
-use crate::renderer::{compute_layout, PreeditState, Renderer, TabBarLayout};
+use crate::renderer::{compute_layout, tab_bar_height_px, PreeditState, Renderer, TabBarLayout};
 use crate::search::SearchState;
 use crate::selection::{Selection, SelectionMode, SelectionPoint};
 use crate::session::{Session, SessionId};
@@ -239,6 +239,14 @@ pub struct App {
     pending_exit: bool,
     /// Sesiones cerradas cuyos hilos se unen al salir de la app.
     detached_hosts: Vec<SessionHost>,
+    /// Tab bajo el cursor en la barra (indice de sesion).
+    tab_hover: Option<usize>,
+    /// Tab que renderiza el boton × (incluye fade-out).
+    tab_close_tab: Option<usize>,
+    /// Opacidad animada del boton × (0..1).
+    tab_close_alpha: f32,
+    /// Marca de tiempo para interpolar el fade del ×.
+    tab_anim_last: Instant,
 }
 
 fn allowed_open_url(url: &str) -> bool {
@@ -307,6 +315,10 @@ impl App {
             proxy,
             pending_exit: false,
             detached_hosts: Vec::new(),
+            tab_hover: None,
+            tab_close_tab: None,
+            tab_close_alpha: 0.0,
+            tab_anim_last: Instant::now(),
         }
     }
 
@@ -600,6 +612,11 @@ impl App {
         reflow: bool,
     ) -> (usize, usize, usize, usize) {
         let reserved = self.tab_bar_rows();
+        let chrome_extra = if reserved > 0 {
+            crate::renderer::TAB_CONTENT_GAP_PX
+        } else {
+            0.0
+        };
         let (new_rows, new_cols) = crate::renderer::limits::compute_grid_dims(
             width,
             height,
@@ -608,9 +625,15 @@ impl App {
             self.config.window.padding_x,
             self.config.window.padding_y,
             reserved,
+            chrome_extra,
         );
         if let Some(renderer) = &mut self.renderer {
-            renderer.set_grid_top_offset(reserved as f32 * cell_h);
+            let chrome_px = if reserved > 0 {
+                crate::renderer::tab_chrome_reserve_px(cell_h)
+            } else {
+                0.0
+            };
+            renderer.set_grid_top_offset(chrome_px);
         }
         let (old_rows, old_cols) = if let Ok(guard) = self.focused_term().lock() {
             let active = guard.active_grid();
@@ -642,7 +665,11 @@ impl App {
     }
 
     fn tab_bar_rows(&self) -> usize {
-        usize::from(self.sessions.len() > 1)
+        if self.sessions.len() > 1 {
+            crate::renderer::TAB_BAR_HEIGHT_ROWS
+        } else {
+            0
+        }
     }
 
     fn config_with_cwd(&self, cwd: Option<String>) -> Config {
@@ -676,7 +703,7 @@ impl App {
             .map(|h| h.session.title.clone())
             .collect();
         let (pad_x, _) = renderer.content_padding();
-        let bar_w = self.window_width - pad_x;
+        let bar_w = crate::renderer::tab_bar_inner_width(self.window_width, pad_x);
         Some(compute_layout(
             &titles,
             self.focused,
@@ -684,6 +711,66 @@ impl App {
             bar_w,
             renderer.cell_w(),
         ))
+    }
+
+    fn tab_bar_layout_with_mouse(&self, renderer: &Renderer) -> Option<TabBarLayout> {
+        let mut layout = self.tab_bar_layout(renderer)?;
+        layout.mouse.hover_index = self.tab_hover;
+        layout.mouse.close_tab = self.tab_close_tab;
+        layout.mouse.close_alpha = self.tab_close_alpha;
+        Some(layout)
+    }
+
+    fn tick_tab_close_fade(&mut self) -> bool {
+        if self.sessions.len() <= 1 {
+            self.tab_hover = None;
+            self.tab_close_tab = None;
+            if self.tab_close_alpha > 0.0 {
+                self.tab_close_alpha = 0.0;
+                return true;
+            }
+            return false;
+        }
+        if self.tab_hover.is_some() {
+            return false;
+        }
+        let Some(_) = self.tab_close_tab else {
+            return false;
+        };
+        let prev = self.tab_close_alpha;
+        let dt = self.tab_anim_last.elapsed().as_secs_f32().min(0.05);
+        self.tab_anim_last = Instant::now();
+        self.tab_close_alpha += (0.0 - self.tab_close_alpha) * (32.0 * dt).min(1.0);
+        if self.tab_close_alpha < 0.02 {
+            self.tab_close_alpha = 0.0;
+            self.tab_close_tab = None;
+        }
+        (self.tab_close_alpha - prev).abs() > 0.005
+    }
+
+    fn update_tab_hover(&mut self, x: f64, y: f64) -> bool {
+        let Some(renderer) = &self.renderer else {
+            return false;
+        };
+        if !self.is_in_tab_bar_row(y, renderer) {
+            if self.tab_hover.is_some() {
+                self.tab_hover = None;
+                self.tab_anim_last = Instant::now();
+                return true;
+            }
+            return false;
+        }
+        let new_hover = self.tab_index_at(x, y, renderer);
+        if new_hover != self.tab_hover {
+            self.tab_hover = new_hover;
+            self.tab_anim_last = Instant::now();
+            if let Some(idx) = new_hover {
+                self.tab_close_tab = Some(idx);
+                self.tab_close_alpha = 1.0;
+            }
+            return true;
+        }
+        false
     }
 
     fn new_tab(&mut self) {
@@ -727,16 +814,29 @@ impl App {
     }
 
     fn close_tab(&mut self) {
+        self.close_tab_at(self.focused);
+    }
+
+    fn close_tab_at(&mut self, index: usize) {
+        if index >= self.sessions.len() {
+            return;
+        }
         if self.sessions.len() <= 1 {
             let _ = self.sessions[0].session.pty_tx.send(PtyCommand::Shutdown);
             self.pending_exit = true;
             return;
         }
-        let idx = self.focused;
-        let host = self.sessions.remove(idx);
+        let host = self.sessions.remove(index);
         let _ = host.session.pty_tx.send(PtyCommand::Shutdown);
         self.detached_hosts.push(host);
-        self.focused = self.focused.min(self.sessions.len().saturating_sub(1));
+        if self.focused > index {
+            self.focused -= 1;
+        } else if self.focused == index {
+            self.focused = index.min(self.sessions.len().saturating_sub(1));
+        }
+        self.tab_hover = None;
+        self.tab_close_tab = None;
+        self.tab_close_alpha = 0.0;
         self.apply_focused_window_title();
         self.sync_after_tab_change();
     }
@@ -769,9 +869,22 @@ impl App {
     }
 
     fn tab_index_at(&self, x: f64, y: f64, renderer: &Renderer) -> Option<usize> {
-        let layout = self.tab_bar_layout(renderer)?;
+        let layout = self.tab_bar_layout_with_mouse(renderer)?;
         let (_, pad_y) = renderer.content_padding();
-        crate::renderer::tab_index_at(&layout, x, y, pad_y, renderer.cell_h())
+        crate::renderer::tab_index_at(&layout, x, y, pad_y, tab_bar_height_px(renderer.cell_h()))
+    }
+
+    fn tab_close_at(&self, x: f64, y: f64, renderer: &Renderer) -> Option<usize> {
+        let layout = self.tab_bar_layout_with_mouse(renderer)?;
+        let (_, pad_y) = renderer.content_padding();
+        crate::renderer::tab_close_at(
+            &layout,
+            x,
+            y,
+            pad_y,
+            tab_bar_height_px(renderer.cell_h()),
+            renderer.cell_w(),
+        )
     }
 
     fn is_in_tab_bar_row(&self, y: f64, renderer: &Renderer) -> bool {
@@ -780,7 +893,7 @@ impl App {
         }
         let (_, pad_y) = renderer.content_padding();
         let top = f64::from(pad_y);
-        let bottom = top + f64::from(renderer.cell_h());
+        let bottom = top + f64::from(tab_bar_height_px(renderer.cell_h()));
         (top..bottom).contains(&y)
     }
 
@@ -1739,6 +1852,15 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.exit();
             return;
         }
+        if self.tick_tab_close_fade() {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + std::time::Duration::from_millis(16),
+            ));
+            return;
+        }
         let Some(deadline) = self.copy_on_select_deadline else {
             return;
         };
@@ -1970,7 +2092,10 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 self.update_ime_area();
                 let term = Arc::clone(&self.sessions[self.focused].session.term);
-                let tab_layout = self.renderer.as_ref().and_then(|r| self.tab_bar_layout(r));
+                let tab_layout = self
+                    .renderer
+                    .as_ref()
+                    .and_then(|r| self.tab_bar_layout_with_mouse(r));
                 let Some(renderer) = &mut self.renderer else {
                     return;
                 };
@@ -2038,7 +2163,19 @@ impl ApplicationHandler<UserEvent> for App {
 
                 if let Some(renderer) = &self.renderer {
                     if self.is_in_tab_bar_row(position.y, renderer) {
+                        if self.update_tab_hover(position.x, position.y) {
+                            if let Some(window) = &self.window {
+                                window.request_redraw();
+                            }
+                        }
                         return;
+                    }
+                    if self.tab_hover.is_some() {
+                        self.tab_hover = None;
+                        self.tab_anim_last = Instant::now();
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
                     }
                 }
 
@@ -2169,6 +2306,13 @@ impl ApplicationHandler<UserEvent> for App {
                 } else {
                     tracing::debug!("CursorLeft: mouse_down=false, no action");
                     self.clear_link_hover_state();
+                    if self.tab_hover.is_some() {
+                        self.tab_hover = None;
+                        self.tab_anim_last = Instant::now();
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -2182,6 +2326,10 @@ impl ApplicationHandler<UserEvent> for App {
 
                 if button == MouseButton::Left && state == ElementState::Pressed {
                     if let Some(renderer) = &self.renderer {
+                        if let Some(idx) = self.tab_close_at(self.mouse_x, self.mouse_y, renderer) {
+                            self.close_tab_at(idx);
+                            return;
+                        }
                         if let Some(idx) = self.tab_index_at(self.mouse_x, self.mouse_y, renderer) {
                             self.focus_session(idx);
                             return;
