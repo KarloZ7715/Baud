@@ -81,10 +81,10 @@ pub struct StatusConfig {
     /// Duración del overlay en ms (`0` = sin auto-dismiss).
     #[serde(default = "default_status_duration")]
     pub duration_ms: u64,
-    /// Color de fondo opcional. Si es `None`, usa `theme.selection_bg`.
+    /// Color de fondo opcional. Si es `None`, usa `theme.black` semitransparente.
     #[serde(default)]
     pub bg_color: Option<String>,
-    /// Color de foreground opcional. Si es `None`, usa `theme.selection_fg`.
+    /// Color de foreground opcional. Si es `None`, usa `theme.foreground` ajustado.
     #[serde(default)]
     pub fg_color: Option<String>,
 }

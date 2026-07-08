@@ -150,6 +150,9 @@ pub struct Renderer {
     status_fg: glyphon::Color,
     status_pill_start_col: usize,
     status_pill_cols: usize,
+    /// Texto e icono activos para rellenar el buffer tras resize.
+    status_message: Option<String>,
+    status_icon: String,
     frame_count: u64,
     /// Rango normalizado de seleccion del frame anterior (start_row, start_col,
     /// end_row, end_col). Cuando cambia, invalida damage en filas afectadas.
@@ -269,6 +272,9 @@ impl Renderer {
             &mut self.tab_close_buffer,
             self.cell_w,
         );
+        if self.status_active {
+            self.refill_status_overlay_buffer();
+        }
     }
 
     pub fn cell_w(&self) -> f32 {
@@ -379,6 +385,8 @@ impl Renderer {
             status_fg: glyphon::Color::rgb(0x0a, 0x0a, 0x0a),
             status_pill_start_col: 0,
             status_pill_cols: 0,
+            status_message: None,
+            status_icon: String::new(),
             frame_count: 0,
             prev_selection_bounds: None,
             prev_scrollback_offset: 0,
@@ -682,6 +690,9 @@ impl Renderer {
 
         let cell_w = self.cell_w;
         let cell_h = self.cell_h;
+        if self.status_active {
+            self.refill_status_overlay_buffer();
+        }
         let mut extra_areas: Vec<glyphon::TextArea<'_>> = Vec::with_capacity(8);
         if let Some(tab_layout) = tabs.filter(|l| !l.segments.is_empty()) {
             push_tab_bar(
@@ -733,6 +744,7 @@ impl Renderer {
         } else if self.status_active {
             let (pad_x, pad_y) = (self.cell_metrics.padding_x, self.cell_metrics.padding_y);
             let panel_h = self.config.height as f32;
+            let panel_w = self.config.width as f32;
             let status_top = panel_h - pad_y - cell_h;
             let pill_left = pad_x + self.status_pill_start_col as f32 * cell_w;
             let pill_width = self.status_pill_cols as f32 * cell_w;
@@ -744,17 +756,18 @@ impl Renderer {
                 self.status_bg,
                 &mut all_custom_glyphs,
             );
+            let bounds = glyphon::TextBounds {
+                left: 0,
+                top: 0,
+                right: panel_w as i32,
+                bottom: panel_h as i32,
+            };
             extra_areas.push(glyphon::TextArea {
                 buffer: &self.overlay_buffer,
-                left: pad_x,
-                top: status_top,
+                left: pill_left,
+                top: status_top + cell_h * 0.15,
                 scale: 1.0,
-                bounds: glyphon::TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: self.config.width as i32,
-                    bottom: cell_h as i32,
-                },
+                bounds,
                 default_color: self.status_fg,
                 custom_glyphs: &[],
             });
@@ -1247,28 +1260,32 @@ impl Renderer {
         if text.is_empty() {
             self.status_active = false;
             self.status_start = None;
+            self.status_message = None;
+            self.status_icon.clear();
             return;
         }
 
-        let cols = (self.config.width / self.cell_w as u32).max(1) as usize;
-        let formatted = format_status_pill(icon, text, cols);
+        self.status_message = Some(text.to_string());
+        self.status_icon = icon.to_string();
+        let (bg, fg) = resolve_status_colors(theme, status_cfg, &mut self.contrast_cache);
+        self.status_bg = bg;
+        self.status_fg = fg;
+        self.duration_ms = status_cfg.duration_ms;
+        self.status_start = Some(Instant::now());
+        self.status_active = true;
+        self.refill_status_overlay_buffer();
+    }
 
-        let bg_hex = status_cfg
-            .bg_color
-            .as_deref()
-            .or(theme.selection_bg.as_deref())
-            .unwrap_or("#c4704a");
-        let fg_hex = status_cfg
-            .fg_color
-            .as_deref()
-            .or(theme.selection_fg.as_deref())
-            .unwrap_or("#0a0a0a");
-        let (br, bg, bb) = parse_hex(bg_hex);
-        let (fr, fg, fb) = parse_hex(fg_hex);
-        self.status_bg = glyphon::Color::rgb(br, bg, bb);
-        self.status_fg = glyphon::Color::rgb(fr, fg, fb);
+    fn refill_status_overlay_buffer(&mut self) {
+        let Some(ref message) = self.status_message else {
+            return;
+        };
+        let cols = (self.config.width / self.cell_w as u32).max(1) as usize;
+        let formatted = format_status_pill(&self.status_icon, message, cols);
         self.status_pill_start_col = formatted.pill_start_col;
         self.status_pill_cols = formatted.pill_cols;
+
+        let pill_text = formatted.pill_text;
 
         let family = resolve_family(&self.font_family);
         let default_attrs = glyphon::Attrs::new().family(family);
@@ -1276,7 +1293,7 @@ impl Renderer {
 
         self.overlay_buffer.set_rich_text(
             &mut self.font_system,
-            [(formatted.line.as_str(), fg_attrs)],
+            [(pill_text.as_str(), fg_attrs)],
             &default_attrs,
             glyphon::Shaping::Advanced,
             None,
@@ -1289,10 +1306,6 @@ impl Renderer {
         Self::apply_monospace_grid(&mut self.font_system, &mut self.overlay_buffer, self.cell_w);
         self.overlay_buffer
             .shape_until_scroll(&mut self.font_system, false);
-
-        self.duration_ms = status_cfg.duration_ms;
-        self.status_start = Some(Instant::now());
-        self.status_active = true;
     }
 
     /// Establece el texto del overlay de status.
@@ -1309,7 +1322,8 @@ impl Renderer {
 
 /// Pill de status centrado en una fila de terminal.
 pub(crate) struct FormattedStatusPill {
-    pub line: String,
+    /// Texto interior del pill (`" {icon} mensaje "`).
+    pub pill_text: String,
     pub pill_start_col: usize,
     pub pill_cols: usize,
 }
@@ -1359,20 +1373,53 @@ fn format_status_pill(icon: &str, message: &str, cols: usize) -> FormattedStatus
     };
     let content_width = UnicodeWidthStr::width(content.as_str());
     let pill_cols = content_width + 2;
+    let pill_text = format!(" {content} ");
     let left_pad = (cols.saturating_sub(pill_cols)) / 2;
-    let right_pad = cols.saturating_sub(left_pad + pill_cols);
-    let line = format!(
-        "{}{}{}{}",
-        " ".repeat(left_pad),
-        " ",
-        content,
-        " ".repeat(right_pad + 1),
-    );
     FormattedStatusPill {
-        line,
+        pill_text,
         pill_start_col: left_pad,
         pill_cols,
     }
+}
+
+/// Colores del pill de status derivados del tema activo (o overrides de config).
+fn resolve_status_colors(
+    theme: &ThemeConfig,
+    status_cfg: &StatusConfig,
+    contrast_cache: &mut ContrastCache,
+) -> (glyphon::Color, glyphon::Color) {
+    const BG_ALPHA: u8 = 235;
+    const MIN_TOAST_CONTRAST: f64 = 4.5;
+
+    if let Some(bg_hex) = status_cfg.bg_color.as_deref() {
+        let (br, bg, bb) = parse_hex(bg_hex);
+        let bg_color = glyphon::Color::rgb(br, bg, bb);
+        let fg_rgb = status_cfg
+            .fg_color
+            .as_deref()
+            .map(parse_hex)
+            .unwrap_or_else(|| parse_hex(&theme.foreground));
+        let (fr, fg, fb) = contrast_cache.adjust(
+            fg_rgb,
+            (br, bg, bb),
+            theme.minimum_contrast.max(MIN_TOAST_CONTRAST),
+        );
+        return (bg_color, glyphon::Color::rgb(fr, fg, fb));
+    }
+
+    let (br, bg, bb) = parse_hex(&theme.black);
+    let bg_color = glyphon::Color::rgba(br, bg, bb, BG_ALPHA);
+    let fg_rgb = status_cfg
+        .fg_color
+        .as_deref()
+        .map(parse_hex)
+        .unwrap_or_else(|| parse_hex(&theme.foreground));
+    let (fr, fg, fb) = contrast_cache.adjust(
+        fg_rgb,
+        (br, bg, bb),
+        theme.minimum_contrast.max(MIN_TOAST_CONTRAST),
+    );
+    (bg_color, glyphon::Color::rgb(fr, fg, fb))
 }
 
 /// Tamano maximo de losa para `CustomGlyph` solido (limite de `safe_mask_len`).
@@ -2532,10 +2579,12 @@ mod tests {
         use unicode_width::UnicodeWidthStr;
 
         let pill = format_status_pill("✓", "Copiado al clipboard", 80);
-        assert!(pill.line.contains('✓'));
-        assert!(pill.line.contains("Copiado al clipboard"));
-        assert_eq!(UnicodeWidthStr::width(pill.line.as_str()), 80);
-        assert!(pill.line.starts_with(' '));
+        assert!(pill.pill_text.contains('✓'));
+        assert!(pill.pill_text.contains("Copiado al clipboard"));
+        assert_eq!(
+            UnicodeWidthStr::width(pill.pill_text.as_str()) + (80 - pill.pill_cols),
+            80
+        );
         let inner = " ✓ Copiado al clipboard ";
         assert_eq!(
             pill.pill_cols,
@@ -2553,8 +2602,8 @@ mod tests {
             "mensaje muy largo que excede el ancho maximo del pill y debe truncarse con puntos suspensivos en un terminal de 40 columnas",
             40,
         );
-        assert!(UnicodeWidthStr::width(pill.line.as_str()) <= 40);
-        assert!(pill.line.contains('…'));
+        assert!(UnicodeWidthStr::width(pill.pill_text.as_str()) <= 40 - pill.pill_start_col);
+        assert!(pill.pill_text.contains('…'));
     }
 
     #[test]
