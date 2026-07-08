@@ -65,7 +65,17 @@ pub struct Config {
     #[serde(default)]
     pub status: StatusConfig,
     #[serde(default)]
+    pub debug: DebugConfig,
+    #[serde(default)]
     pub keys: BTreeMap<String, String>,
+}
+
+/// Opciones de depuración (off por defecto).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DebugConfig {
+    /// Permite activar el contador de FPS con el atajo de teclado.
+    #[serde(default)]
+    pub fps_counter_enabled: bool,
 }
 
 /// Notificaciones de escritorio via OSC 9 / OSC 777. Off por defecto.
@@ -294,6 +304,8 @@ struct RawConfig {
     #[serde(default)]
     status: StatusConfig,
     #[serde(default)]
+    debug: DebugConfig,
+    #[serde(default)]
     keys: BTreeMap<String, String>,
 }
 
@@ -345,6 +357,7 @@ impl From<RawConfig> for Config {
             notifications: raw.notifications,
             panes: raw.panes,
             status: raw.status,
+            debug: raw.debug,
             keys: raw.keys,
         }
     }
@@ -1450,6 +1463,15 @@ dim_alpha = true
         let toml = "[notifications]\nenabled = true\n";
         let p: Config = toml::from_str(toml).unwrap();
         assert!(p.notifications.enabled);
+    }
+
+    #[test]
+    fn test_debug_config_default_off() {
+        let cfg = Config::default();
+        assert!(!cfg.debug.fps_counter_enabled);
+        let toml = "[debug]\nfps_counter_enabled = true\n";
+        let p: Config = toml::from_str(toml).unwrap();
+        assert!(p.debug.fps_counter_enabled);
     }
 
     #[test]
