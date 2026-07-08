@@ -101,7 +101,7 @@ pub struct PaneRender {
 }
 
 use crate::ansi::{Color, Term};
-use crate::config::{parse_hex, FontConfig, GlyphOffset, ThemeConfig};
+use crate::config::{parse_hex, FontConfig, GlyphOffset, StatusConfig, ThemeConfig};
 use crate::grid::{Cell, DamageSnapshot};
 use crate::session::SessionId;
 use crate::theme_picker::ThemePickerState;
@@ -143,6 +143,13 @@ pub struct Renderer {
     status_active: bool,
     /// Instant en que se activo el status overlay, para auto-desaparicion.
     status_start: Option<Instant>,
+    /// Duracion del overlay en ms (`0` = sin auto-dismiss).
+    duration_ms: u64,
+    /// Colores y geometria del pill de status del frame actual.
+    status_bg: glyphon::Color,
+    status_fg: glyphon::Color,
+    status_pill_start_col: usize,
+    status_pill_cols: usize,
     frame_count: u64,
     /// Rango normalizado de seleccion del frame anterior (start_row, start_col,
     /// end_row, end_col). Cuando cambia, invalida damage en filas afectadas.
@@ -367,6 +374,11 @@ impl Renderer {
             cell_h,
             status_active: false,
             status_start: None,
+            duration_ms: 2000,
+            status_bg: glyphon::Color::rgb(0xc4, 0x70, 0x4a),
+            status_fg: glyphon::Color::rgb(0x0a, 0x0a, 0x0a),
+            status_pill_start_col: 0,
+            status_pill_cols: 0,
             frame_count: 0,
             prev_selection_bounds: None,
             prev_scrollback_offset: 0,
@@ -659,10 +671,12 @@ impl Renderer {
 
         let build_us = t_build.elapsed().as_secs_f64() * 1_000_000.0;
 
-        if let Some(start) = self.status_start {
-            if start.elapsed() > std::time::Duration::from_secs(2) {
-                self.status_active = false;
-                self.status_start = None;
+        if self.duration_ms > 0 {
+            if let Some(start) = self.status_start {
+                if start.elapsed() > std::time::Duration::from_millis(self.duration_ms) {
+                    self.status_active = false;
+                    self.status_start = None;
+                }
             }
         }
 
@@ -717,19 +731,31 @@ impl Renderer {
                 &mut all_custom_glyphs,
             );
         } else if self.status_active {
-            let overlay_left = self.config.width as f32 - (23.0 * cell_w) - 10.0;
+            let (pad_x, pad_y) = (self.cell_metrics.padding_x, self.cell_metrics.padding_y);
+            let panel_h = self.config.height as f32;
+            let status_top = panel_h - pad_y - cell_h;
+            let pill_left = pad_x + self.status_pill_start_col as f32 * cell_w;
+            let pill_width = self.status_pill_cols as f32 * cell_w;
+            push_solid_quad(
+                pill_left,
+                status_top,
+                pill_width,
+                cell_h,
+                self.status_bg,
+                &mut all_custom_glyphs,
+            );
             extra_areas.push(glyphon::TextArea {
                 buffer: &self.overlay_buffer,
-                left: overlay_left.max(0.0),
-                top: 0.0,
+                left: pad_x,
+                top: status_top,
                 scale: 1.0,
                 bounds: glyphon::TextBounds {
                     left: 0,
                     top: 0,
                     right: self.config.width as i32,
-                    bottom: self.config.height as i32,
+                    bottom: cell_h as i32,
                 },
-                default_color: glyphon::Color::rgb(0xf3, 0x8b, 0xa8),
+                default_color: self.status_fg,
                 custom_glyphs: &[],
             });
         }
@@ -1210,27 +1236,47 @@ impl Renderer {
         term.search.is_some()
     }
 
-    /// Establece el texto del overlay de status.
-    ///
-    /// Si `text` esta vacio, desactiva el overlay. Si no, llena el
-    /// overlay_buffer con el texto y activa el flag `status_active`.
-    /// El overlay se renderiza encima del grid en el proximo render().
-    pub fn set_status(&mut self, text: &str) {
+    /// Establece el texto del overlay de status con apariencia configurable.
+    pub fn set_status_with_config(
+        &mut self,
+        text: &str,
+        icon: &str,
+        theme: &ThemeConfig,
+        status_cfg: &StatusConfig,
+    ) {
         if text.is_empty() {
             self.status_active = false;
             self.status_start = None;
             return;
         }
 
-        let default_attrs = glyphon::Attrs::new().family(resolve_family(&self.font_family));
-        let mut attrs = glyphon::Attrs::new().family(resolve_family(&self.font_family));
-        // ponytail: color rojo para status. Refinable con theme en el futuro.
-        attrs = attrs.color(glyphon::Color::rgb(0xf3, 0x8b, 0xa8));
-        let spans = [(text, attrs)];
+        let cols = (self.config.width / self.cell_w as u32).max(1) as usize;
+        let formatted = format_status_pill(icon, text, cols);
+
+        let bg_hex = status_cfg
+            .bg_color
+            .as_deref()
+            .or(theme.selection_bg.as_deref())
+            .unwrap_or("#c4704a");
+        let fg_hex = status_cfg
+            .fg_color
+            .as_deref()
+            .or(theme.selection_fg.as_deref())
+            .unwrap_or("#0a0a0a");
+        let (br, bg, bb) = parse_hex(bg_hex);
+        let (fr, fg, fb) = parse_hex(fg_hex);
+        self.status_bg = glyphon::Color::rgb(br, bg, bb);
+        self.status_fg = glyphon::Color::rgb(fr, fg, fb);
+        self.status_pill_start_col = formatted.pill_start_col;
+        self.status_pill_cols = formatted.pill_cols;
+
+        let family = resolve_family(&self.font_family);
+        let default_attrs = glyphon::Attrs::new().family(family);
+        let fg_attrs = glyphon::Attrs::new().family(family).color(self.status_fg);
 
         self.overlay_buffer.set_rich_text(
             &mut self.font_system,
-            spans,
+            [(formatted.line.as_str(), fg_attrs)],
             &default_attrs,
             glyphon::Shaping::Advanced,
             None,
@@ -1238,14 +1284,80 @@ impl Renderer {
         self.overlay_buffer.set_size(
             &mut self.font_system,
             Some(self.config.width as f32),
-            Some(self.config.height as f32),
+            Some(self.cell_h),
         );
         Self::apply_monospace_grid(&mut self.font_system, &mut self.overlay_buffer, self.cell_w);
         self.overlay_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
+        self.duration_ms = status_cfg.duration_ms;
         self.status_start = Some(Instant::now());
         self.status_active = true;
+    }
+
+    /// Establece el texto del overlay de status.
+    ///
+    /// Si `text` esta vacio, desactiva el overlay. Si no, llena el
+    /// overlay_buffer con el texto y activa el flag `status_active`.
+    /// El overlay se renderiza encima del grid en el proximo render().
+    pub fn set_status(&mut self, text: &str) {
+        let theme = ThemeConfig::default();
+        let status_cfg = StatusConfig::default();
+        self.set_status_with_config(text, "", &theme, &status_cfg);
+    }
+}
+
+/// Pill de status centrado en una fila de terminal.
+pub(crate) struct FormattedStatusPill {
+    pub line: String,
+    pub pill_start_col: usize,
+    pub pill_cols: usize,
+}
+
+fn truncate_to_width(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let ellipsis_len = '…'.len_utf8();
+    if max_bytes <= ellipsis_len {
+        return "…".to_string();
+    }
+    let budget = max_bytes - ellipsis_len;
+    let mut end = budget.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
+/// Formatea un mensaje de status como pill centrado en `cols` columnas.
+fn format_status_pill(icon: &str, message: &str, cols: usize) -> FormattedStatusPill {
+    let prefix = if icon.is_empty() {
+        String::new()
+    } else {
+        format!("{icon} ")
+    };
+    let max_content = cols.saturating_sub(4);
+    let full = format!("{prefix}{message}");
+    let content = if full.len() > max_content {
+        truncate_to_width(&full, max_content)
+    } else {
+        full
+    };
+    let pill_cols = content.len() + 2;
+    let left_pad = (cols.saturating_sub(pill_cols)) / 2;
+    let right_pad = cols.saturating_sub(left_pad + pill_cols);
+    let line = format!(
+        "{}{}{}{}",
+        " ".repeat(left_pad),
+        " ",
+        content,
+        " ".repeat(right_pad + 1),
+    );
+    FormattedStatusPill {
+        line,
+        pill_start_col: left_pad,
+        pill_cols,
     }
 }
 
@@ -2399,5 +2511,25 @@ mod tests {
         let total_area: f32 = tiles.iter().map(|(_, _, w, h)| w * h).sum();
         assert!((total_area - 960.0 * 540.0).abs() < 1.0);
         assert!(tiles.iter().all(|(_, _, w, h)| *w <= 512.0 && *h <= 512.0));
+    }
+
+    #[test]
+    fn test_status_text_formato_pill() {
+        let pill = format_status_pill("✓", "Copiado al clipboard", 80);
+        assert!(pill.line.contains('✓'));
+        assert!(pill.line.contains("Copiado al clipboard"));
+        assert_eq!(pill.line.len(), 80);
+        assert!(pill.line.starts_with(' '));
+    }
+
+    #[test]
+    fn test_status_text_truncado() {
+        let pill = format_status_pill(
+            "✗",
+            "mensaje muy largo que excede el ancho maximo del pill y debe truncarse con puntos suspensivos en un terminal de 40 columnas",
+            40,
+        );
+        assert!(pill.line.len() <= 40);
+        assert!(pill.line.contains('…'));
     }
 }
