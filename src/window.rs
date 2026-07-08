@@ -699,6 +699,13 @@ impl App {
 
         self.config = new_cfg;
 
+        if !self.config.debug.fps_counter_enabled && self.fps_overlay_visible {
+            self.fps_overlay_visible = false;
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_status("");
+            }
+        }
+
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -2776,7 +2783,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     Err(e) => tracing::warn!("error al renderizar: {e}"),
                 }
-                if self.fps_overlay_visible {
+                if self.fps_overlay_visible && self.config.debug.fps_counter_enabled {
                     if let Some(renderer) = &mut self.renderer {
                         let fps = self.gui_redraw_metrics.current_fps();
                         let text = format!("FPS: {:.0}", fps);
@@ -2786,6 +2793,9 @@ impl ApplicationHandler<UserEvent> for App {
                             &self.config.theme,
                             &self.config.status,
                         );
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
                     }
                 }
                 let render_ms = t_render.elapsed().as_millis();
