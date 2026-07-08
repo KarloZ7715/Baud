@@ -16,13 +16,16 @@ use crate::clipboard::{self, CopyTarget};
 use crate::config::watch::WatchState;
 use crate::config::{persist, Config, ProcessSection, StartupState};
 use crate::copy_mode::CopyModeState;
-use crate::event_loop::{PtyCommand, PtyCommandSender};
+use crate::event_loop::PtyCommand;
+#[cfg(test)]
+use crate::event_loop::PtyCommandSender;
 use crate::grid::Cell;
 use crate::input::actions::{normalize_binding_key, Action, Keybindings};
 use crate::input::keymap::{self, Key as KKey, KeyEventKind, KeyModes, Mods};
 use crate::renderer::{PreeditState, Renderer};
 use crate::search::SearchState;
 use crate::selection::{Selection, SelectionMode, SelectionPoint};
+use crate::session::{Session, SessionId};
 use crate::smart_select;
 use crate::theme_picker::ThemePickerState;
 use winit::application::ApplicationHandler;
@@ -40,15 +43,15 @@ use winit::window::{CursorGrabMode, CursorIcon, Fullscreen, Window, WindowId};
 #[derive(Debug)]
 pub enum UserEvent {
     /// El drain termino de procesar bytes del PTY; la GUI debe redibujar.
-    RedrawNeeded,
+    RedrawNeeded(SessionId),
     /// El child termino (EOF en master fd).
-    PtyExited(i32),
+    PtyExited(SessionId, i32),
     /// Error de I/O del PTY.
-    PtyError(String),
+    PtyError(SessionId, String),
     /// OSC 0/1/2: actualizar titulo de ventana.
-    SetTitle(String),
+    SetTitle(SessionId, String),
     /// OSC 52 query: leer clipboard y responder al PTY (target, bell_terminated).
-    ReadClipboard(u8, bool),
+    ReadClipboard(SessionId, u8, bool),
     /// Config recargada desde disco.
     ConfigReloaded(Box<Config>),
     /// Fallo al recargar config; se conserva la config en memoria.
@@ -161,8 +164,8 @@ impl GuiRedrawMetrics {
 pub struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
-    term: Arc<Mutex<Term>>,
-    pty_tx: Arc<Mutex<Option<PtyCommandSender>>>,
+    sessions: Vec<Session>,
+    focused: usize,
     config: Config,
     /// Tamano de fuente efectivo en runtime (puede diferir del config tras zoom).
     font_size: u16,
@@ -226,10 +229,9 @@ fn open_url(url: &str) {
 }
 
 impl App {
-    /// Crea una nueva instancia de App con el term compartido.
+    /// Crea una nueva instancia de App con las sesiones dadas.
     pub fn new(
-        term: Arc<Mutex<Term>>,
-        pty_tx: Arc<Mutex<Option<PtyCommandSender>>>,
+        sessions: Vec<Session>,
         config: Config,
         config_watch: Arc<Mutex<WatchState>>,
     ) -> Self {
@@ -240,8 +242,8 @@ impl App {
         Self {
             window: None,
             renderer: None,
-            term,
-            pty_tx,
+            sessions,
+            focused: 0,
             config,
             font_size,
             modifiers: winit::event::Modifiers::default(),
@@ -264,8 +266,24 @@ impl App {
         }
     }
 
+    pub fn focused_session(&self) -> &Session {
+        &self.sessions[self.focused]
+    }
+
+    fn session_by_id(&self, id: SessionId) -> Option<usize> {
+        self.sessions.iter().position(|s| s.id == id)
+    }
+
+    fn is_focused_session(&self, id: SessionId) -> bool {
+        self.sessions.get(self.focused).is_some_and(|s| s.id == id)
+    }
+
+    fn focused_term(&self) -> &Arc<Mutex<Term>> {
+        &self.focused_session().term
+    }
+
     fn cursor_visible_cell(&self) -> (usize, usize) {
-        self.term
+        self.focused_term()
             .lock()
             .map(|guard| {
                 let col = guard.cursor.col;
@@ -342,7 +360,7 @@ impl App {
         self.keybindings = new_cfg.keybindings();
         self.font_size = new_cfg.font.size;
 
-        if let Ok(mut term) = self.term.lock() {
+        if let Ok(mut term) = self.focused_term().lock() {
             new_cfg.apply_to_term(&mut term);
             let max = new_cfg.scrollback_max_lines();
             term.grid.set_max_scrollback(max);
@@ -408,13 +426,13 @@ impl App {
             self.config.window.padding_x,
             self.config.window.padding_y,
         );
-        let (old_rows, old_cols) = if let Ok(guard) = self.term.lock() {
+        let (old_rows, old_cols) = if let Ok(guard) = self.focused_term().lock() {
             let active = guard.active_grid();
             (active.rows_count, active.cols_count)
         } else {
             (new_rows, new_cols)
         };
-        if let Ok(mut guard) = self.term.lock() {
+        if let Ok(mut guard) = self.focused_term().lock() {
             guard.resize_grid(new_rows, new_cols, reflow);
             if preserve_scrollback {
                 let max_offset = guard.scrollback_len();
@@ -424,12 +442,10 @@ impl App {
             }
         }
         if old_rows != new_rows || old_cols != new_cols {
-            if let Some(tx) = self.pty_tx.lock().ok().and_then(|g| g.as_ref().cloned()) {
-                let _ = tx.send(PtyCommand::Resize {
-                    rows: new_rows as u16,
-                    cols: new_cols as u16,
-                });
-            }
+            let _ = self.focused_session().pty_tx.send(PtyCommand::Resize {
+                rows: new_rows as u16,
+                cols: new_cols as u16,
+            });
         }
         (old_rows, old_cols, new_rows, new_cols)
     }
@@ -440,7 +456,7 @@ impl App {
     fn handle_copy(&mut self) {
         tracing::info!("handle_copy: INICIANDO");
         let text = {
-            let term_guard = match self.term.lock() {
+            let term_guard = match self.focused_term().lock() {
                 Ok(g) => g,
                 Err(poisoned) => {
                     tracing::warn!("handle_copy: term mutex poisoned: {poisoned}");
@@ -522,7 +538,7 @@ impl App {
 
     /// True si la selección actual merece copy-on-select (no un clic suelto).
     fn selection_qualifies_for_copy_on_select(&self) -> bool {
-        let Ok(guard) = self.term.lock() else {
+        let Ok(guard) = self.focused_term().lock() else {
             return false;
         };
         guard
@@ -546,7 +562,7 @@ impl App {
         if !self.config.selection.copy_on_select {
             return;
         }
-        let text = match self.term.lock() {
+        let text = match self.focused_term().lock() {
             Ok(g) => g.selected_text(),
             Err(_) => return,
         };
@@ -557,7 +573,7 @@ impl App {
         let target = CopyTarget::parse(&self.config.selection.copy_on_select_target);
         tracing::info!("copy_on_select: {} bytes -> {}", text.len(), target.label());
         target.write(&text);
-        if let Ok(mut guard) = self.term.lock() {
+        if let Ok(mut guard) = self.focused_term().lock() {
             guard.clear_selection();
             guard.mark_dirty();
         }
@@ -594,7 +610,7 @@ impl App {
             return;
         }
         let text = text.replace(['\n', '\r'], "");
-        if let Ok(mut guard) = self.term.lock() {
+        if let Ok(mut guard) = self.focused_term().lock() {
             guard.search_append_query(&text);
         }
         if let Some(window) = &self.window {
@@ -632,7 +648,7 @@ impl App {
         );
         let text = text.trim_end_matches('\n').to_string();
         let bracketed = self
-            .term
+            .focused_term()
             .lock()
             .ok()
             .map(|t| t.bracketed_paste)
@@ -642,15 +658,16 @@ impl App {
         } else {
             crate::input::paste_text(&text)
         };
-        if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
-            let _ = tx.send(PtyCommand::Input(filtered));
-        }
+        let _ = self
+            .focused_session()
+            .pty_tx
+            .send(PtyCommand::Input(filtered));
     }
 
     /// Envia bytes de input al hilo PTY para escribirlos en el master fd.
     fn send_input(&self, bytes: Vec<u8>) {
         // Resetear scrollback offset al enviar cualquier input al PTY
-        if let Ok(mut guard) = self.term.lock() {
+        if let Ok(mut guard) = self.focused_term().lock() {
             if guard.scrollback_offset > 0 {
                 guard.scrollback_offset = 0;
             }
@@ -661,15 +678,13 @@ impl App {
             guard.reset_blink_phase();
         }
         tracing::debug!("send_input: {} bytes: {:02x?}", bytes.len(), bytes);
-        if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
-            let _ = tx.send(PtyCommand::Input(bytes));
-        }
+        let _ = self.focused_session().pty_tx.send(PtyCommand::Input(bytes));
     }
 
     /// Extiende la seleccion con teclado (Shift+arrow).
     /// Si no hay seleccion, crea una desde la posicion del cursor.
     fn extend_selection(&self, drow: isize, dcol: isize) {
-        if let Ok(mut guard) = self.term.lock() {
+        if let Ok(mut guard) = self.focused_term().lock() {
             let cols_count = guard.grid.cols_count;
             let sb_len = if guard.alt_screen {
                 0
@@ -727,7 +742,7 @@ impl App {
     }
 
     fn scroll_lines(&mut self, n: isize) {
-        let mut guard = self.term.lock().expect("term mutex poisoned");
+        let mut guard = self.focused_term().lock().expect("term mutex poisoned");
         if n > 0 {
             if !guard.alt_screen {
                 let max_offset = guard.scrollback_len();
@@ -742,7 +757,7 @@ impl App {
     }
 
     fn scroll_page(&mut self, dir: isize) {
-        let mut guard = self.term.lock().expect("term mutex poisoned");
+        let mut guard = self.focused_term().lock().expect("term mutex poisoned");
         let page = guard.grid.rows_count as isize - 1;
         if dir > 0 {
             if !guard.alt_screen {
@@ -758,7 +773,7 @@ impl App {
     }
 
     fn scroll_to_bottom(&mut self) {
-        let mut guard = self.term.lock().expect("term mutex poisoned");
+        let mut guard = self.focused_term().lock().expect("term mutex poisoned");
         guard.scrollback_offset = 0;
         guard.mark_dirty();
         drop(guard);
@@ -773,7 +788,7 @@ impl App {
         if self.theme_picker.is_some() {
             return;
         }
-        if let Ok(mut guard) = self.term.lock() {
+        if let Ok(mut guard) = self.focused_term().lock() {
             if guard.copy_mode.is_none() {
                 guard.copy_mode = Some(CopyModeState::enter(&guard));
                 guard.search_clear();
@@ -787,7 +802,7 @@ impl App {
         if self.theme_picker.is_some() {
             return;
         }
-        if let Ok(mut guard) = self.term.lock() {
+        if let Ok(mut guard) = self.focused_term().lock() {
             if guard.search.is_some() {
                 guard.search_clear();
                 tracing::info!("KEYBOARD: busqueda desactivada");
@@ -809,7 +824,7 @@ impl App {
             return;
         }
         let saved_copy_mode = self
-            .term
+            .focused_term()
             .lock()
             .ok()
             .and_then(|mut guard| guard.copy_mode.take());
@@ -819,7 +834,7 @@ impl App {
             preset,
             saved_copy_mode,
         ));
-        if let Ok(mut guard) = self.term.lock() {
+        if let Ok(mut guard) = self.focused_term().lock() {
             guard.mark_dirty();
         }
         tracing::info!("KEYBOARD: theme picker activado");
@@ -829,7 +844,7 @@ impl App {
         self.config.theme = picker.saved_theme().clone();
         self.config.theme_preset = picker.saved_preset().map(str::to_string);
         self.theme_picker = None;
-        if let Ok(mut guard) = self.term.lock() {
+        if let Ok(mut guard) = self.focused_term().lock() {
             if let Some(cm) = picker.saved_copy_mode() {
                 guard.copy_mode = Some(cm);
             }
@@ -855,7 +870,7 @@ impl App {
                 self.config.theme = picker.preview_theme();
                 self.config.theme_preset = Some(name.clone());
                 self.theme_picker = None;
-                if let Ok(mut guard) = self.term.lock() {
+                if let Ok(mut guard) = self.focused_term().lock() {
                     if let Some(cm) = picker.saved_copy_mode() {
                         guard.copy_mode = Some(cm);
                     }
@@ -964,7 +979,7 @@ impl App {
                     self.sync_grid_to_window(size.width, size.height, cell_w, cell_h, true, false);
                 // Al reducir filas, anclar el borde inferior visible (evita que el contenido "suba").
                 if old_rows > new_rows {
-                    if let Ok(mut guard) = self.term.lock() {
+                    if let Ok(mut guard) = self.focused_term().lock() {
                         let delta = (old_rows - new_rows) as isize;
                         guard.scrollback_offset = (guard.scrollback_offset - delta).max(0);
                         guard.mark_dirty();
@@ -979,21 +994,21 @@ impl App {
         match action {
             Copy => {
                 let in_copy_mode = self
-                    .term
+                    .focused_term()
                     .lock()
                     .ok()
                     .map(|g| g.copy_mode.is_some())
                     .unwrap_or(false);
                 self.handle_copy();
                 if in_copy_mode {
-                    if let Ok(mut guard) = self.term.lock() {
+                    if let Ok(mut guard) = self.focused_term().lock() {
                         CopyModeState::exit(&mut guard);
                     }
                 }
             }
             Paste => {
                 if self
-                    .term
+                    .focused_term()
                     .lock()
                     .ok()
                     .map(|g| g.search.is_some())
@@ -1006,7 +1021,7 @@ impl App {
             }
             PastePrimary => {
                 if self
-                    .term
+                    .focused_term()
                     .lock()
                     .ok()
                     .map(|g| g.search.is_some())
@@ -1056,7 +1071,7 @@ impl App {
 
         let mut exit = false;
         let mut copy_and_exit = false;
-        if let Ok(mut guard) = self.term.lock() {
+        if let Ok(mut guard) = self.focused_term().lock() {
             // Salir con q o Esc.
             match &event.logical_key {
                 Key::Character(c) if c == "q" => exit = true,
@@ -1074,10 +1089,10 @@ impl App {
                 if !text.is_empty() {
                     drop(guard);
                     clipboard::set(&text, false);
-                    if let Ok(mut g2) = self.term.lock() {
+                    if let Ok(mut g2) = self.focused_term().lock() {
                         CopyModeState::exit(&mut g2);
                     }
-                } else if let Ok(mut g2) = self.term.lock() {
+                } else if let Ok(mut g2) = self.focused_term().lock() {
                     CopyModeState::exit(&mut g2);
                 }
                 return true;
@@ -1101,7 +1116,7 @@ impl App {
         let ctrl = self.modifiers.state().control_key();
         let alt = self.modifiers.state().alt_key();
 
-        if let Ok(mut guard) = self.term.lock() {
+        if let Ok(mut guard) = self.focused_term().lock() {
             if guard.search.is_none() {
                 return false;
             }
@@ -1193,9 +1208,7 @@ impl App {
     /// Envia bytes al PTY sin efectos secundarios (seleccion, scrollback).
     fn send_pty_bytes(&self, bytes: Vec<u8>) {
         tracing::debug!("send_pty_bytes: {} bytes: {:02x?}", bytes.len(), bytes);
-        if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
-            let _ = tx.send(PtyCommand::Input(bytes));
-        }
+        let _ = self.focused_session().pty_tx.send(PtyCommand::Input(bytes));
     }
 
     /// Mapea píxeles de ventana a (row, col); resta el padding del renderer.
@@ -1231,7 +1244,7 @@ impl App {
             crate::renderer::limits::pixel_to_cell_coords(x, y, pad_x, pad_y, cell_w, cell_h);
         let mut link_changed = false;
         let mut has_link = false;
-        if let Ok(mut guard) = self.term.lock() {
+        if let Ok(mut guard) = self.focused_term().lock() {
             let logical_row = guard.visible_to_logical_row(visible_row);
             let new_hovered = guard
                 .resolve_link_at(logical_row, col)
@@ -1258,7 +1271,7 @@ impl App {
 
     fn clear_link_hover_state(&mut self) {
         let cleared = self
-            .term
+            .focused_term()
             .lock()
             .ok()
             .is_some_and(|mut guard| guard.clear_hovered_link());
@@ -1292,7 +1305,7 @@ impl App {
 
     /// Solo reenviar eventos de mouse a la app (no seleccion local).
     fn should_forward_mouse_to_app(&self) -> bool {
-        if let Ok(guard) = self.term.lock() {
+        if let Ok(guard) = self.focused_term().lock() {
             return guard.mouse_reporting.is_active()
                 && !self.local_selection_active(&guard.mouse_reporting);
         }
@@ -1335,7 +1348,7 @@ impl App {
             return;
         };
         let (row, col) = self.mouse_cell_coords(renderer);
-        if let Ok(guard) = self.term.lock() {
+        if let Ok(guard) = self.focused_term().lock() {
             if !guard.mouse_reporting.is_active() {
                 return;
             }
@@ -1360,7 +1373,7 @@ impl App {
             return;
         };
         let (row, col) = self.mouse_cell_coords(renderer);
-        if let Ok(guard) = self.term.lock() {
+        if let Ok(guard) = self.focused_term().lock() {
             if !guard.mouse_reporting.is_active() {
                 return;
             }
@@ -1519,9 +1532,8 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
-                // Enviar Shutdown al hilo PTY para que envie SIGHUP al child.
-                if let Some(tx) = self.pty_tx.lock().expect("pty_tx mutex poisoned").as_ref() {
-                    let _ = tx.send(PtyCommand::Shutdown);
+                for session in &self.sessions {
+                    let _ = session.pty_tx.send(PtyCommand::Shutdown);
                 }
                 // Salir del event loop. El hilo PTY recibira el Shutdown, hara SIGHUP,
                 // esperara 100ms, y morira. El Pty se dropea con SIGKILL safety net.
@@ -1553,7 +1565,7 @@ impl ApplicationHandler<UserEvent> for App {
                     new_rows,
                     new_cols,
                 );
-                if let Ok(guard) = self.term.lock() {
+                if let Ok(guard) = self.focused_term().lock() {
                     let g = guard.active_grid();
                     let n = g.rows.len().min(5);
                     let mut summary_top = String::new();
@@ -1614,10 +1626,11 @@ impl ApplicationHandler<UserEvent> for App {
                     })
                 };
                 self.update_ime_area();
+                let term = Arc::clone(&self.sessions[self.focused].term);
                 let Some(renderer) = &mut self.renderer else {
                     return;
                 };
-                let mut term_guard = match self.term.lock() {
+                let mut term_guard = match term.lock() {
                     Ok(g) => g,
                     Err(poisoned) => {
                         tracing::warn!("term mutex poisoned: {poisoned}");
@@ -1684,7 +1697,8 @@ impl ApplicationHandler<UserEvent> for App {
 
                 if self.should_forward_mouse_to_app() {
                     let mouse_down = self.mouse_down.load(Ordering::Relaxed);
-                    if let Ok(guard) = self.term.lock() {
+                    let term = Arc::clone(&self.sessions[self.focused].term);
+                    if let Ok(guard) = term.lock() {
                         let reporting = guard.mouse_reporting;
                         if reporting.reports_motion() {
                             let (row, col) = crate::renderer::limits::pixel_to_cell_coords(
@@ -1730,7 +1744,7 @@ impl ApplicationHandler<UserEvent> for App {
                         };
 
                     let scroll_changed = needs_scroll_up || needs_scroll_down;
-                    if let Ok(mut guard) = self.term.lock() {
+                    if let Ok(mut guard) = self.focused_term().lock() {
                         if !guard.alt_screen {
                             if needs_scroll_up {
                                 let max_offset = guard.scrollback_len();
@@ -1773,7 +1787,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::CursorLeft { .. } => {
                 if self.mouse_down.load(Ordering::Relaxed) {
                     tracing::info!("CursorLeft: mouse_down=true, auto-scroll thread iniciado");
-                    let term_clone = Arc::clone(&self.term);
+                    let term_clone = Arc::clone(self.focused_term());
                     let md_clone = Arc::clone(&self.mouse_down);
                     if let Some(w) = &self.window {
                         let win_clone = Arc::clone(w);
@@ -1818,7 +1832,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // copy_on_select diferido: deja completar doble/triple clic antes de copiar.
                 if button == MouseButton::Left && state == ElementState::Pressed {
                     if self.modifiers.state().control_key() {
-                        let opened = if let Ok(guard) = self.term.lock() {
+                        let opened = if let Ok(guard) = self.focused_term().lock() {
                             guard.hovered_link.as_ref().is_some_and(|range| {
                                 guard
                                     .resolve_link_at(range.row, range.start_col)
@@ -1891,7 +1905,8 @@ impl ApplicationHandler<UserEvent> for App {
                                 .map(|t| now.duration_since(t) < MULTI_CLICK_INTERVAL)
                                 .unwrap_or(false);
 
-                            if let Ok(mut guard) = self.term.lock() {
+                            let term = Arc::clone(&self.sessions[self.focused].term);
+                            if let Ok(mut guard) = term.lock() {
                                 let abs_row = guard.visible_to_logical_row(visible_row);
                                 let point = SelectionPoint { row: abs_row, col };
                                 if block {
@@ -2007,7 +2022,7 @@ impl ApplicationHandler<UserEvent> for App {
             // Input de teclado completo: letras, Enter, Backspace, Tab, Ctrl+letter, etc.
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Released => {
                 let report_events = self
-                    .term
+                    .focused_term()
                     .lock()
                     .ok()
                     .map(|g| g.keyboard_flags & 2 != 0)
@@ -2023,7 +2038,7 @@ impl ApplicationHandler<UserEvent> for App {
                         sup: self.modifiers.state().super_key(),
                     };
                     if let Some(k) = winit_to_key(&event.logical_key) {
-                        let modes = current_key_modes(&self.term);
+                        let modes = current_key_modes(self.focused_term());
                         if let Some(bytes) =
                             keymap::encode_key_extended(k, mods, modes, KeyEventKind::Release)
                         {
@@ -2079,7 +2094,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
 
                 let in_search = self
-                    .term
+                    .focused_term()
                     .lock()
                     .ok()
                     .map(|g| g.search.is_some())
@@ -2108,7 +2123,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // Copy mode: si está activo, las teclas navegan/seleccionan
                 // y NO se envían al PTY (excepto Ctrl+Shift+C ya manejado arriba).
                 if self
-                    .term
+                    .focused_term()
                     .lock()
                     .ok()
                     .map(|g| g.copy_mode.is_some())
@@ -2153,7 +2168,7 @@ impl ApplicationHandler<UserEvent> for App {
 
                 // Fallback: encode_key_extended (CSI u) o encode_key clasico.
                 if let Some(k) = winit_to_key(&event.logical_key) {
-                    let modes = current_key_modes(&self.term);
+                    let modes = current_key_modes(self.focused_term());
                     let kind = if event.repeat {
                         KeyEventKind::Repeat
                     } else {
@@ -2186,37 +2201,53 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
-            UserEvent::RedrawNeeded => {
-                let since_last = self.last_gui_redraw.map(|t| t.elapsed());
-                self.gui_redraw_metrics.record_redraw(since_last);
-                self.last_gui_redraw = Some(Instant::now());
-                self.gui_redraw_metrics.maybe_log();
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+            UserEvent::RedrawNeeded(id) => {
+                if self.is_focused_session(id) {
+                    let since_last = self.last_gui_redraw.map(|t| t.elapsed());
+                    self.gui_redraw_metrics.record_redraw(since_last);
+                    self.last_gui_redraw = Some(Instant::now());
+                    self.gui_redraw_metrics.maybe_log();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                } else if let Some(idx) = self.session_by_id(id) {
+                    self.sessions[idx].dirty = true;
                 }
             }
-            UserEvent::PtyExited(code) => {
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.set_status(&format!("[Proceso terminado: codigo {}]", code));
-                }
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
-            }
-            UserEvent::PtyError(msg) => {
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.set_status(&format!("[Error PTY: {}]", msg));
-                }
-                if let Some(window) = &self.window {
-                    window.request_redraw();
+            UserEvent::PtyExited(id, code) => {
+                if self.is_focused_session(id) {
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.set_status(&format!("[Proceso terminado: codigo {}]", code));
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
-            UserEvent::SetTitle(title) => {
-                if let Some(window) = &self.window {
-                    window.set_title(&title);
+            UserEvent::PtyError(id, msg) => {
+                if self.is_focused_session(id) {
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.set_status(&format!("[Error PTY: {}]", msg));
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                 }
             }
-            UserEvent::ReadClipboard(target, bell_terminated) => {
+            UserEvent::SetTitle(id, title) => {
+                if let Some(idx) = self.session_by_id(id) {
+                    self.sessions[idx].title = title.clone();
+                    if self.is_focused_session(id) {
+                        if let Some(window) = &self.window {
+                            window.set_title(&title);
+                        }
+                    }
+                }
+            }
+            UserEvent::ReadClipboard(id, target, bell_terminated) => {
+                if !self.is_focused_session(id) {
+                    return;
+                }
                 let primary = target == b'p' || target == b's';
                 let text = clipboard::get(primary);
                 let encoded = crate::base64::encode(text.as_bytes());
@@ -2294,19 +2325,41 @@ mod tests {
     use super::*;
     use crate::config::watch::WatchState;
     use crate::renderer::limits::pixel_to_cell_coords;
+    use nix::sys::eventfd::{EfdFlags, EventFd};
+    use std::sync::mpsc;
 
     fn test_config_watch() -> Arc<Mutex<WatchState>> {
         Arc::new(Mutex::new(WatchState::new(None)))
     }
 
-    #[test]
-    fn test_effective_theme_usa_preview() {
-        let mut app = App::new(
-            Arc::new(Mutex::new(Term::new())),
-            Arc::new(Mutex::new(None)),
+    fn dummy_pty_sender() -> PtyCommandSender {
+        let (tx, _rx) = mpsc::channel();
+        let wakeup =
+            Arc::new(EventFd::from_flags(EfdFlags::EFD_NONBLOCK).expect("eventfd para test"));
+        PtyCommandSender::new_for_test(tx, wakeup)
+    }
+
+    fn test_session(term: Arc<Mutex<Term>>) -> Session {
+        Session {
+            id: SessionId::next(),
+            term,
+            pty_tx: dummy_pty_sender(),
+            title: String::new(),
+            dirty: false,
+        }
+    }
+
+    fn test_app(term: Arc<Mutex<Term>>) -> App {
+        App::new(
+            vec![test_session(term)],
             Config::default(),
             test_config_watch(),
-        );
+        )
+    }
+
+    #[test]
+    fn test_effective_theme_usa_preview() {
+        let mut app = test_app(Arc::new(Mutex::new(Term::new())));
         app.theme_picker = Some(ThemePickerState::open(
             &app.config.theme,
             Some("dracula"),
@@ -2351,12 +2404,7 @@ mod tests {
     /// selecciona la celda (0,0) aunque el cursor esté en otra posición.
     #[test]
     fn test_mouse_coordinates_start_at_zero() {
-        let app = App::new(
-            Arc::new(Mutex::new(Term::new())),
-            Arc::new(Mutex::new(None)),
-            Config::default(),
-            test_config_watch(),
-        );
+        let app = test_app(Arc::new(Mutex::new(Term::new())));
         assert_eq!(
             app.mouse_x, 0.0,
             "BUG: mouse_x = {} al crear App. Sin CursorMoved previo, el click usa (0,0)",
@@ -2471,12 +2519,7 @@ mod tests {
         use crate::ansi::MouseReporting;
 
         let term = Arc::new(Mutex::new(Term::new()));
-        let app = App::new(
-            term.clone(),
-            Arc::new(Mutex::new(None)),
-            Config::default(),
-            test_config_watch(),
-        );
+        let app = test_app(Arc::clone(&term));
         assert!(
             !app.should_forward_mouse_to_app(),
             "shell: no reenviar mouse al PTY (seleccion local)"
@@ -2488,12 +2531,7 @@ mod tests {
             any_motion: false,
             sgr: true,
         };
-        let app_vim = App::new(
-            term,
-            Arc::new(Mutex::new(None)),
-            Config::default(),
-            test_config_watch(),
-        );
+        let app_vim = test_app(term);
         assert!(
             app_vim.should_forward_mouse_to_app(),
             "vim: app captura mouse sin modificadores"
