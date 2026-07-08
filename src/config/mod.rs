@@ -20,6 +20,7 @@ mod themes;
 pub mod watch;
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use serde::Deserialize;
 
@@ -67,6 +68,8 @@ pub struct Config {
     #[serde(default)]
     pub debug: DebugConfig,
     #[serde(default)]
+    pub render: RenderConfig,
+    #[serde(default)]
     pub keys: BTreeMap<String, String>,
 }
 
@@ -76,6 +79,43 @@ pub struct DebugConfig {
     /// Permite activar el contador de FPS con el atajo de teclado.
     #[serde(default)]
     pub fps_counter_enabled: bool,
+}
+
+/// Configuración de render de la GUI.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RenderConfig {
+    /// FPS máximo de redraw. `0` desactiva el límite.
+    #[serde(default = "default_render_max_fps")]
+    pub max_fps: u32,
+}
+
+fn default_render_max_fps() -> u32 {
+    60
+}
+
+impl Default for RenderConfig {
+    fn default() -> Self {
+        Self {
+            max_fps: default_render_max_fps(),
+        }
+    }
+}
+
+impl RenderConfig {
+    /// Intervalo mínimo entre redraws según `max_fps`.
+    pub fn redraw_interval(&self) -> Option<Duration> {
+        if self.max_fps == 0 {
+            return None;
+        }
+        Some(Duration::from_secs_f64(1.0 / self.max_fps as f64))
+    }
+
+    /// Intervalo mínimo en nanosegundos; `0` significa sin límite.
+    pub fn redraw_interval_nanos(&self) -> u64 {
+        self.redraw_interval()
+            .map(|d| d.as_nanos().min(u64::MAX as u128) as u64)
+            .unwrap_or(0)
+    }
 }
 
 /// Notificaciones de escritorio via OSC 9 / OSC 777. Off por defecto.
@@ -306,6 +346,8 @@ struct RawConfig {
     #[serde(default)]
     debug: DebugConfig,
     #[serde(default)]
+    render: RenderConfig,
+    #[serde(default)]
     keys: BTreeMap<String, String>,
 }
 
@@ -358,6 +400,7 @@ impl From<RawConfig> for Config {
             panes: raw.panes,
             status: raw.status,
             debug: raw.debug,
+            render: raw.render,
             keys: raw.keys,
         }
     }
@@ -1472,6 +1515,28 @@ dim_alpha = true
         let toml = "[debug]\nfps_counter_enabled = true\n";
         let p: Config = toml::from_str(toml).unwrap();
         assert!(p.debug.fps_counter_enabled);
+    }
+
+    #[test]
+    fn test_render_config_default_and_parse() {
+        let cfg = Config::default();
+        assert_eq!(cfg.render.max_fps, 60);
+        assert_eq!(
+            cfg.render.redraw_interval_nanos(),
+            Duration::from_secs_f64(1.0 / 60.0).as_nanos() as u64
+        );
+
+        let p: Config = toml::from_str("[render]\nmax_fps = 120\n").unwrap();
+        assert_eq!(p.render.max_fps, 120);
+        assert_eq!(
+            p.render.redraw_interval_nanos(),
+            Duration::from_secs_f64(1.0 / 120.0).as_nanos() as u64
+        );
+
+        let uncapped: Config = toml::from_str("[render]\nmax_fps = 0\n").unwrap();
+        assert_eq!(uncapped.render.max_fps, 0);
+        assert_eq!(uncapped.render.redraw_interval_nanos(), 0);
+        assert!(uncapped.render.redraw_interval().is_none());
     }
 
     #[test]
