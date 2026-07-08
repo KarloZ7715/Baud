@@ -6,7 +6,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 use std::time::{Duration, Instant};
@@ -271,6 +271,8 @@ pub struct App {
     pending_config_source: Option<ConfigSource>,
     /// Vigilancia de bloqueos del event loop.
     watchdog: EventLoopWatchdog,
+    /// Intervalo mínimo entre redraws (ns). `0` = sin límite.
+    redraw_interval_nanos: Arc<AtomicU64>,
     /// Overlay de FPS visible (requiere `debug.fps_counter_enabled`).
     fps_overlay_visible: bool,
     /// Pane activo para animacion de parpadeo (solo uno redibuja por blink).
@@ -319,6 +321,7 @@ impl App {
         let window_width = config.window.width as f32;
         let window_height = config.window.height as f32;
         let keybindings = config.keybindings();
+        let redraw_interval_nanos = Arc::new(AtomicU64::new(config.render.redraw_interval_nanos()));
         let tabs: Vec<TabLayout> = sessions
             .iter()
             .map(|h| TabLayout::new(h.session.id))
@@ -358,9 +361,14 @@ impl App {
             pending_pane_sync: false,
             pending_config_source: Some(config_source),
             watchdog,
+            redraw_interval_nanos,
             fps_overlay_visible: false,
             blink_focus,
         }
+    }
+
+    pub fn set_redraw_interval_handle(&mut self, redraw_interval_nanos: Arc<AtomicU64>) {
+        self.redraw_interval_nanos = redraw_interval_nanos;
     }
 
     fn sync_blink_focus(&self) {
@@ -461,10 +469,6 @@ impl App {
                     if let Some(idx) = self.session_by_id(id) {
                         self.sessions[idx].session.dirty = false;
                     }
-                    let since_last = self.last_gui_redraw.map(|t| t.elapsed());
-                    self.gui_redraw_metrics.record_redraw(since_last);
-                    self.last_gui_redraw = Some(Instant::now());
-                    self.gui_redraw_metrics.maybe_log();
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
@@ -698,6 +702,10 @@ impl App {
         }
 
         self.config = new_cfg;
+        self.redraw_interval_nanos.store(
+            self.config.render.redraw_interval_nanos(),
+            Ordering::Relaxed,
+        );
 
         if !self.config.debug.fps_counter_enabled && self.fps_overlay_visible {
             self.fps_overlay_visible = false;
@@ -940,7 +948,13 @@ impl App {
                 crate::grid::DEFAULT_ROWS as u16,
                 crate::grid::DEFAULT_COLS as u16,
             ));
-        let spawned = match crate::event_loop::spawn_session(&cfg, rows, cols, proxy.clone()) {
+        let spawned = match crate::event_loop::spawn_session(
+            &cfg,
+            rows,
+            cols,
+            proxy.clone(),
+            Arc::clone(&self.redraw_interval_nanos),
+        ) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("new_tab: spawn fallo: {e}");
@@ -1144,6 +1158,7 @@ impl App {
             new_rect.rows as u16,
             new_rect.cols as u16,
             proxy.clone(),
+            Arc::clone(&self.redraw_interval_nanos),
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -2757,6 +2772,10 @@ impl ApplicationHandler<UserEvent> for App {
                     panes.len(),
                     panes.iter().filter(|p| p.rebuild).count()
                 );
+                let since_last = self.last_gui_redraw.map(|t| t.elapsed());
+                self.gui_redraw_metrics.record_redraw(since_last);
+                self.last_gui_redraw = Some(Instant::now());
+                self.gui_redraw_metrics.maybe_log();
                 let bold = self.config.bold_is_bright || self.config.theme.bold_is_bright;
                 let layout = self.tabs[self.focused].layout().clone();
                 let t_render = Instant::now();
@@ -3547,6 +3566,22 @@ mod tests {
         assert_eq!(app.focused, 1);
         app.run_action(Action::GotoTab(0));
         assert_eq!(app.focused, 1);
+    }
+
+    #[test]
+    fn test_config_reload_updates_render_cap() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term);
+        let shared = Arc::new(AtomicU64::new(0));
+        app.set_redraw_interval_handle(Arc::clone(&shared));
+
+        let cfg: Config = toml::from_str("[render]\nmax_fps = 120\n").unwrap();
+        app.dispatch_user_event(UserEvent::ConfigReloaded(Box::new(cfg)));
+
+        assert_eq!(
+            shared.load(Ordering::Relaxed),
+            std::time::Duration::from_secs_f64(1.0 / 120.0).as_nanos() as u64
+        );
     }
 
     #[test]
