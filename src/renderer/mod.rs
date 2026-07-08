@@ -86,7 +86,15 @@ pub struct PreeditState {
     pub col: usize,
 }
 
+/// Un pane del layout activo a dibujar en un frame.
+pub struct PaneRender {
+    pub term: Arc<Mutex<Term>>,
+    pub rect: crate::layout::Rect,
+    pub focused: bool,
+}
+
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::ansi::{Color, Term};
@@ -419,6 +427,10 @@ impl Renderer {
         self.grid_top_offset = offset.max(0.0);
     }
 
+    pub fn grid_top_offset(&self) -> f32 {
+        self.grid_top_offset
+    }
+
     /// Aplica un nuevo tamano de fuente y recalcula metricas de celda.
     pub fn set_font_size(&mut self, size: u16) -> (f32, f32) {
         self.font_size = size as f32;
@@ -498,15 +510,17 @@ impl Renderer {
         self.reset_aux_buffers();
     }
 
-    /// Renderiza el estado del `term` en la surface.
-    #[tracing::instrument(skip(self, term, preedit))]
+    /// Renderiza los panes del layout activo en la surface.
+    #[tracing::instrument(skip(self, panes, preedit))]
     #[expect(
         clippy::too_many_arguments,
         reason = "render frame needs term, theme, overlays"
     )]
     pub fn render(
         &mut self,
-        term: &mut Term,
+        panes: &[PaneRender],
+        terminal_area: crate::layout::Rect,
+        layout: &crate::layout::Layout,
         theme: &ThemeConfig,
         bold_is_bright: bool,
         window_opacity: f32,
@@ -516,7 +530,6 @@ impl Renderer {
     ) -> Result<(), String> {
         let t0 = Instant::now();
 
-        // 1. Obtener frame de la surface
         let t_frame_start = Instant::now();
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(tex)
@@ -537,13 +550,36 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let encoder = self
+        let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-        term.ensure_search_cache();
+        if let Some(picker_state) = picker {
+            return self.render_picker_only(
+                picker_state,
+                theme,
+                bold_is_bright,
+                frame,
+                &view,
+                encoder,
+                t0,
+                get_frame_us,
+            );
+        }
 
-        let overrides = ColorOverrides::from_term(term);
+        let focused = panes
+            .iter()
+            .find(|p| p.focused)
+            .or_else(|| panes.first())
+            .expect("render requiere al menos un pane");
+
+        let overrides = {
+            let guard = focused
+                .term
+                .lock()
+                .map_err(|e| format!("term mutex poisoned: {e}"))?;
+            ColorOverrides::from_term(&guard)
+        };
         let palette = Palette {
             theme,
             overrides: &overrides,
@@ -551,228 +587,43 @@ impl Renderer {
         };
         let (fg_r, fg_g, fg_b) = palette.rgb(Color::Default, false);
         let default_fg_color = glyphon::Color::rgb(fg_r, fg_g, fg_b);
-        let grid_damage = term.take_active_grid_damage();
-        let active = term.active_grid();
-        let cols_count = limits::clamp_grid_dimension(active.cols_count);
-        let rows_count = limits::clamp_grid_dimension(active.rows_count);
-        if active.cols_count > limits::MAX_GRID_DIM || active.rows_count > limits::MAX_GRID_DIM {
-            tracing::warn!(
-                raw_cols = active.cols_count,
-                raw_rows = active.rows_count,
-                "grid dimensions clamped to prevent OOM"
-            );
-        }
-        let show_scrollback = term.scrollback_offset > 0;
 
-        // Pre-computar filas del scrollback si es necesario.
-        let sb_rows: Vec<&[Cell]> = if show_scrollback {
-            let sb_offset = term.scrollback_offset as usize;
-            let sb_len = term.grid.scrollback.len();
-            let sb_start = sb_len.saturating_sub(sb_offset);
-            term.grid
-                .scrollback
-                .range(sb_start..)
-                .map(|r| r.as_slice())
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        // Modelo: viewport sobre buffer virtual [scrollback + grid].
-        let row_sources: Vec<&[Cell]> = (0..rows_count)
-            .map(|row| {
-                if show_scrollback {
-                    let sb_len = term.grid.scrollback.len();
-                    let offset = term.scrollback_offset as usize;
-                    let viewport_start = sb_len.saturating_sub(offset);
-                    let virtual_row = viewport_start + row;
-                    if virtual_row < sb_len {
-                        sb_rows[virtual_row - viewport_start]
-                    } else {
-                        let grid_row = virtual_row - sb_len;
-                        &term.grid.rows[grid_row]
-                    }
-                } else {
-                    &active.rows[row]
-                }
-            })
-            .collect();
-
-        self.render_cell_path(
-            term,
-            grid_damage,
-            theme,
-            &palette,
-            frame,
-            &view,
-            encoder,
-            &row_sources,
-            cols_count,
-            rows_count,
-            show_scrollback,
-            default_fg_color,
-            window_opacity,
-            t0,
-            get_frame_us,
-            bold_is_bright,
-            picker,
-            preedit,
-            tabs,
-        )
-    }
-
-    /// Renderiza via display list + CustomGlyph.
-    #[allow(clippy::too_many_arguments)]
-    fn render_cell_path(
-        &mut self,
-        term: &Term,
-        mut damage: DamageSnapshot,
-        theme: &ThemeConfig,
-        palette: &Palette<'_>,
-        frame: wgpu::SurfaceTexture,
-        view: &wgpu::TextureView,
-        mut encoder: wgpu::CommandEncoder,
-        row_sources: &[&[Cell]],
-        cols_count: usize,
-        rows_count: usize,
-        show_scrollback: bool,
-        default_fg_color: glyphon::Color,
-        window_opacity: f32,
-        t0: Instant,
-        get_frame_us: f64,
-        bold_is_bright: bool,
-        picker: Option<&ThemePickerState>,
-        preedit: Option<PreeditState>,
-        tabs: Option<&TabBarLayout>,
-    ) -> Result<(), String> {
-        if let Some(picker_state) = picker {
-            return self.render_picker_only(
-                picker_state,
-                theme,
-                bold_is_bright,
-                frame,
-                view,
-                encoder,
-                t0,
-                get_frame_us,
-            );
-        }
-
-        if show_scrollback {
-            damage = DamageSnapshot::Full;
-        }
-
-        if !damage.is_full() && !damage.has_any_dirty() {
-            damage = DamageSnapshot::Full;
-        }
-
-        let new_bounds = term.selection.as_ref().map(|s| s.normalize());
-        let old_bounds = self.prev_selection_bounds;
-        self.prev_selection_bounds = new_bounds;
-
-        if new_bounds != old_bounds {
-            let mut inv_min = rows_count;
-            let mut inv_max = 0usize;
-            for bounds in [old_bounds, new_bounds].into_iter().flatten() {
-                let (sr, _, er, _) = bounds;
-                for logical in sr.min(er)..=sr.max(er) {
-                    if let Some(vis) = term.logical_to_visible_row(logical) {
-                        inv_min = inv_min.min(vis);
-                        inv_max = inv_max.max(vis);
-                    }
-                }
-            }
-            if inv_min <= inv_max {
-                for row in inv_min..=inv_max.min(rows_count.saturating_sub(1)) {
-                    damage.mark_row_dirty(row, cols_count);
-                }
-            }
-        }
-
-        if term.selection.is_some() && term.scrollback_offset != self.prev_scrollback_offset {
-            damage = DamageSnapshot::Full;
-        }
-        self.prev_scrollback_offset = term.scrollback_offset;
+        self.contrast_cache.clear();
+        let mut base_metrics = self.cell_metrics;
+        base_metrics.padding_y += self.grid_top_offset;
+        self.prepare_glyph_metrics(&base_metrics);
 
         let t_build = Instant::now();
-        self.contrast_cache.clear();
-        let mut frame_metrics = self.cell_metrics;
-        frame_metrics.padding_y += self.grid_top_offset;
-        self.prepare_glyph_metrics(&frame_metrics);
-        let blink_on = crate::renderer::blink_on(
-            term.last_blink_reset.elapsed(),
-            std::time::Duration::from_millis(term.blink_interval_ms),
-        );
-        let bg_cap = self.display_list.bg_quads.capacity();
-        let line_cap = self.display_list.line_quads.capacity();
-        let glyph_cap = self.display_list.text_glyphs.capacity();
-        if damage.is_full() {
-            self.display_list.clear();
+        let mut all_custom_glyphs = Vec::new();
+        for pane in panes {
+            let mut term = pane
+                .term
+                .lock()
+                .map_err(|e| format!("term mutex poisoned: {e}"))?;
+            let mut pane_metrics = base_metrics;
+            pane_metrics.padding_x += pane.rect.x as f32 * self.cell_w;
+            pane_metrics.padding_y += pane.rect.y as f32 * self.cell_h;
+            self.append_pane_glyphs(
+                &mut term,
+                pane.focused,
+                &pane_metrics,
+                pane.rect.cols,
+                pane.rect.rows,
+                theme,
+                bold_is_bright,
+                &mut all_custom_glyphs,
+            )?;
         }
-        self.display_list
-            .bg_quads
-            .reserve(bg_cap.min(limits::MAX_GRID_DIM * limits::MAX_GRID_DIM));
-        self.display_list
-            .line_quads
-            .reserve(line_cap.min(limits::MAX_GRID_DIM * limits::MAX_GRID_DIM));
-        self.display_list
-            .text_glyphs
-            .reserve(glyph_cap.min(limits::MAX_GRID_DIM * limits::MAX_GRID_DIM));
 
-        let mut font_system = if self.ligatures {
-            Some(&mut self.font_system)
-        } else {
-            None
-        };
-        let mut swash_cache = if self.ligatures {
-            Some(&mut self.swash_cache)
-        } else {
-            None
-        };
-        DisplayListBuilder::build(
-            &mut self.display_list,
-            term,
-            &frame_metrics,
-            palette,
-            theme.dim_alpha,
-            row_sources,
-            cols_count,
-            rows_count,
-            &self.font_family,
-            &damage,
-            show_scrollback,
-            self.builtin_box_drawing,
-            blink_on,
-            self.ligatures,
-            &mut font_system,
-            &mut swash_cache,
-            &mut self.contrast_cache,
+        let (dr, dg, db) = palette.rgb(Color::BrightBlack, false);
+        let divider_color = glyphon::Color::rgb(dr, dg, db);
+        push_divider_glyphs(
+            &layout.divider_rects(terminal_area),
+            &base_metrics,
+            divider_color,
+            &mut all_custom_glyphs,
         );
 
-        let mut custom_glyphs = Vec::new();
-        CellRenderer::build_custom_glyphs(
-            &self.display_list,
-            &frame_metrics,
-            palette,
-            theme.dim_alpha,
-            &self.font_family,
-            &mut self.glyph_cache,
-            &mut self.font_system,
-            &mut self.swash_cache,
-            &mut self.contrast_cache,
-            &mut custom_glyphs,
-        )?;
-        debug_assert_custom_glyphs_bounded(&custom_glyphs);
-        tracing::debug!(
-            cols = cols_count,
-            rows = rows_count,
-            cell_w = self.cell_w,
-            cell_h = self.cell_h,
-            bg_quads = self.display_list.bg_quads.len(),
-            text_glyphs = self.display_list.text_glyphs.len(),
-            custom_glyphs = custom_glyphs.len(),
-            "render build complete"
-        );
         let build_us = t_build.elapsed().as_secs_f64() * 1_000_000.0;
 
         if let Some(start) = self.status_start {
@@ -785,9 +636,9 @@ impl Renderer {
         let cell_w = self.cell_w;
         let cell_h = self.cell_h;
         let mut extra_areas: Vec<glyphon::TextArea<'_>> = Vec::with_capacity(8);
-        if let Some(layout) = tabs.filter(|l| !l.segments.is_empty()) {
+        if let Some(tab_layout) = tabs.filter(|l| !l.segments.is_empty()) {
             push_tab_bar(
-                layout,
+                tab_layout,
                 theme,
                 &self.cell_metrics,
                 self.config.width,
@@ -809,10 +660,20 @@ impl Renderer {
             );
         }
         if let Some(pre) = preedit.as_ref().filter(|p| !p.text.is_empty()) {
+            let focused_metrics = panes
+                .iter()
+                .find(|p| p.focused)
+                .map(|p| {
+                    let mut m = base_metrics;
+                    m.padding_x += p.rect.x as f32 * cell_w;
+                    m.padding_y += p.rect.y as f32 * cell_h;
+                    m
+                })
+                .unwrap_or(base_metrics);
             push_preedit_overlay(
                 pre,
-                palette,
-                &frame_metrics,
+                &palette,
+                &focused_metrics,
                 self.config.width,
                 self.cell_w,
                 self.cell_h,
@@ -820,7 +681,7 @@ impl Renderer {
                 &mut self.font_system,
                 &mut self.overlay_buffer,
                 &mut extra_areas,
-                &mut custom_glyphs,
+                &mut all_custom_glyphs,
             );
         } else if self.status_active {
             let overlay_left = self.config.width as f32 - (23.0 * cell_w) - 10.0;
@@ -840,33 +701,41 @@ impl Renderer {
             });
         }
 
-        if let Some(ref search_state) = term.search {
-            crate::search_overlay::fill_bar_buffer(
-                search_state,
-                &mut self.font_system,
-                &self.font_family,
-                &mut self.search_bar_buffer,
-                cell_w,
-                self.config.width as f32,
-                self.cell_h,
-                theme,
-                &mut self.contrast_cache,
-            );
-            crate::search_overlay::push_bar_overlay(
-                &self.search_bar_buffer,
-                &mut extra_areas,
-                &mut custom_glyphs,
-                self.config.width,
-                self.config.height,
-                self.cell_h,
-                theme,
-                &mut self.contrast_cache,
-            );
+        if let Some(focused_pane) = panes.iter().find(|p| p.focused) {
+            let guard = focused_pane
+                .term
+                .lock()
+                .map_err(|e| format!("term mutex poisoned: {e}"))?;
+            if let Some(ref search_state) = guard.search {
+                crate::search_overlay::fill_bar_buffer(
+                    search_state,
+                    &mut self.font_system,
+                    &self.font_family,
+                    &mut self.search_bar_buffer,
+                    cell_w,
+                    self.config.width as f32,
+                    self.cell_h,
+                    theme,
+                    &mut self.contrast_cache,
+                );
+                crate::search_overlay::push_bar_overlay(
+                    &self.search_bar_buffer,
+                    &mut extra_areas,
+                    &mut all_custom_glyphs,
+                    self.config.width,
+                    self.config.height,
+                    self.cell_h,
+                    theme,
+                    &mut self.contrast_cache,
+                );
+            }
         }
+
+        debug_assert_custom_glyphs_bounded(&all_custom_glyphs);
 
         let t_prepare = Instant::now();
         CellRenderer::prepare(
-            &custom_glyphs,
+            &all_custom_glyphs,
             &mut self.font_system,
             &mut self.swash_cache,
             &self.glyph_cache,
@@ -890,7 +759,7 @@ impl Renderer {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cell renderer pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
+                    view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(clear_color),
@@ -915,18 +784,165 @@ impl Renderer {
         self.frame_count += 1;
         if self.frame_count.is_multiple_of(30) {
             tracing::info!(
-                "[RENDER_PERF] frame={} mode=cell total={:.0}us get_frame={:.0}us build={:.0}us prepare={:.0}us gpu={:.0}us rows={} cols={}",
+                "[RENDER_PERF] frame={} mode=cell total={:.0}us get_frame={:.0}us build={:.0}us prepare={:.0}us gpu={:.0}us panes={}",
                 self.frame_count,
                 total_us,
                 get_frame_us,
                 build_us,
                 prepare_us,
                 gpu_us,
-                rows_count,
-                cols_count,
+                panes.len(),
             );
         }
 
+        Ok(())
+    }
+
+    /// Construye custom glyphs de un pane y los agrega a `out`.
+    #[allow(clippy::too_many_arguments)]
+    fn append_pane_glyphs(
+        &mut self,
+        term: &mut Term,
+        track_selection: bool,
+        metrics: &CellMetrics,
+        cols_count: usize,
+        rows_count: usize,
+        theme: &ThemeConfig,
+        bold_is_bright: bool,
+        out: &mut Vec<glyphon::CustomGlyph>,
+    ) -> Result<(), String> {
+        term.ensure_search_cache();
+        let overrides = ColorOverrides::from_term(term);
+        let palette = Palette {
+            theme,
+            overrides: &overrides,
+            bold_is_bright: bold_is_bright || theme.bold_is_bright,
+        };
+        let mut damage = term.take_active_grid_damage();
+        let show_scrollback = term.scrollback_offset > 0;
+        if show_scrollback {
+            damage = DamageSnapshot::Full;
+        }
+        if !damage.is_full() && !damage.has_any_dirty() {
+            damage = DamageSnapshot::Full;
+        }
+
+        if track_selection {
+            let new_bounds = term.selection.as_ref().map(|s| s.normalize());
+            let old_bounds = self.prev_selection_bounds;
+            self.prev_selection_bounds = new_bounds;
+
+            if new_bounds != old_bounds {
+                let mut inv_min = rows_count;
+                let mut inv_max = 0usize;
+                for bounds in [old_bounds, new_bounds].into_iter().flatten() {
+                    let (sr, _, er, _) = bounds;
+                    for logical in sr.min(er)..=sr.max(er) {
+                        if let Some(vis) = term.logical_to_visible_row(logical) {
+                            inv_min = inv_min.min(vis);
+                            inv_max = inv_max.max(vis);
+                        }
+                    }
+                }
+                if inv_min <= inv_max {
+                    for row in inv_min..=inv_max.min(rows_count.saturating_sub(1)) {
+                        damage.mark_row_dirty(row, cols_count);
+                    }
+                }
+            }
+
+            if term.selection.is_some() && term.scrollback_offset != self.prev_scrollback_offset {
+                damage = DamageSnapshot::Full;
+            }
+            self.prev_scrollback_offset = term.scrollback_offset;
+        }
+
+        let cols_count = limits::clamp_grid_dimension(cols_count);
+        let rows_count = limits::clamp_grid_dimension(rows_count);
+
+        let active = term.active_grid();
+        let sb_rows: Vec<&[Cell]> = if show_scrollback {
+            let sb_offset = term.scrollback_offset as usize;
+            let sb_len = term.grid.scrollback.len();
+            let sb_start = sb_len.saturating_sub(sb_offset);
+            term.grid
+                .scrollback
+                .range(sb_start..)
+                .map(|r| r.as_slice())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let row_sources: Vec<&[Cell]> = (0..rows_count)
+            .map(|row| {
+                if show_scrollback {
+                    let sb_len = term.grid.scrollback.len();
+                    let offset = term.scrollback_offset as usize;
+                    let viewport_start = sb_len.saturating_sub(offset);
+                    let virtual_row = viewport_start + row;
+                    if virtual_row < sb_len {
+                        sb_rows[virtual_row - viewport_start]
+                    } else {
+                        let grid_row = virtual_row - sb_len;
+                        &term.grid.rows[grid_row]
+                    }
+                } else {
+                    &active.rows[row]
+                }
+            })
+            .collect();
+
+        self.prepare_glyph_metrics(metrics);
+        let blink_on = crate::renderer::blink_on(
+            term.last_blink_reset.elapsed(),
+            std::time::Duration::from_millis(term.blink_interval_ms),
+        );
+        self.display_list.clear();
+        let mut font_system = if self.ligatures {
+            Some(&mut self.font_system)
+        } else {
+            None
+        };
+        let mut swash_cache = if self.ligatures {
+            Some(&mut self.swash_cache)
+        } else {
+            None
+        };
+        DisplayListBuilder::build(
+            &mut self.display_list,
+            term,
+            metrics,
+            &palette,
+            theme.dim_alpha,
+            &row_sources,
+            cols_count,
+            rows_count,
+            &self.font_family,
+            &damage,
+            show_scrollback,
+            self.builtin_box_drawing,
+            blink_on,
+            self.ligatures,
+            &mut font_system,
+            &mut swash_cache,
+            &mut self.contrast_cache,
+        );
+
+        let mut pane_glyphs = Vec::new();
+        CellRenderer::build_custom_glyphs(
+            &self.display_list,
+            metrics,
+            &palette,
+            theme.dim_alpha,
+            &self.font_family,
+            &mut self.glyph_cache,
+            &mut self.font_system,
+            &mut self.swash_cache,
+            &mut self.contrast_cache,
+            &mut pane_glyphs,
+        )?;
+        out.extend(pane_glyphs);
         Ok(())
     }
 
@@ -1136,6 +1152,35 @@ impl Renderer {
 
         self.status_start = Some(Instant::now());
         self.status_active = true;
+    }
+}
+
+fn push_divider_glyphs(
+    dividers: &[crate::layout::Rect],
+    metrics: &CellMetrics,
+    color: glyphon::Color,
+    out: &mut Vec<glyphon::CustomGlyph>,
+) {
+    let gw = metrics.geometry.cell_w as f32;
+    let gh = metrics.geometry.cell_h as f32;
+    for div in dividers {
+        let width = limits::clamp_custom_dimension(gw * div.cols as f32, gw, div.cols as u32);
+        let height = limits::clamp_custom_dimension(gh * div.rows as f32, gh, div.rows as u32);
+        if limits::custom_pixels(width, height) > limits::MAX_CUSTOM_GLYPH_PIXELS {
+            continue;
+        }
+        let left = div.x as f32 * gw + metrics.padding_x;
+        let top = div.y as f32 * gh + metrics.padding_y;
+        out.push(glyphon::CustomGlyph {
+            id: SOLID_MASK_GLYPH_ID,
+            left,
+            top,
+            width,
+            height,
+            color: Some(color),
+            snap_to_physical_pixel: true,
+            metadata: 1,
+        });
     }
 }
 
