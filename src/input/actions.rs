@@ -31,6 +31,7 @@ pub enum Action {
     FocusPaneLeft,
     FocusPaneRight,
     ClosePane,
+    ToggleFpsCounter,
 }
 
 /// Mapa de combinaciones de tecla a acciones del terminal.
@@ -129,6 +130,7 @@ impl Default for Keybindings {
                 (Key::Left, alt_shift, Action::FocusPaneLeft),
                 (Key::Right, alt_shift, Action::FocusPaneRight),
                 (Key::Char('q'), cs, Action::ClosePane),
+                (Key::F(12), cs, Action::ToggleFpsCounter),
             ],
         }
     }
@@ -223,6 +225,7 @@ pub fn parse_action(s: &str) -> Option<Action> {
         "focus_pane_left" => Action::FocusPaneLeft,
         "focus_pane_right" => Action::FocusPaneRight,
         "close_pane" => Action::ClosePane,
+        "toggle_fps_counter" => Action::ToggleFpsCounter,
         _ => return None,
     })
 }

@@ -261,6 +261,8 @@ pub struct App {
     pending_config_source: Option<ConfigSource>,
     /// Vigilancia de bloqueos del event loop.
     watchdog: EventLoopWatchdog,
+    /// Overlay de FPS visible (requiere `debug.fps_counter_enabled`).
+    fps_overlay_visible: bool,
     /// Pane activo para animacion de parpadeo (solo uno redibuja por blink).
     blink_focus: Arc<BlinkFocus>,
 }
@@ -346,6 +348,7 @@ impl App {
             pending_pane_sync: false,
             pending_config_source: Some(config_source),
             watchdog,
+            fps_overlay_visible: false,
             blink_focus,
         }
     }
@@ -1930,6 +1933,16 @@ impl App {
             FocusPaneLeft => self.focus_pane_direction(crate::layout::Direction::Left),
             FocusPaneRight => self.focus_pane_direction(crate::layout::Direction::Right),
             ClosePane => self.close_pane(),
+            ToggleFpsCounter => {
+                if self.config.debug.fps_counter_enabled {
+                    self.fps_overlay_visible = !self.fps_overlay_visible;
+                    if !self.fps_overlay_visible {
+                        if let Some(renderer) = &mut self.renderer {
+                            renderer.set_status("");
+                        }
+                    }
+                }
+            }
         }
         if let Some(window) = &self.window {
             window.request_redraw();
