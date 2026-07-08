@@ -162,6 +162,16 @@ impl GuiRedrawMetrics {
         );
         *self = Self::new();
     }
+
+    /// FPS promedio en la ventana de métricas actual (0 si sin datos).
+    pub fn current_fps(&self) -> f32 {
+        let elapsed = self.period_start.elapsed().as_secs_f64();
+        if elapsed > 0.0 && self.redraws > 0 {
+            self.redraws as f32 / elapsed as f32
+        } else {
+            0.0
+        }
+    }
 }
 
 /// Sesion con hilos PTY/drain asociados (opcionales en tests).
@@ -2704,6 +2714,7 @@ impl ApplicationHandler<UserEvent> for App {
                     && !status_active
                     && !picker_active
                     && !search_active
+                    && !self.fps_overlay_visible
                     && preedit_empty
                 {
                     tracing::debug!("RedrawRequested: skip (nothing dirty)");
@@ -2764,6 +2775,18 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                     Err(e) => tracing::warn!("error al renderizar: {e}"),
+                }
+                if self.fps_overlay_visible {
+                    if let Some(renderer) = &mut self.renderer {
+                        let fps = self.gui_redraw_metrics.current_fps();
+                        let text = format!("FPS: {:.0}", fps);
+                        renderer.set_status_with_config(
+                            &text,
+                            "",
+                            &self.config.theme,
+                            &self.config.status,
+                        );
+                    }
                 }
                 let render_ms = t_render.elapsed().as_millis();
                 if render_ms > 250 {
