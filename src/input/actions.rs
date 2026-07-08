@@ -21,10 +21,15 @@ pub enum Action {
     NextTab,
     PrevTab,
     GotoTab(u8),
-    SplitVertical,
-    SplitHorizontal,
+    SplitPane,
+    ToggleSplit,
+    SwapSplit,
     FocusNextPane,
     FocusPrevPane,
+    FocusPaneUp,
+    FocusPaneDown,
+    FocusPaneLeft,
+    FocusPaneRight,
     ClosePane,
 }
 
@@ -86,6 +91,11 @@ impl Default for Keybindings {
             alt: true,
             ..Mods::NONE
         };
+        let alt_shift = Mods {
+            alt: true,
+            shift: true,
+            ..Mods::NONE
+        };
         Self {
             bindings: vec![
                 (Key::Char('c'), cs, Action::Copy),
@@ -109,10 +119,15 @@ impl Default for Keybindings {
                 (Key::PageUp, Mods::NONE, Action::ScrollPageUp),
                 (Key::PageDown, Mods::NONE, Action::ScrollPageDown),
                 (Key::End, ctrl, Action::ScrollToBottom),
-                (Key::Char('d'), cs, Action::SplitVertical),
-                (Key::Char('e'), cs, Action::SplitHorizontal),
+                (Key::Char('d'), cs, Action::SplitPane),
+                (Key::Char('|'), cs, Action::ToggleSplit),
+                (Key::Char('s'), cs, Action::SwapSplit),
                 (Key::Right, cs, Action::FocusNextPane),
                 (Key::Left, cs, Action::FocusPrevPane),
+                (Key::Up, alt_shift, Action::FocusPaneUp),
+                (Key::Down, alt_shift, Action::FocusPaneDown),
+                (Key::Left, alt_shift, Action::FocusPaneLeft),
+                (Key::Right, alt_shift, Action::FocusPaneRight),
                 (Key::Char('q'), cs, Action::ClosePane),
             ],
         }
@@ -198,10 +213,15 @@ pub fn parse_action(s: &str) -> Option<Action> {
         s if let Some(n) = s.strip_prefix("goto_tab_").and_then(|d| d.parse().ok()) => {
             Action::GotoTab(n)
         }
-        "split_vertical" => Action::SplitVertical,
-        "split_horizontal" => Action::SplitHorizontal,
+        "split_pane" | "split_vertical" | "split_horizontal" => Action::SplitPane,
+        "toggle_split" => Action::ToggleSplit,
+        "swap_split" => Action::SwapSplit,
         "focus_next_pane" => Action::FocusNextPane,
         "focus_prev_pane" => Action::FocusPrevPane,
+        "focus_pane_up" => Action::FocusPaneUp,
+        "focus_pane_down" => Action::FocusPaneDown,
+        "focus_pane_left" => Action::FocusPaneLeft,
+        "focus_pane_right" => Action::FocusPaneRight,
         "close_pane" => Action::ClosePane,
         _ => return None,
     })
@@ -323,6 +343,43 @@ mod tests {
         };
         assert_eq!(kb.lookup(Key::PageDown, ctrl), Some(Action::NextTab));
         assert_eq!(kb.lookup(Key::PageUp, ctrl), Some(Action::PrevTab));
+    }
+
+    #[test]
+    fn test_default_bindings_pane_splits() {
+        let kb = Keybindings::default();
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(kb.lookup(Key::Char('d'), cs), Some(Action::SplitPane));
+        assert_eq!(kb.lookup(Key::Char('|'), cs), Some(Action::ToggleSplit));
+        assert_eq!(kb.lookup(Key::Char('s'), cs), Some(Action::SwapSplit));
+        assert_eq!(kb.lookup(Key::Char('t'), cs), Some(Action::NewTab));
+        assert_eq!(kb.lookup(Key::Char('e'), cs), None);
+        assert_eq!(kb.lookup(Key::Right, cs), Some(Action::FocusNextPane));
+        assert_eq!(kb.lookup(Key::Left, cs), Some(Action::FocusPrevPane));
+        assert_eq!(kb.lookup(Key::Char('q'), cs), Some(Action::ClosePane));
+        let alt_shift = Mods {
+            alt: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(kb.lookup(Key::Up, alt_shift), Some(Action::FocusPaneUp));
+        assert_eq!(kb.lookup(Key::Down, alt_shift), Some(Action::FocusPaneDown));
+    }
+
+    #[test]
+    fn test_parse_action_pane_str() {
+        assert_eq!(parse_action("split_pane"), Some(Action::SplitPane));
+        assert_eq!(parse_action("split_vertical"), Some(Action::SplitPane));
+        assert_eq!(parse_action("split_horizontal"), Some(Action::SplitPane));
+        assert_eq!(parse_action("toggle_split"), Some(Action::ToggleSplit));
+        assert_eq!(parse_action("swap_split"), Some(Action::SwapSplit));
+        assert_eq!(parse_action("focus_next_pane"), Some(Action::FocusNextPane));
+        assert_eq!(parse_action("focus_pane_up"), Some(Action::FocusPaneUp));
+        assert_eq!(parse_action("close_pane"), Some(Action::ClosePane));
     }
 
     #[test]

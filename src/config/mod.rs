@@ -61,6 +61,8 @@ pub struct Config {
     #[serde(default)]
     pub notifications: NotificationsConfig,
     #[serde(default)]
+    pub panes: PanesConfig,
+    #[serde(default)]
     pub keys: BTreeMap<String, String>,
 }
 
@@ -258,6 +260,8 @@ struct RawConfig {
     #[serde(default)]
     notifications: NotificationsConfig,
     #[serde(default)]
+    panes: PanesConfig,
+    #[serde(default)]
     keys: BTreeMap<String, String>,
 }
 
@@ -307,6 +311,7 @@ impl From<RawConfig> for Config {
             allow_osc52_read: raw.allow_osc52_read,
             process: raw.process,
             notifications: raw.notifications,
+            panes: raw.panes,
             keys: raw.keys,
         }
     }
@@ -387,6 +392,42 @@ fn default_win_width() -> u32 {
 
 fn default_win_height() -> u32 {
     600
+}
+
+/// Layout de panes (dwindle Hyprland).
+#[derive(Debug, Clone, Deserialize)]
+pub struct PanesConfig {
+    /// Máximo de panes por tab. 0 = sin límite.
+    #[serde(default = "default_max_panes")]
+    pub max: usize,
+    /// Hyprland dwindle:split_width_multiplier
+    #[serde(default = "default_split_width_multiplier")]
+    pub split_width_multiplier: f32,
+    /// Split según posición del cursor (triángulos Hyprland).
+    #[serde(default)]
+    pub smart_split: bool,
+    /// No recalcular orient al resize. Se activa también con smart_split.
+    #[serde(default)]
+    pub preserve_split: bool,
+}
+
+fn default_max_panes() -> usize {
+    12
+}
+
+fn default_split_width_multiplier() -> f32 {
+    1.0
+}
+
+impl Default for PanesConfig {
+    fn default() -> Self {
+        Self {
+            max: default_max_panes(),
+            split_width_multiplier: default_split_width_multiplier(),
+            smart_split: false,
+            preserve_split: false,
+        }
+    }
 }
 
 /// Límite de líneas en scrollback (configurable; ver `unlimited`).
@@ -726,6 +767,20 @@ impl Config {
         } else {
             self.scrollback.lines
         }
+    }
+
+    /// Límite de panes por tab (`None` si `panes.max == 0`).
+    pub fn panes_max(&self) -> Option<usize> {
+        if self.panes.max == 0 {
+            None
+        } else {
+            Some(self.panes.max)
+        }
+    }
+
+    /// `preserve_split` efectivo (smart_split lo activa como en Hyprland).
+    pub fn effective_preserve_split(&self) -> bool {
+        self.panes.preserve_split || self.panes.smart_split
     }
 
     /// Construye la configuración del proceso hijo del PTY.
@@ -1131,6 +1186,22 @@ login = true
         assert_eq!(p.cursor.color.as_deref(), Some("#ff8800"));
         assert_eq!(p.cursor.style, "bar");
         assert!(!p.cursor.blink);
+    }
+
+    #[test]
+    fn test_panes_config_defaults() {
+        let cfg = Config::default();
+        assert_eq!(cfg.panes.max, 12);
+        assert!((cfg.panes.split_width_multiplier - 1.0).abs() < f32::EPSILON);
+        assert!(!cfg.panes.smart_split);
+        assert!(!cfg.panes.preserve_split);
+        assert_eq!(cfg.panes_max(), Some(12));
+    }
+
+    #[test]
+    fn test_panes_max_zero_unlimited() {
+        let cfg: Config = toml::from_str("[panes]\nmax = 0").unwrap();
+        assert_eq!(cfg.panes_max(), None);
     }
 
     #[test]

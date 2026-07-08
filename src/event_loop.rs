@@ -30,6 +30,30 @@ const METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 // ponytail: tope de bytes por pasada del drain; suelta el mutex del Term para la GUI.
 const DRAIN_MAX_BYTES_PER_PASS: usize = 256 * 1024;
 
+/// Sesion cuyo cursor/celdas SGR 5 deben parpadear (solo una a la vez).
+#[derive(Debug)]
+pub struct BlinkFocus {
+    current: Mutex<SessionId>,
+}
+
+impl BlinkFocus {
+    pub fn new(id: SessionId) -> Arc<Self> {
+        Arc::new(Self {
+            current: Mutex::new(id),
+        })
+    }
+
+    pub fn set(&self, id: SessionId) {
+        if let Ok(mut guard) = self.current.lock() {
+            *guard = id;
+        }
+    }
+
+    pub fn is_active(&self, id: SessionId) -> bool {
+        self.current.lock().is_ok_and(|guard| *guard == id)
+    }
+}
+
 /// Eventos que el hilo PTY envía al hilo drain.
 pub enum PtyEvent {
     /// Datos crudos leidos del master PTY.
@@ -219,13 +243,14 @@ pub(crate) fn spawn_blink_timer(
     term: Arc<Mutex<Term>>,
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     session_id: SessionId,
+    focus: Arc<BlinkFocus>,
 ) {
     thread::spawn(move || loop {
-        let interval_ms = match term.lock() {
+        let interval_ms = match term.try_lock() {
             Ok(g) => g.blink_interval_ms,
-            Err(e) => {
-                tracing::warn!("blink timer: term mutex envenenado, deteniendo: {e}");
-                return;
+            Err(_) => {
+                thread::sleep(Duration::from_millis(50));
+                continue;
             }
         };
         if interval_ms == 0 {
@@ -234,7 +259,10 @@ pub(crate) fn spawn_blink_timer(
         }
         let interval = Duration::from_millis(interval_ms);
         thread::sleep(interval / 2);
-        let blinking = match term.lock() {
+        if !focus.is_active(session_id) {
+            continue;
+        }
+        let blinking = match term.try_lock() {
             Ok(mut g) => {
                 if g.has_blink_stuff() {
                     g.mark_dirty();
@@ -243,10 +271,7 @@ pub(crate) fn spawn_blink_timer(
                     false
                 }
             }
-            Err(e) => {
-                tracing::warn!("blink timer: term mutex envenenado, deteniendo: {e}");
-                return;
-            }
+            Err(_) => false,
         };
         if blinking {
             let _ = proxy.send_event(UserEvent::RedrawNeeded(session_id));
@@ -490,10 +515,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         proxy.clone(),
     )?;
 
+    let blink_focus = BlinkFocus::new(spawned.session.id);
+
     spawn_blink_timer(
         Arc::clone(&spawned.session.term),
         proxy.clone(),
         spawned.session.id,
+        Arc::clone(&blink_focus),
     );
 
     let config_watch = Arc::new(Mutex::new(crate::config::watch::WatchState::new(
@@ -523,6 +551,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         app_config,
         config_watch,
         Some(proxy),
+        blink_focus,
     );
 
     if let Some(cmd) = startup_command {

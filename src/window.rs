@@ -16,10 +16,11 @@ use crate::clipboard::{self, CopyTarget};
 use crate::config::watch::WatchState;
 use crate::config::{persist, Config, ProcessSection, StartupState};
 use crate::copy_mode::CopyModeState;
+use crate::event_loop::BlinkFocus;
 use crate::grid::Cell;
 use crate::input::actions::{normalize_binding_key, Action, Keybindings};
 use crate::input::keymap::{self, Key as KKey, KeyEventKind, KeyModes, Mods};
-use crate::layout::{Orientation, Rect as LayoutRect, TabLayout};
+use crate::layout::{Rect as LayoutRect, TabLayout};
 use crate::pty::PtyCommand;
 use crate::renderer::{
     compute_layout, tab_bar_height_px, PaneRender, PreeditState, Renderer, TabBarLayout,
@@ -253,6 +254,10 @@ pub struct App {
     tab_close_alpha: f32,
     /// Marca de tiempo para interpolar el fade del ×.
     tab_anim_last: Instant,
+    /// Reintenta sync de grids cuando un pane estaba bloqueado por el drain.
+    pending_pane_sync: bool,
+    /// Pane activo para animacion de parpadeo (solo uno redibuja por blink).
+    blink_focus: Arc<BlinkFocus>,
 }
 
 fn allowed_open_url(url: &str) -> bool {
@@ -288,6 +293,7 @@ impl App {
         config: Config,
         config_watch: Arc<Mutex<WatchState>>,
         proxy: Option<EventLoopProxy<UserEvent>>,
+        blink_focus: Arc<BlinkFocus>,
     ) -> Self {
         debug_assert!(!sessions.is_empty(), "App requiere al menos una sesion");
         let font_size = config.font.size;
@@ -330,6 +336,14 @@ impl App {
             tab_close_tab: None,
             tab_close_alpha: 0.0,
             tab_anim_last: Instant::now(),
+            pending_pane_sync: false,
+            blink_focus,
+        }
+    }
+
+    fn sync_blink_focus(&self) {
+        if let Some(tab) = self.tabs.get(self.focused) {
+            self.blink_focus.set(tab.focused());
         }
     }
 
@@ -386,6 +400,7 @@ impl App {
         }
         self.focused = index;
         self.apply_focused_window_title();
+        self.sync_blink_focus();
         if let Some(id) = self.tabs.get(index).map(TabLayout::focused) {
             if let Some(idx) = self.session_by_id(id) {
                 self.sessions[idx].session.dirty = false;
@@ -443,9 +458,16 @@ impl App {
                 }
             }
             UserEvent::PtyExited(id, code) => {
-                if self.is_focused_session(id) {
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer.set_status(&format!("[Proceso terminado: codigo {}]", code));
+                if self.is_session_in_active_tab(id) {
+                    if self.is_focused_session(id) {
+                        if let Some(renderer) = &mut self.renderer {
+                            renderer.set_status(&format!("[Proceso terminado: codigo {}]", code));
+                        }
+                    } else if self.tabs[self.focused].leaves().len() > 1 {
+                        if let Some(renderer) = &mut self.renderer {
+                            renderer.set_status(&format!("[Pane cerrado: codigo {}]", code));
+                        }
+                        self.close_pane_session(id);
                     }
                     if let Some(window) = &self.window {
                         window.request_redraw();
@@ -456,6 +478,13 @@ impl App {
                 if self.is_focused_session(id) {
                     if let Some(renderer) = &mut self.renderer {
                         renderer.set_status(&format!("[Error PTY: {}]", msg));
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                } else if self.is_session_in_active_tab(id) {
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.set_status(&format!("[Error PTY en pane: {}]", msg));
                     }
                     if let Some(window) = &self.window {
                         window.request_redraw();
@@ -568,7 +597,7 @@ impl App {
             .map(|(_, r)| r)
             .unwrap_or(area);
         let x = pad_x + (pane_rect.x as f32 + col as f32) * cell_w;
-        let y = pad_y + renderer.grid_top_offset() + (pane_rect.y as f32 + row as f32) * cell_h;
+        let y = pad_y + (pane_rect.y as f32 + row as f32) * cell_h;
         window.set_ime_cursor_area(
             winit::dpi::PhysicalPosition::new(x as i32, y as i32),
             winit::dpi::PhysicalSize::new(cell_w as u32, cell_h as u32),
@@ -635,7 +664,7 @@ impl App {
         }
         if let (Some(renderer), Some(window)) = (&self.renderer, &self.window) {
             let size = window.inner_size();
-            self.sync_grid_to_window(
+            let (_, _, _, _, deferred) = self.sync_grid_to_window(
                 size.width,
                 size.height,
                 renderer.cell_w,
@@ -643,6 +672,7 @@ impl App {
                 true,
                 false,
             );
+            self.pending_pane_sync = deferred;
         }
 
         self.config = new_cfg;
@@ -670,6 +700,8 @@ impl App {
     }
 
     /// Sincroniza grid emulado y PTY con el tamano de ventana en pixeles.
+    /// Sincroniza el grid con el tamano de ventana y el layout de panes activo.
+    /// Devuelve `true` si alguna sesion no pudo redimensionarse (mutex ocupado).
     fn sync_grid_to_window(
         &mut self,
         width: u32,
@@ -678,7 +710,7 @@ impl App {
         cell_h: f32,
         preserve_scrollback: bool,
         reflow: bool,
-    ) -> (usize, usize, usize, usize) {
+    ) -> (usize, usize, usize, usize, bool) {
         let reserved = self.tab_bar_rows();
         if let Some(renderer) = &mut self.renderer {
             let chrome_px = if reserved > 0 {
@@ -690,46 +722,54 @@ impl App {
         }
         let focused_id = self.focused_session().id;
         let area = self.terminal_area_rect(width, height, cell_w, cell_h);
+        let mult = self.config.panes.split_width_multiplier;
+        self.tabs[self.focused].recalc_dwindle_orients(area, mult);
         let pane_rects = self.tabs[self.focused].layout().rects(area);
-        for host in &self.sessions {
+        let mut deferred = false;
+        for host in &mut self.sessions {
             let pane = pane_rects
                 .iter()
                 .find(|(id, _)| *id == host.session.id)
                 .map(|(_, r)| r);
             let (new_rows, new_cols) = if let Some(r) = pane {
                 (r.rows, r.cols)
-            } else if let Ok(guard) = host.session.term.lock() {
+            } else if let Ok(guard) = host.session.term.try_lock() {
                 let active = guard.active_grid();
                 (active.rows_count, active.cols_count)
             } else {
+                deferred = true;
+                host.session.dirty = true;
                 continue;
             };
-            if let Ok(mut guard) = host.session.term.lock() {
-                let active = guard.active_grid();
-                let old_r = active.rows_count;
-                let old_c = active.cols_count;
-                guard.resize_grid(new_rows, new_cols, reflow);
-                if preserve_scrollback && host.session.id == focused_id {
-                    let max_offset = guard.scrollback_len();
-                    guard.scrollback_offset = guard.scrollback_offset.min(max_offset as isize);
-                } else if !preserve_scrollback {
-                    guard.scrollback_offset = 0;
-                }
-                if old_r != new_rows || old_c != new_cols {
-                    let _ = host.session.pty_tx.send(PtyCommand::Resize {
-                        rows: new_rows as u16,
-                        cols: new_cols as u16,
-                    });
-                }
+            let Ok(mut guard) = host.session.term.try_lock() else {
+                deferred = true;
+                host.session.dirty = true;
+                continue;
+            };
+            let active = guard.active_grid();
+            let old_r = active.rows_count;
+            let old_c = active.cols_count;
+            guard.resize_grid(new_rows, new_cols, reflow);
+            if preserve_scrollback && host.session.id == focused_id {
+                let max_offset = guard.scrollback_len();
+                guard.scrollback_offset = guard.scrollback_offset.min(max_offset as isize);
+            } else if !preserve_scrollback {
+                guard.scrollback_offset = 0;
+            }
+            if old_r != new_rows || old_c != new_cols {
+                let _ = host.session.pty_tx.send(PtyCommand::Resize {
+                    rows: new_rows as u16,
+                    cols: new_cols as u16,
+                });
             }
         }
-        let (old_rows, old_cols) = if let Ok(guard) = self.focused_term().lock() {
+        let (old_rows, old_cols) = if let Ok(guard) = self.focused_term().try_lock() {
             let active = guard.active_grid();
             (active.rows_count, active.cols_count)
         } else {
             (area.rows, area.cols)
         };
-        (old_rows, old_cols, area.rows, area.cols)
+        (old_rows, old_cols, area.rows, area.cols, deferred)
     }
 
     fn tab_bar_rows(&self) -> usize {
@@ -749,16 +789,24 @@ impl App {
     }
 
     fn sync_after_tab_change(&mut self) {
-        let Some(window) = &self.window else {
-            return;
+        let (width, height, cell_w, cell_h) = {
+            let Some(window) = &self.window else {
+                return;
+            };
+            let Some(renderer) = &self.renderer else {
+                return;
+            };
+            let size = window.inner_size();
+            (size.width, size.height, renderer.cell_w, renderer.cell_h)
         };
-        let Some(renderer) = &self.renderer else {
-            return;
-        };
-        let size = window.inner_size();
-        let cell_w = renderer.cell_w;
-        let cell_h = renderer.cell_h;
-        self.sync_grid_to_window(size.width, size.height, cell_w, cell_h, true, false);
+        let (_, _, _, _, deferred) =
+            self.sync_grid_to_window(width, height, cell_w, cell_h, true, false);
+        self.pending_pane_sync = deferred;
+        if deferred {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
     }
 
     fn tab_bar_layout(&self, renderer: &Renderer) -> Option<TabBarLayout> {
@@ -877,6 +925,7 @@ impl App {
             Arc::clone(&spawned.session.term),
             proxy,
             spawned.session.id,
+            Arc::clone(&self.blink_focus),
         );
         self.sessions.push(SessionHost::from_spawned(spawned));
         let new_id = self
@@ -887,6 +936,7 @@ impl App {
             .id;
         self.tabs.push(TabLayout::new(new_id));
         self.focused = self.tabs.len() - 1;
+        self.sync_blink_focus();
         self.apply_focused_window_title();
         self.sync_after_tab_change();
     }
@@ -926,36 +976,146 @@ impl App {
         self.tab_hover = None;
         self.tab_close_tab = None;
         self.tab_close_alpha = 0.0;
+        self.sync_blink_focus();
         self.apply_focused_window_title();
         self.sync_after_tab_change();
     }
 
-    fn split_pane(&mut self, orient: Orientation) {
+    fn split_pane(&mut self) {
         let Some(proxy) = self.proxy.clone() else {
             tracing::warn!("split_pane: proxy no disponible");
             return;
         };
-        let cwd = self.focused_term().lock().ok().and_then(|t| t.cwd.clone());
-        let cfg = self.config_with_cwd(cwd);
-        let (rows, cols) = self
-            .focused_term()
-            .lock()
-            .ok()
-            .map(|g| {
-                let grid = g.active_grid();
-                (grid.rows_count as u16, grid.cols_count as u16)
-            })
-            .unwrap_or((
-                crate::grid::DEFAULT_ROWS as u16,
-                crate::grid::DEFAULT_COLS as u16,
-            ));
-        if rows < 4 || cols < 4 {
-            if let Some(renderer) = &mut self.renderer {
-                renderer.set_status("[Pane demasiado pequeno para dividir]");
+        let tab_idx = self.focused;
+        let focused_id = self.tabs[tab_idx].focused();
+
+        if let Some(max) = self.config.panes_max() {
+            if self.tabs[tab_idx].leaves().len() >= max {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_status(&format!("[Limite de {max} panes alcanzado]"));
+                }
+                return;
             }
-            return;
         }
-        let spawned = match crate::event_loop::spawn_session(&cfg, rows, cols, proxy.clone()) {
+
+        let (cell_w, cell_h, win_w, win_h) = match (&self.renderer, &self.window) {
+            (Some(r), Some(w)) => {
+                let s = w.inner_size();
+                (r.cell_w, r.cell_h, s.width, s.height)
+            }
+            (Some(r), None) => (
+                r.cell_w,
+                r.cell_h,
+                self.window_width as u32,
+                self.window_height as u32,
+            ),
+            _ => {
+                tracing::warn!("split_pane: renderer no disponible");
+                return;
+            }
+        };
+        let mult = self.config.panes.split_width_multiplier;
+        let preserve = self.config.effective_preserve_split();
+        let area = self.terminal_area_rect(win_w, win_h, cell_w, cell_h);
+        self.tabs[tab_idx].recalc_dwindle_orients(area, mult);
+        let focused_rect = self.tabs[tab_idx]
+            .layout()
+            .rects(area)
+            .into_iter()
+            .find(|(id, _)| *id == focused_id)
+            .map(|(_, r)| r)
+            .unwrap_or(area);
+
+        let (orient, old_first) = if self.config.panes.smart_split {
+            let Some(renderer) = &self.renderer else {
+                return;
+            };
+            let (mouse_row, mouse_col) =
+                self.mouse_cell_coords_in_focused_pane(renderer, &focused_rect);
+            let p = crate::layout::smart_split_decision(focused_rect, mouse_col, mouse_row);
+            let orient = if crate::layout::can_split(
+                focused_rect,
+                p.orient,
+                crate::layout::MIN_PANE_COLS,
+                crate::layout::MIN_PANE_ROWS,
+            ) {
+                p.orient
+            } else {
+                match p.orient {
+                    crate::layout::Orientation::Vertical => crate::layout::Orientation::Horizontal,
+                    crate::layout::Orientation::Horizontal => crate::layout::Orientation::Vertical,
+                }
+            };
+            if !crate::layout::can_split(
+                focused_rect,
+                orient,
+                crate::layout::MIN_PANE_COLS,
+                crate::layout::MIN_PANE_ROWS,
+            ) {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_status("[Pane demasiado pequeno para dividir]");
+                }
+                return;
+            }
+            let old_first = if orient == p.orient {
+                p.old_first
+            } else {
+                true
+            };
+            (orient, old_first)
+        } else {
+            let Some(orient) = crate::layout::dwindle_split_orient(focused_rect, mult) else {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_status("[Pane demasiado pequeno para dividir]");
+                }
+                return;
+            };
+            (orient, true)
+        };
+
+        let (rect_a, rect_b) = crate::layout::split_rect(focused_rect, orient, 0.5);
+        let (old_rect, new_rect) = if old_first {
+            (rect_a, rect_b)
+        } else {
+            (rect_b, rect_a)
+        };
+        tracing::info!(
+            "split_pane: {}x{} -> {}x{} + {}x{}",
+            focused_rect.cols,
+            focused_rect.rows,
+            old_rect.cols,
+            old_rect.rows,
+            new_rect.cols,
+            new_rect.rows
+        );
+
+        let cwd = self
+            .focused_term()
+            .try_lock()
+            .ok()
+            .and_then(|t| t.cwd.clone());
+        let cfg = self.config_with_cwd(cwd);
+
+        if let Some(idx) = self.session_by_id(focused_id) {
+            let host = &self.sessions[idx];
+            if let Ok(mut guard) = host.session.term.try_lock() {
+                guard.resize_grid(old_rect.rows, old_rect.cols, false);
+                drop(guard);
+                let _ = host.session.pty_tx.send(PtyCommand::Resize {
+                    rows: old_rect.rows as u16,
+                    cols: old_rect.cols as u16,
+                });
+            } else {
+                self.pending_pane_sync = true;
+            }
+        }
+
+        let spawned = match crate::event_loop::spawn_session(
+            &cfg,
+            new_rect.rows as u16,
+            new_rect.cols as u16,
+            proxy.clone(),
+        ) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("split_pane: spawn fallo: {e}");
@@ -969,11 +1129,18 @@ impl App {
             Arc::clone(&spawned.session.term),
             proxy,
             spawned.session.id,
+            Arc::clone(&self.blink_focus),
         );
         let new_id = spawned.session.id;
         self.sessions.push(SessionHost::from_spawned(spawned));
-        self.tabs[self.focused].split_focused(orient, new_id);
+        self.tabs[tab_idx].split_dwindle_ordered(new_id, orient, preserve, old_first);
+        for id in self.tabs[tab_idx].leaves() {
+            if let Some(idx) = self.session_by_id(id) {
+                self.sessions[idx].session.dirty = true;
+            }
+        }
         self.apply_focused_window_title();
+        self.sync_blink_focus();
         self.sync_after_tab_change();
     }
 
@@ -981,23 +1148,96 @@ impl App {
         let Some(closed_id) = self.tabs[self.focused].close_focused() else {
             return;
         };
+        self.remove_pane_session(closed_id);
+    }
+
+    fn close_pane_session(&mut self, closed_id: SessionId) {
+        if self.tabs[self.focused].close_pane(closed_id).is_none() {
+            return;
+        }
+        self.remove_pane_session(closed_id);
+    }
+
+    fn remove_pane_session(&mut self, closed_id: SessionId) {
         if let Some(idx) = self.session_by_id(closed_id) {
             let host = self.sessions.remove(idx);
             let _ = host.session.pty_tx.send(PtyCommand::Shutdown);
             self.detached_hosts.push(host);
         }
         self.apply_focused_window_title();
+        self.sync_blink_focus();
         self.sync_after_tab_change();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn mark_tab_panes_dirty_for_chrome(&mut self) {
+        for id in self.tabs[self.focused].leaves() {
+            if let Some(idx) = self.session_by_id(id) {
+                self.sessions[idx].session.dirty = true;
+                if let Ok(mut guard) = self.sessions[idx].session.term.try_lock() {
+                    guard.mark_dirty();
+                }
+            }
+        }
+    }
+
+    fn focus_pane_by_id(&mut self, id: SessionId) -> bool {
+        if !self.tabs[self.focused].focus_pane(id) {
+            return false;
+        }
+        self.sync_blink_focus();
+        self.mark_tab_panes_dirty_for_chrome();
+        self.apply_focused_window_title();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        true
     }
 
     fn focus_next_pane(&mut self) {
         self.tabs[self.focused].focus_next();
+        self.sync_blink_focus();
+        self.mark_tab_panes_dirty_for_chrome();
         self.apply_focused_window_title();
     }
 
     fn focus_prev_pane(&mut self) {
         self.tabs[self.focused].focus_prev();
+        self.sync_blink_focus();
+        self.mark_tab_panes_dirty_for_chrome();
         self.apply_focused_window_title();
+    }
+
+    fn focus_pane_direction(&mut self, dir: crate::layout::Direction) {
+        let Some(renderer) = &self.renderer else {
+            return;
+        };
+        let (cell_w, cell_h) = (renderer.cell_w(), renderer.cell_h());
+        let area = self.terminal_area_rect(
+            self.window_width as u32,
+            self.window_height as u32,
+            cell_w,
+            cell_h,
+        );
+        if self.tabs[self.focused].focus_direction(area, dir) {
+            self.sync_blink_focus();
+            self.mark_tab_panes_dirty_for_chrome();
+            self.apply_focused_window_title();
+        }
+    }
+
+    fn toggle_split(&mut self) {
+        if self.tabs[self.focused].toggle_split_focused() {
+            self.sync_after_tab_change();
+        }
+    }
+
+    fn swap_split(&mut self) {
+        if self.tabs[self.focused].swap_split_focused() {
+            self.sync_after_tab_change();
+        }
     }
 
     fn next_tab(&mut self) {
@@ -1006,6 +1246,7 @@ impl App {
             return;
         }
         self.focused = (self.focused + 1) % len;
+        self.sync_blink_focus();
         self.apply_focused_window_title();
         self.sync_after_tab_change();
     }
@@ -1016,6 +1257,7 @@ impl App {
             return;
         }
         self.focused = (self.focused + len - 1) % len;
+        self.sync_blink_focus();
         self.apply_focused_window_title();
         self.sync_after_tab_change();
     }
@@ -1026,6 +1268,7 @@ impl App {
             return;
         }
         self.focused = ((n as usize) - 1).min(len - 1);
+        self.sync_blink_focus();
         self.apply_focused_window_title();
         self.sync_after_tab_change();
     }
@@ -1584,8 +1827,9 @@ impl App {
             let (cell_w, cell_h) = renderer.set_font_size(self.font_size);
             if let Some(window) = &self.window {
                 let size = window.inner_size();
-                let (old_rows, _, new_rows, _) =
+                let (old_rows, _, new_rows, _, deferred) =
                     self.sync_grid_to_window(size.width, size.height, cell_w, cell_h, true, false);
+                self.pending_pane_sync = deferred;
                 // Al reducir filas, anclar el borde inferior visible (evita que el contenido "suba").
                 if old_rows > new_rows {
                     if let Ok(mut guard) = self.focused_term().lock() {
@@ -1657,10 +1901,15 @@ impl App {
             NextTab => self.next_tab(),
             PrevTab => self.prev_tab(),
             GotoTab(n) => self.goto_tab(n),
-            SplitVertical => self.split_pane(Orientation::Vertical),
-            SplitHorizontal => self.split_pane(Orientation::Horizontal),
+            SplitPane => self.split_pane(),
+            ToggleSplit => self.toggle_split(),
+            SwapSplit => self.swap_split(),
             FocusNextPane => self.focus_next_pane(),
             FocusPrevPane => self.focus_prev_pane(),
+            FocusPaneUp => self.focus_pane_direction(crate::layout::Direction::Up),
+            FocusPaneDown => self.focus_pane_direction(crate::layout::Direction::Down),
+            FocusPaneLeft => self.focus_pane_direction(crate::layout::Direction::Left),
+            FocusPaneRight => self.focus_pane_direction(crate::layout::Direction::Right),
             ClosePane => self.close_pane(),
         }
         if let Some(window) = &self.window {
@@ -1830,6 +2079,17 @@ impl App {
         let _ = self.focused_session().pty_tx.send(PtyCommand::Input(bytes));
     }
 
+    /// Origen en pixeles del pane (pad incluye tab bar via `grid_padding`).
+    fn pane_pixel_origin(renderer: &Renderer, rect: &LayoutRect) -> (f32, f32) {
+        let (pad_x, pad_y) = renderer.grid_padding();
+        let cell_w = renderer.cell_w();
+        let cell_h = renderer.cell_h();
+        (
+            pad_x + rect.x as f32 * cell_w,
+            pad_y + rect.y as f32 * cell_h,
+        )
+    }
+
     /// Mapea pixeles de ventana a (session, row, col) dentro del pane bajo el cursor.
     fn pixel_to_pane_cell(
         &self,
@@ -1837,7 +2097,6 @@ impl App {
         y: f64,
         renderer: &Renderer,
     ) -> Option<(SessionId, usize, usize)> {
-        let (pad_x, pad_y) = renderer.grid_padding();
         let cell_w = renderer.cell_w();
         let cell_h = renderer.cell_h();
         let area = self.terminal_area_rect(
@@ -1846,10 +2105,8 @@ impl App {
             cell_w,
             cell_h,
         );
-        let chrome_y = renderer.grid_top_offset();
         for (id, rect) in self.tabs[self.focused].layout().rects(area) {
-            let origin_x = pad_x + rect.x as f32 * cell_w;
-            let origin_y = pad_y + chrome_y + rect.y as f32 * cell_h;
+            let (origin_x, origin_y) = Self::pane_pixel_origin(renderer, &rect);
             let (row, col) = crate::renderer::limits::pixel_to_cell_coords(
                 x, y, origin_x, origin_y, cell_w, cell_h,
             );
@@ -1873,9 +2130,22 @@ impl App {
         self.sessions[idx]
             .session
             .term
-            .lock()
+            .try_lock()
             .map(|t| t.dirty)
-            .unwrap_or(false)
+            .unwrap_or(true)
+    }
+
+    /// Coordenadas de celda (row, col) dentro del pane enfocado para smart_split.
+    fn mouse_cell_coords_in_focused_pane(
+        &self,
+        renderer: &Renderer,
+        pane_rect: &LayoutRect,
+    ) -> (f32, f32) {
+        let (row, col) = self.mouse_cell_coords(renderer);
+        if row == usize::MAX {
+            return (pane_rect.rows as f32 / 2.0, pane_rect.cols as f32 / 2.0);
+        }
+        (row as f32 + 0.5, col as f32 + 0.5)
     }
 
     /// Coordenadas de celda (row, col) desde la ultima posicion del mouse.
@@ -2199,7 +2469,7 @@ impl ApplicationHandler<UserEvent> for App {
 
         let size = window.inner_size();
         if let Some(renderer) = &self.renderer {
-            self.sync_grid_to_window(
+            let (_, _, _, _, deferred) = self.sync_grid_to_window(
                 size.width,
                 size.height,
                 renderer.cell_w,
@@ -2207,6 +2477,7 @@ impl ApplicationHandler<UserEvent> for App {
                 false,
                 true,
             );
+            self.pending_pane_sync = deferred;
         }
 
         // 5. Forzar el primer redraw para que winit dispare RedrawRequested.
@@ -2241,14 +2512,16 @@ impl ApplicationHandler<UserEvent> for App {
                 renderer.resize(new_size.width, new_size.height, 0);
                 let cell_w = renderer.cell_w;
                 let cell_h = renderer.cell_h;
-                let (_old_rows, _old_cols, new_rows, new_cols) = self.sync_grid_to_window(
-                    new_size.width,
-                    new_size.height,
-                    cell_w,
-                    cell_h,
-                    false,
-                    true,
-                );
+                let (_old_rows, _old_cols, new_rows, new_cols, deferred) = self
+                    .sync_grid_to_window(
+                        new_size.width,
+                        new_size.height,
+                        cell_w,
+                        cell_h,
+                        false,
+                        true,
+                    );
+                self.pending_pane_sync = deferred;
                 tracing::debug!(
                     "[RESIZE] cell_h={:.1} cell_w={:.1} win={}x{} -> grid={}x{}",
                     cell_h,
@@ -2305,6 +2578,9 @@ impl ApplicationHandler<UserEvent> for App {
                 self.update_ime_area();
             }
             WindowEvent::RedrawRequested => {
+                if self.pending_pane_sync {
+                    self.sync_after_tab_change();
+                }
                 let theme = self.effective_theme();
                 let picker = self.theme_picker.as_ref();
                 let preedit_empty = self.preedit.is_empty();
@@ -2334,13 +2610,17 @@ impl ApplicationHandler<UserEvent> for App {
                     cell_w,
                     cell_h,
                 );
+                self.tabs[self.focused].recalc_dwindle_orients(
+                    terminal_area,
+                    self.config.panes.split_width_multiplier,
+                );
                 let pane_rects = self.tabs[self.focused].layout().rects(terminal_area);
                 let focused_id = self.tabs[self.focused].focused();
 
                 let any_pane_dirty = pane_rects.iter().any(|(id, _)| self.pane_is_dirty(*id));
                 let search_active = self
                     .focused_term()
-                    .lock()
+                    .try_lock()
                     .ok()
                     .is_some_and(|t| t.search.is_some());
                 let status_active = self
@@ -2362,37 +2642,38 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
-                for (id, _) in &pane_rects {
-                    if let Some(idx) = self.session_by_id(*id) {
-                        self.sessions[idx].session.dirty = false;
-                        if let Ok(mut guard) = self.sessions[idx].session.term.lock() {
-                            guard.take_dirty();
-                        }
-                    }
-                }
-
-                let panes: Vec<PaneRender> = pane_rects
+                let pane_jobs: Vec<(SessionId, LayoutRect, usize, bool)> = pane_rects
                     .iter()
                     .filter_map(|(id, rect)| {
                         let idx = self.session_by_id(*id)?;
-                        Some(PaneRender {
-                            term: Arc::clone(&self.sessions[idx].session.term),
-                            rect: *rect,
-                            focused: *id == focused_id,
-                        })
+                        let renderer = self.renderer.as_ref()?;
+                        let rebuild = self.pane_is_dirty(*id) || !renderer.has_pane_cache(*id);
+                        Some((*id, *rect, idx, rebuild))
+                    })
+                    .collect();
+
+                let Some(renderer) = &mut self.renderer else {
+                    return;
+                };
+                let panes: Vec<PaneRender> = pane_jobs
+                    .into_iter()
+                    .map(|(id, rect, idx, rebuild)| PaneRender {
+                        session_id: id,
+                        term: Arc::clone(&self.sessions[idx].session.term),
+                        rect,
+                        focused: id == focused_id,
+                        rebuild,
                     })
                     .collect();
 
                 tracing::debug!(
-                    "RedrawRequested: renderizando frame ({} panes)",
-                    panes.len()
+                    "RedrawRequested: renderizando frame ({} panes, {} rebuild)",
+                    panes.len(),
+                    panes.iter().filter(|p| p.rebuild).count()
                 );
                 let bold = self.config.bold_is_bright || self.config.theme.bold_is_bright;
                 let layout = self.tabs[self.focused].layout().clone();
-                let Some(renderer) = &mut self.renderer else {
-                    return;
-                };
-                if let Err(e) = renderer.render(
+                match renderer.render(
                     &panes,
                     terminal_area,
                     &layout,
@@ -2403,7 +2684,17 @@ impl ApplicationHandler<UserEvent> for App {
                     preedit,
                     tab_layout.as_ref(),
                 ) {
-                    tracing::warn!("error al renderizar: {e}");
+                    Ok(updated) => {
+                        for id in updated {
+                            if let Some(idx) = self.session_by_id(id) {
+                                self.sessions[idx].session.dirty = false;
+                                if let Ok(mut guard) = self.sessions[idx].session.term.try_lock() {
+                                    guard.take_dirty();
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => tracing::warn!("error al renderizar: {e}"),
                 }
             }
             // Track modifier state (Ctrl, Shift, Alt, etc.) for keyboard shortcuts.
@@ -2426,13 +2717,12 @@ impl ApplicationHandler<UserEvent> for App {
                     position.y,
                     self.mouse_down.load(Ordering::Relaxed),
                 );
-                let (_pad_x, pad_y, cell_w, cell_h) = {
+                let (cell_w, cell_h) = {
                     let Some(renderer) = &self.renderer else {
                         tracing::warn!("CursorMoved: renderer no disponible");
                         return;
                     };
-                    let (pad_x, pad_y) = renderer.grid_padding();
-                    (pad_x, pad_y, renderer.cell_w(), renderer.cell_h())
+                    (renderer.cell_w(), renderer.cell_h())
                 };
                 self.mouse_x = position.x;
                 self.mouse_y = position.y;
@@ -2493,8 +2783,8 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     };
                     let pane = self.focused_pane_rect(cell_w, cell_h);
-                    let chrome_y = renderer.grid_top_offset();
-                    let pane_top = pad_y + chrome_y + pane.y as f32 * cell_h;
+                    let (_, pane_origin_y) = Self::pane_pixel_origin(renderer, &pane);
+                    let pane_top = pane_origin_y;
                     let pane_bottom = pane_top + pane.rows as f32 * cell_h;
                     let (visible_row, col, needs_scroll_up, needs_scroll_down) =
                         if position.y < f64::from(pane_top) {
@@ -2679,6 +2969,17 @@ impl ApplicationHandler<UserEvent> for App {
                     };
                     if self.is_in_tab_bar_row(self.mouse_y, renderer) {
                         return;
+                    }
+                    if state == ElementState::Pressed {
+                        if let Some((id, _, _)) =
+                            self.pixel_to_pane_cell(self.mouse_x, self.mouse_y, renderer)
+                        {
+                            let focused_id = self.tabs[self.focused].focused();
+                            if id != focused_id {
+                                self.focus_pane_by_id(id);
+                                return;
+                            }
+                        }
                     }
                     match state {
                         ElementState::Pressed => {
@@ -3057,11 +3358,14 @@ mod tests {
     }
 
     fn test_app(term: Arc<Mutex<Term>>) -> App {
+        let session = test_session(term);
+        let id = session.id;
         App::new(
-            vec![SessionHost::test(test_session(term))],
+            vec![SessionHost::test(session)],
             Config::default(),
             test_config_watch(),
             None,
+            BlinkFocus::new(id),
         )
     }
 
@@ -3070,11 +3374,13 @@ mod tests {
         let session_a = test_session(Arc::new(Mutex::new(Term::new())));
         let id_a = session_a.id;
         let session_b = test_session(Arc::new(Mutex::new(Term::new())));
+        let id_b = session_b.id;
         let mut app = App::new(
             vec![SessionHost::test(session_a), SessionHost::test(session_b)],
             Config::default(),
             test_config_watch(),
             None,
+            BlinkFocus::new(id_b),
         );
         app.focused = 1;
 
@@ -3087,11 +3393,13 @@ mod tests {
     fn focus_session_limpia_dirty_de_sesion_enfocada() {
         let session_a = test_session(Arc::new(Mutex::new(Term::new())));
         let session_b = test_session(Arc::new(Mutex::new(Term::new())));
+        let id_b = session_b.id;
         let mut app = App::new(
             vec![SessionHost::test(session_a), SessionHost::test(session_b)],
             Config::default(),
             test_config_watch(),
             None,
+            BlinkFocus::new(id_b),
         );
         app.sessions[0].session.dirty = true;
         app.focused = 1;
@@ -3102,15 +3410,18 @@ mod tests {
     #[test]
     fn goto_tab_usa_indices_1_based() {
         use crate::input::actions::Action;
+        let s0 = test_session(Arc::new(Mutex::new(Term::new())));
+        let id0 = s0.id;
         let mut app = App::new(
             vec![
-                SessionHost::test(test_session(Arc::new(Mutex::new(Term::new())))),
+                SessionHost::test(s0),
                 SessionHost::test(test_session(Arc::new(Mutex::new(Term::new())))),
                 SessionHost::test(test_session(Arc::new(Mutex::new(Term::new())))),
             ],
             Config::default(),
             test_config_watch(),
             None,
+            BlinkFocus::new(id0),
         );
         app.run_action(Action::GotoTab(2));
         assert_eq!(app.focused, 1);
