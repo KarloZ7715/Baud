@@ -553,8 +553,22 @@ impl App {
         let (pad_x, pad_y) = renderer.grid_padding();
         let cell_w = renderer.cell_w();
         let cell_h = renderer.cell_h();
-        let x = pad_x + col as f32 * cell_w;
-        let y = pad_y + row as f32 * cell_h;
+        let area = self.terminal_area_rect(
+            self.window_width as u32,
+            self.window_height as u32,
+            cell_w,
+            cell_h,
+        );
+        let focused_id = self.tabs[self.focused].focused();
+        let pane_rect = self.tabs[self.focused]
+            .layout()
+            .rects(area)
+            .into_iter()
+            .find(|(id, _)| *id == focused_id)
+            .map(|(_, r)| r)
+            .unwrap_or(area);
+        let x = pad_x + (pane_rect.x as f32 + col as f32) * cell_w;
+        let y = pad_y + renderer.grid_top_offset() + (pane_rect.y as f32 + row as f32) * cell_h;
         window.set_ime_cursor_area(
             winit::dpi::PhysicalPosition::new(x as i32, y as i32),
             winit::dpi::PhysicalSize::new(cell_w as u32, cell_h as u32),
@@ -886,7 +900,9 @@ impl App {
             return;
         }
         if self.tabs.len() <= 1 {
-            let _ = self.sessions[0].session.pty_tx.send(PtyCommand::Shutdown);
+            for host in &self.sessions {
+                let _ = host.session.pty_tx.send(PtyCommand::Shutdown);
+            }
             self.pending_exit = true;
             return;
         }
@@ -933,6 +949,12 @@ impl App {
                 crate::grid::DEFAULT_ROWS as u16,
                 crate::grid::DEFAULT_COLS as u16,
             ));
+        if rows < 4 || cols < 4 {
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_status("[Pane demasiado pequeno para dividir]");
+            }
+            return;
+        }
         let spawned = match crate::event_loop::spawn_session(&cfg, rows, cols, proxy.clone()) {
             Ok(s) => s,
             Err(e) => {
@@ -1870,17 +1892,36 @@ impl App {
 
     /// Actualiza `hovered_link` y el cursor segun la celda bajo el puntero.
     /// Devuelve true si el estado de hover cambio.
-    fn update_link_hover_at(
-        &mut self,
-        pad_x: f32,
-        pad_y: f32,
-        cell_w: f32,
-        cell_h: f32,
-        x: f64,
-        y: f64,
-    ) -> bool {
-        let (visible_row, col) =
-            crate::renderer::limits::pixel_to_cell_coords(x, y, pad_x, pad_y, cell_w, cell_h);
+    fn focused_pane_rect(&self, cell_w: f32, cell_h: f32) -> LayoutRect {
+        let area = self.terminal_area_rect(
+            self.window_width as u32,
+            self.window_height as u32,
+            cell_w,
+            cell_h,
+        );
+        let focused_id = self.tabs[self.focused].focused();
+        self.tabs[self.focused]
+            .layout()
+            .rects(area)
+            .into_iter()
+            .find(|(id, _)| *id == focused_id)
+            .map(|(_, r)| r)
+            .unwrap_or(area)
+    }
+
+    fn update_link_hover_at(&mut self, x: f64, y: f64) -> bool {
+        let Some(renderer) = self.renderer.as_ref() else {
+            return false;
+        };
+        let focused_id = self.tabs[self.focused].focused();
+        let Some((id, visible_row, col)) = self.pixel_to_pane_cell(x, y, renderer) else {
+            self.clear_link_hover_state();
+            return false;
+        };
+        if id != focused_id {
+            self.clear_link_hover_state();
+            return false;
+        }
         let mut link_changed = false;
         let mut has_link = false;
         if let Ok(mut guard) = self.focused_term().lock() {
@@ -2385,7 +2426,7 @@ impl ApplicationHandler<UserEvent> for App {
                     position.y,
                     self.mouse_down.load(Ordering::Relaxed),
                 );
-                let (pad_x, pad_y, cell_w, cell_h) = {
+                let (_pad_x, pad_y, cell_w, cell_h) = {
                     let Some(renderer) = &self.renderer else {
                         tracing::warn!("CursorMoved: renderer no disponible");
                         return;
@@ -2415,7 +2456,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
 
                 if !self.mouse_down.load(Ordering::Relaxed) {
-                    self.update_link_hover_at(pad_x, pad_y, cell_w, cell_h, position.x, position.y);
+                    self.update_link_hover_at(position.x, position.y);
                 }
 
                 if self.should_forward_mouse_to_app() {
@@ -2448,18 +2489,21 @@ impl ApplicationHandler<UserEvent> for App {
                 }
 
                 if self.mouse_down.load(Ordering::Relaxed) {
-                    let inner_h = (self.window_height - pad_y * 2.0).max(cell_h);
-                    let visible_rows = (inner_h / cell_h) as usize;
+                    let Some(renderer) = &self.renderer else {
+                        return;
+                    };
+                    let pane = self.focused_pane_rect(cell_w, cell_h);
+                    let chrome_y = renderer.grid_top_offset();
+                    let pane_top = pad_y + chrome_y + pane.y as f32 * cell_h;
+                    let pane_bottom = pane_top + pane.rows as f32 * cell_h;
                     let (visible_row, col, needs_scroll_up, needs_scroll_down) =
-                        if position.y < pad_y as f64 {
+                        if position.y < f64::from(pane_top) {
                             (0usize, 0usize, true, false)
-                        } else if position.y as f32 >= self.window_height - pad_y {
-                            (visible_rows.saturating_sub(1), 0usize, false, true)
+                        } else if position.y as f32 >= pane_bottom {
+                            (pane.rows.saturating_sub(1), 0usize, false, true)
                         } else {
-                            let (r, c) = crate::renderer::limits::pixel_to_cell_coords(
-                                position.x, position.y, pad_x, pad_y, cell_w, cell_h,
-                            );
-                            (r, c, r == 0, r >= visible_rows.saturating_sub(1))
+                            let (r, c) = self.mouse_cell_coords(renderer);
+                            (r, c, r == 0, r >= pane.rows.saturating_sub(1))
                         };
 
                     let scroll_changed = needs_scroll_up || needs_scroll_down;
