@@ -19,8 +19,11 @@ use crate::copy_mode::CopyModeState;
 use crate::grid::Cell;
 use crate::input::actions::{normalize_binding_key, Action, Keybindings};
 use crate::input::keymap::{self, Key as KKey, KeyEventKind, KeyModes, Mods};
+use crate::layout::{Orientation, Rect as LayoutRect, TabLayout};
 use crate::pty::PtyCommand;
-use crate::renderer::{compute_layout, tab_bar_height_px, PreeditState, Renderer, TabBarLayout};
+use crate::renderer::{
+    compute_layout, tab_bar_height_px, PaneRender, PreeditState, Renderer, TabBarLayout,
+};
 use crate::search::SearchState;
 use crate::selection::{Selection, SelectionMode, SelectionPoint};
 use crate::session::{Session, SessionId};
@@ -198,6 +201,9 @@ pub struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     sessions: Vec<SessionHost>,
+    /// Layout de panes por tab (una entrada por tab).
+    tabs: Vec<TabLayout>,
+    /// Indice de la tab activa.
     focused: usize,
     config: Config,
     /// Tamano de fuente efectivo en runtime (puede diferir del config tras zoom).
@@ -288,10 +294,15 @@ impl App {
         let window_width = config.window.width as f32;
         let window_height = config.window.height as f32;
         let keybindings = config.keybindings();
+        let tabs: Vec<TabLayout> = sessions
+            .iter()
+            .map(|h| TabLayout::new(h.session.id))
+            .collect();
         Self {
             window: None,
             renderer: None,
             sessions,
+            tabs,
             focused: 0,
             config,
             font_size,
@@ -334,19 +345,52 @@ impl App {
     }
 
     fn focused_session(&self) -> &Session {
-        &self.sessions[self.focused].session
+        let id = self.tabs[self.focused].focused();
+        let idx = self
+            .session_by_id(id)
+            .expect("sesion enfocada debe existir");
+        &self.sessions[idx].session
+    }
+
+    fn terminal_area_rect(&self, width: u32, height: u32, cell_w: f32, cell_h: f32) -> LayoutRect {
+        let reserved = self.tab_bar_rows();
+        let chrome_extra = if reserved > 0 {
+            crate::renderer::TAB_CONTENT_GAP_PX
+        } else {
+            0.0
+        };
+        let (rows, cols) = crate::renderer::limits::compute_grid_dims(
+            width,
+            height,
+            cell_w,
+            cell_h,
+            self.config.window.padding_x,
+            self.config.window.padding_y,
+            reserved,
+            chrome_extra,
+        );
+        LayoutRect {
+            x: 0,
+            y: 0,
+            cols,
+            rows,
+        }
     }
 
     /// Cambia la sesion enfocada; redibuja si la nueva sesion tiene output pendiente.
     #[allow(dead_code)]
     pub(crate) fn focus_session(&mut self, index: usize) {
-        debug_assert!(index < self.sessions.len());
+        debug_assert!(index < self.tabs.len());
         if index == self.focused {
             return;
         }
         self.focused = index;
         self.apply_focused_window_title();
-        self.sessions[index].session.dirty = false;
+        if let Some(id) = self.tabs.get(index).map(TabLayout::focused) {
+            if let Some(idx) = self.session_by_id(id) {
+                self.sessions[idx].session.dirty = false;
+            }
+        }
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -355,18 +399,21 @@ impl App {
     #[allow(dead_code)]
     fn apply_focused_window_title(&self) {
         if let Some(window) = &self.window {
-            let title = &self.sessions[self.focused].session.title;
+            let title = &self.focused_session().title;
             if !title.is_empty() {
                 window.set_title(title);
             }
         }
     }
 
+    fn is_session_in_active_tab(&self, id: SessionId) -> bool {
+        self.tabs
+            .get(self.focused)
+            .is_some_and(|t| t.leaves().contains(&id))
+    }
+
     pub(crate) fn send_startup_input(&self, bytes: Vec<u8>) {
-        let _ = self.sessions[self.focused]
-            .session
-            .pty_tx
-            .send(PtyCommand::Input(bytes));
+        let _ = self.focused_session().pty_tx.send(PtyCommand::Input(bytes));
     }
 
     /// Despacha un evento de usuario (usado por el event loop y tests).
@@ -381,6 +428,13 @@ impl App {
                     self.gui_redraw_metrics.record_redraw(since_last);
                     self.last_gui_redraw = Some(Instant::now());
                     self.gui_redraw_metrics.maybe_log();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                } else if self.is_session_in_active_tab(id) {
+                    if let Some(idx) = self.session_by_id(id) {
+                        self.sessions[idx].session.dirty = true;
+                    }
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
@@ -466,9 +520,9 @@ impl App {
     }
 
     fn is_focused_session(&self, id: SessionId) -> bool {
-        self.sessions
+        self.tabs
             .get(self.focused)
-            .is_some_and(|h| h.session.id == id)
+            .is_some_and(|t| t.focused() == id)
     }
 
     fn focused_term(&self) -> &Arc<Mutex<Term>> {
@@ -612,21 +666,6 @@ impl App {
         reflow: bool,
     ) -> (usize, usize, usize, usize) {
         let reserved = self.tab_bar_rows();
-        let chrome_extra = if reserved > 0 {
-            crate::renderer::TAB_CONTENT_GAP_PX
-        } else {
-            0.0
-        };
-        let (new_rows, new_cols) = crate::renderer::limits::compute_grid_dims(
-            width,
-            height,
-            cell_w,
-            cell_h,
-            self.config.window.padding_x,
-            self.config.window.padding_y,
-            reserved,
-            chrome_extra,
-        );
         if let Some(renderer) = &mut self.renderer {
             let chrome_px = if reserved > 0 {
                 crate::renderer::tab_chrome_reserve_px(cell_h)
@@ -635,15 +674,26 @@ impl App {
             };
             renderer.set_grid_top_offset(chrome_px);
         }
-        let (old_rows, old_cols) = if let Ok(guard) = self.focused_term().lock() {
-            let active = guard.active_grid();
-            (active.rows_count, active.cols_count)
-        } else {
-            (new_rows, new_cols)
-        };
         let focused_id = self.focused_session().id;
+        let area = self.terminal_area_rect(width, height, cell_w, cell_h);
+        let pane_rects = self.tabs[self.focused].layout().rects(area);
         for host in &self.sessions {
+            let pane = pane_rects
+                .iter()
+                .find(|(id, _)| *id == host.session.id)
+                .map(|(_, r)| r);
+            let (new_rows, new_cols) = if let Some(r) = pane {
+                (r.rows, r.cols)
+            } else if let Ok(guard) = host.session.term.lock() {
+                let active = guard.active_grid();
+                (active.rows_count, active.cols_count)
+            } else {
+                continue;
+            };
             if let Ok(mut guard) = host.session.term.lock() {
+                let active = guard.active_grid();
+                let old_r = active.rows_count;
+                let old_c = active.cols_count;
                 guard.resize_grid(new_rows, new_cols, reflow);
                 if preserve_scrollback && host.session.id == focused_id {
                     let max_offset = guard.scrollback_len();
@@ -651,21 +701,25 @@ impl App {
                 } else if !preserve_scrollback {
                     guard.scrollback_offset = 0;
                 }
+                if old_r != new_rows || old_c != new_cols {
+                    let _ = host.session.pty_tx.send(PtyCommand::Resize {
+                        rows: new_rows as u16,
+                        cols: new_cols as u16,
+                    });
+                }
             }
         }
-        if old_rows != new_rows || old_cols != new_cols {
-            for host in &self.sessions {
-                let _ = host.session.pty_tx.send(PtyCommand::Resize {
-                    rows: new_rows as u16,
-                    cols: new_cols as u16,
-                });
-            }
-        }
-        (old_rows, old_cols, new_rows, new_cols)
+        let (old_rows, old_cols) = if let Ok(guard) = self.focused_term().lock() {
+            let active = guard.active_grid();
+            (active.rows_count, active.cols_count)
+        } else {
+            (area.rows, area.cols)
+        };
+        (old_rows, old_cols, area.rows, area.cols)
     }
 
     fn tab_bar_rows(&self) -> usize {
-        if self.sessions.len() > 1 {
+        if self.tabs.len() > 1 {
             crate::renderer::TAB_BAR_HEIGHT_ROWS
         } else {
             0
@@ -694,13 +748,16 @@ impl App {
     }
 
     fn tab_bar_layout(&self, renderer: &Renderer) -> Option<TabBarLayout> {
-        if self.sessions.len() <= 1 {
+        if self.tabs.len() <= 1 {
             return None;
         }
         let titles: Vec<String> = self
-            .sessions
+            .tabs
             .iter()
-            .map(|h| h.session.title.clone())
+            .filter_map(|tab| {
+                self.session_by_id(tab.focused())
+                    .map(|idx| self.sessions[idx].session.title.clone())
+            })
             .collect();
         let (pad_x, _) = renderer.content_padding();
         let bar_w = crate::renderer::tab_bar_inner_width(self.window_width, pad_x);
@@ -722,7 +779,7 @@ impl App {
     }
 
     fn tick_tab_close_fade(&mut self) -> bool {
-        if self.sessions.len() <= 1 {
+        if self.tabs.len() <= 1 {
             self.tab_hover = None;
             self.tab_close_tab = None;
             if self.tab_close_alpha > 0.0 {
@@ -808,7 +865,14 @@ impl App {
             spawned.session.id,
         );
         self.sessions.push(SessionHost::from_spawned(spawned));
-        self.focused = self.sessions.len() - 1;
+        let new_id = self
+            .sessions
+            .last()
+            .expect("session recien creada")
+            .session
+            .id;
+        self.tabs.push(TabLayout::new(new_id));
+        self.focused = self.tabs.len() - 1;
         self.apply_focused_window_title();
         self.sync_after_tab_change();
     }
@@ -818,21 +882,30 @@ impl App {
     }
 
     fn close_tab_at(&mut self, index: usize) {
-        if index >= self.sessions.len() {
+        if index >= self.tabs.len() {
             return;
         }
-        if self.sessions.len() <= 1 {
+        if self.tabs.len() <= 1 {
             let _ = self.sessions[0].session.pty_tx.send(PtyCommand::Shutdown);
             self.pending_exit = true;
             return;
         }
-        let host = self.sessions.remove(index);
-        let _ = host.session.pty_tx.send(PtyCommand::Shutdown);
-        self.detached_hosts.push(host);
+        let leaf_ids = self.tabs[index].leaves();
+        self.tabs.remove(index);
+        let mut indices: Vec<usize> = leaf_ids
+            .iter()
+            .filter_map(|id| self.session_by_id(*id))
+            .collect();
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+        for idx in indices {
+            let host = self.sessions.remove(idx);
+            let _ = host.session.pty_tx.send(PtyCommand::Shutdown);
+            self.detached_hosts.push(host);
+        }
         if self.focused > index {
             self.focused -= 1;
         } else if self.focused == index {
-            self.focused = index.min(self.sessions.len().saturating_sub(1));
+            self.focused = index.min(self.tabs.len().saturating_sub(1));
         }
         self.tab_hover = None;
         self.tab_close_tab = None;
@@ -841,31 +914,98 @@ impl App {
         self.sync_after_tab_change();
     }
 
+    fn split_pane(&mut self, orient: Orientation) {
+        let Some(proxy) = self.proxy.clone() else {
+            tracing::warn!("split_pane: proxy no disponible");
+            return;
+        };
+        let cwd = self.focused_term().lock().ok().and_then(|t| t.cwd.clone());
+        let cfg = self.config_with_cwd(cwd);
+        let (rows, cols) = self
+            .focused_term()
+            .lock()
+            .ok()
+            .map(|g| {
+                let grid = g.active_grid();
+                (grid.rows_count as u16, grid.cols_count as u16)
+            })
+            .unwrap_or((
+                crate::grid::DEFAULT_ROWS as u16,
+                crate::grid::DEFAULT_COLS as u16,
+            ));
+        let spawned = match crate::event_loop::spawn_session(&cfg, rows, cols, proxy.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("split_pane: spawn fallo: {e}");
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_status(&format!("[No se pudo abrir pane: {e}]"));
+                }
+                return;
+            }
+        };
+        crate::event_loop::spawn_blink_timer(
+            Arc::clone(&spawned.session.term),
+            proxy,
+            spawned.session.id,
+        );
+        let new_id = spawned.session.id;
+        self.sessions.push(SessionHost::from_spawned(spawned));
+        self.tabs[self.focused].split_focused(orient, new_id);
+        self.apply_focused_window_title();
+        self.sync_after_tab_change();
+    }
+
+    fn close_pane(&mut self) {
+        let Some(closed_id) = self.tabs[self.focused].close_focused() else {
+            return;
+        };
+        if let Some(idx) = self.session_by_id(closed_id) {
+            let host = self.sessions.remove(idx);
+            let _ = host.session.pty_tx.send(PtyCommand::Shutdown);
+            self.detached_hosts.push(host);
+        }
+        self.apply_focused_window_title();
+        self.sync_after_tab_change();
+    }
+
+    fn focus_next_pane(&mut self) {
+        self.tabs[self.focused].focus_next();
+        self.apply_focused_window_title();
+    }
+
+    fn focus_prev_pane(&mut self) {
+        self.tabs[self.focused].focus_prev();
+        self.apply_focused_window_title();
+    }
+
     fn next_tab(&mut self) {
-        let len = self.sessions.len();
+        let len = self.tabs.len();
         if len <= 1 {
             return;
         }
         self.focused = (self.focused + 1) % len;
         self.apply_focused_window_title();
+        self.sync_after_tab_change();
     }
 
     fn prev_tab(&mut self) {
-        let len = self.sessions.len();
+        let len = self.tabs.len();
         if len <= 1 {
             return;
         }
         self.focused = (self.focused + len - 1) % len;
         self.apply_focused_window_title();
+        self.sync_after_tab_change();
     }
 
     fn goto_tab(&mut self, n: u8) {
-        let len = self.sessions.len();
+        let len = self.tabs.len();
         if len == 0 || n == 0 {
             return;
         }
         self.focused = ((n as usize) - 1).min(len - 1);
         self.apply_focused_window_title();
+        self.sync_after_tab_change();
     }
 
     fn tab_index_at(&self, x: f64, y: f64, renderer: &Renderer) -> Option<usize> {
@@ -888,7 +1028,7 @@ impl App {
     }
 
     fn is_in_tab_bar_row(&self, y: f64, renderer: &Renderer) -> bool {
-        if self.sessions.len() <= 1 {
+        if self.tabs.len() <= 1 {
             return false;
         }
         let (_, pad_y) = renderer.content_padding();
@@ -1495,6 +1635,11 @@ impl App {
             NextTab => self.next_tab(),
             PrevTab => self.prev_tab(),
             GotoTab(n) => self.goto_tab(n),
+            SplitVertical => self.split_pane(Orientation::Vertical),
+            SplitHorizontal => self.split_pane(Orientation::Horizontal),
+            FocusNextPane => self.focus_next_pane(),
+            FocusPrevPane => self.focus_prev_pane(),
+            ClosePane => self.close_pane(),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -1663,22 +1808,64 @@ impl App {
         let _ = self.focused_session().pty_tx.send(PtyCommand::Input(bytes));
     }
 
-    /// Mapea píxeles de ventana a (row, col); resta el padding del renderer.
-    fn pixel_to_cell(&self, x: f64, y: f64, renderer: &Renderer) -> (usize, usize) {
+    /// Mapea pixeles de ventana a (session, row, col) dentro del pane bajo el cursor.
+    fn pixel_to_pane_cell(
+        &self,
+        x: f64,
+        y: f64,
+        renderer: &Renderer,
+    ) -> Option<(SessionId, usize, usize)> {
         let (pad_x, pad_y) = renderer.grid_padding();
-        crate::renderer::limits::pixel_to_cell_coords(
-            x,
-            y,
-            pad_x,
-            pad_y,
-            renderer.cell_w(),
-            renderer.cell_h(),
-        )
+        let cell_w = renderer.cell_w();
+        let cell_h = renderer.cell_h();
+        let area = self.terminal_area_rect(
+            self.window_width as u32,
+            self.window_height as u32,
+            cell_w,
+            cell_h,
+        );
+        let chrome_y = renderer.grid_top_offset();
+        for (id, rect) in self.tabs[self.focused].layout().rects(area) {
+            let origin_x = pad_x + rect.x as f32 * cell_w;
+            let origin_y = pad_y + chrome_y + rect.y as f32 * cell_h;
+            let (row, col) = crate::renderer::limits::pixel_to_cell_coords(
+                x, y, origin_x, origin_y, cell_w, cell_h,
+            );
+            if row == usize::MAX || col == usize::MAX {
+                continue;
+            }
+            if row < rect.rows && col < rect.cols {
+                return Some((id, row, col));
+            }
+        }
+        None
+    }
+
+    fn pane_is_dirty(&self, id: SessionId) -> bool {
+        let Some(idx) = self.session_by_id(id) else {
+            return false;
+        };
+        if self.sessions[idx].session.dirty {
+            return true;
+        }
+        self.sessions[idx]
+            .session
+            .term
+            .lock()
+            .map(|t| t.dirty)
+            .unwrap_or(false)
     }
 
     /// Coordenadas de celda (row, col) desde la ultima posicion del mouse.
     fn mouse_cell_coords(&self, renderer: &Renderer) -> (usize, usize) {
-        self.pixel_to_cell(self.mouse_x, self.mouse_y, renderer)
+        let focused_id = self.tabs[self.focused].focused();
+        if let Some((id, row, col)) = self.pixel_to_pane_cell(self.mouse_x, self.mouse_y, renderer)
+        {
+            if id == focused_id {
+                return (row, col);
+            }
+        }
+        (usize::MAX, usize::MAX)
     }
 
     /// Actualiza `hovered_link` y el cursor segun la celda bajo el puntero.
@@ -2091,35 +2278,83 @@ impl ApplicationHandler<UserEvent> for App {
                     })
                 };
                 self.update_ime_area();
-                let term = Arc::clone(&self.sessions[self.focused].session.term);
                 let tab_layout = self
                     .renderer
                     .as_ref()
                     .and_then(|r| self.tab_bar_layout_with_mouse(r));
-                let Some(renderer) = &mut self.renderer else {
-                    return;
-                };
-                let mut term_guard = match term.lock() {
-                    Ok(g) => g,
-                    Err(poisoned) => {
-                        tracing::warn!("term mutex poisoned: {poisoned}");
-                        return;
-                    }
-                };
-                if !term_guard.dirty
-                    && !renderer.status_overlay_active()
-                    && !renderer.theme_picker_active(picker)
-                    && !renderer.search_overlay_active(&term_guard)
+                let (cell_w, cell_h) = self
+                    .renderer
+                    .as_ref()
+                    .map(|r| (r.cell_w(), r.cell_h()))
+                    .unwrap_or((0.0, 0.0));
+                let terminal_area = self.terminal_area_rect(
+                    self.window_width as u32,
+                    self.window_height as u32,
+                    cell_w,
+                    cell_h,
+                );
+                let pane_rects = self.tabs[self.focused].layout().rects(terminal_area);
+                let focused_id = self.tabs[self.focused].focused();
+
+                let any_pane_dirty = pane_rects.iter().any(|(id, _)| self.pane_is_dirty(*id));
+                let search_active = self
+                    .focused_term()
+                    .lock()
+                    .ok()
+                    .is_some_and(|t| t.search.is_some());
+                let status_active = self
+                    .renderer
+                    .as_ref()
+                    .is_some_and(|r| r.status_overlay_active());
+                let picker_active = self
+                    .renderer
+                    .as_ref()
+                    .is_some_and(|r| r.theme_picker_active(picker));
+
+                if !any_pane_dirty
+                    && !status_active
+                    && !picker_active
+                    && !search_active
                     && preedit_empty
                 {
                     tracing::debug!("RedrawRequested: skip (nothing dirty)");
                     return;
                 }
-                term_guard.take_dirty();
-                tracing::debug!("RedrawRequested: renderizando frame");
+
+                for (id, _) in &pane_rects {
+                    if let Some(idx) = self.session_by_id(*id) {
+                        self.sessions[idx].session.dirty = false;
+                        if let Ok(mut guard) = self.sessions[idx].session.term.lock() {
+                            guard.take_dirty();
+                        }
+                    }
+                }
+
+                let panes: Vec<PaneRender> = pane_rects
+                    .iter()
+                    .filter_map(|(id, rect)| {
+                        let idx = self.session_by_id(*id)?;
+                        Some(PaneRender {
+                            term: Arc::clone(&self.sessions[idx].session.term),
+                            rect: *rect,
+                            focused: *id == focused_id,
+                        })
+                    })
+                    .collect();
+
+                tracing::debug!(
+                    "RedrawRequested: renderizando frame ({} panes)",
+                    panes.len()
+                );
                 let bold = self.config.bold_is_bright || self.config.theme.bold_is_bright;
+                let layout = self.tabs[self.focused].layout().clone();
+                let Some(renderer) = &mut self.renderer else {
+                    return;
+                };
                 if let Err(e) = renderer.render(
-                    &mut term_guard,
+                    &panes,
+                    terminal_area,
+                    &layout,
                     &theme,
                     bold,
                     self.config.window.opacity,
@@ -2185,18 +2420,14 @@ impl ApplicationHandler<UserEvent> for App {
 
                 if self.should_forward_mouse_to_app() {
                     let mouse_down = self.mouse_down.load(Ordering::Relaxed);
-                    let term = Arc::clone(&self.sessions[self.focused].session.term);
+                    let term = Arc::clone(self.focused_term());
+                    let Some(renderer) = &self.renderer else {
+                        return;
+                    };
                     if let Ok(guard) = term.lock() {
                         let reporting = guard.mouse_reporting;
                         if reporting.reports_motion() {
-                            let (row, col) = crate::renderer::limits::pixel_to_cell_coords(
-                                self.mouse_x,
-                                self.mouse_y,
-                                pad_x,
-                                pad_y,
-                                cell_w,
-                                cell_h,
-                            );
+                            let (row, col) = self.mouse_cell_coords(renderer);
                             let cell = (row, col);
                             if mouse_down && reporting.drag {
                                 drop(guard);
@@ -2411,8 +2642,7 @@ impl ApplicationHandler<UserEvent> for App {
                             if self.mouse_x < 0.0 || self.mouse_y < 0.0 {
                                 return;
                             }
-                            let (visible_row, col) =
-                                self.pixel_to_cell(self.mouse_x, self.mouse_y, renderer);
+                            let (visible_row, col) = self.mouse_cell_coords(renderer);
                             let shift = self.modifiers.state().shift_key();
                             let block = self.block_selection_active();
                             let now = Instant::now();
@@ -2421,7 +2651,7 @@ impl ApplicationHandler<UserEvent> for App {
                                 .map(|t| now.duration_since(t) < MULTI_CLICK_INTERVAL)
                                 .unwrap_or(false);
 
-                            let term = Arc::clone(&self.sessions[self.focused].session.term);
+                            let term = Arc::clone(self.focused_term());
                             if let Ok(mut guard) = term.lock() {
                                 let abs_row = guard.visible_to_logical_row(visible_row);
                                 let point = SelectionPoint { row: abs_row, col };

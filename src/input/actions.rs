@@ -21,6 +21,11 @@ pub enum Action {
     NextTab,
     PrevTab,
     GotoTab(u8),
+    SplitVertical,
+    SplitHorizontal,
+    FocusNextPane,
+    FocusPrevPane,
+    ClosePane,
 }
 
 /// Mapa de combinaciones de tecla a acciones del terminal.
@@ -104,6 +109,11 @@ impl Default for Keybindings {
                 (Key::PageUp, Mods::NONE, Action::ScrollPageUp),
                 (Key::PageDown, Mods::NONE, Action::ScrollPageDown),
                 (Key::End, ctrl, Action::ScrollToBottom),
+                (Key::Char('d'), cs, Action::SplitVertical),
+                (Key::Char('e'), cs, Action::SplitHorizontal),
+                (Key::Right, cs, Action::FocusNextPane),
+                (Key::Left, cs, Action::FocusPrevPane),
+                (Key::Char('q'), cs, Action::ClosePane),
             ],
         }
     }
@@ -188,6 +198,11 @@ pub fn parse_action(s: &str) -> Option<Action> {
         s if let Some(n) = s.strip_prefix("goto_tab_").and_then(|d| d.parse().ok()) => {
             Action::GotoTab(n)
         }
+        "split_vertical" => Action::SplitVertical,
+        "split_horizontal" => Action::SplitHorizontal,
+        "focus_next_pane" => Action::FocusNextPane,
+        "focus_prev_pane" => Action::FocusPrevPane,
+        "close_pane" => Action::ClosePane,
         _ => return None,
     })
 }
