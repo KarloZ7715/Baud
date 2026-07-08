@@ -1,5 +1,7 @@
+pub mod channel;
 pub mod config;
 
+pub use channel::{PtyCommand, PtyCommandSender};
 pub use config::ProcessConfig;
 
 use std::os::fd::OwnedFd;

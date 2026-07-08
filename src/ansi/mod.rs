@@ -248,11 +248,16 @@ impl Term {
 
     /// Crea un terminal con límite de scrollback configurable.
     pub fn new_with_scrollback(max_scrollback: usize) -> Self {
+        Self::new_sized(DEFAULT_ROWS, DEFAULT_COLS, max_scrollback)
+    }
+
+    /// Crea un terminal con dimensiones y scrollback explicitos.
+    pub fn new_sized(rows: usize, cols: usize, max_scrollback: usize) -> Self {
         Self {
-            grid: Grid::new_sized_with_scrollback(DEFAULT_ROWS, DEFAULT_COLS, max_scrollback),
-            alt_grid: Grid::new_sized_with_scrollback(DEFAULT_ROWS, DEFAULT_COLS, max_scrollback),
+            grid: Grid::new_sized_with_scrollback(rows, cols, max_scrollback),
+            alt_grid: Grid::new_sized_with_scrollback(rows, cols, max_scrollback),
             alt_screen: false,
-            scroll_region: (0, DEFAULT_ROWS - 1),
+            scroll_region: (0, rows.saturating_sub(1)),
             auto_wrap: true,
             pending_wrap: false,
             cursor: Cursor::new(),
@@ -288,7 +293,7 @@ impl Term {
             blink_interval_ms: 530,
             last_blink_reset: Instant::now(),
             pty_response: Vec::new(),
-            tab_stops: default_tab_stops(DEFAULT_COLS),
+            tab_stops: default_tab_stops(cols),
             keypad_application_mode: false,
             app_cursor_keys: false,
             origin_mode: false,
@@ -2024,6 +2029,14 @@ mod tests {
     fn feed(term: &mut Term, data: &[u8]) {
         let mut parser = vte::Parser::new();
         parser.advance(term, data);
+    }
+
+    #[test]
+    fn new_sized_usa_dimensiones_explicitas() {
+        let term = Term::new_sized(30, 100, 500);
+        assert_eq!(term.grid.rows_count, 30);
+        assert_eq!(term.grid.cols_count, 100);
+        assert_eq!(term.scroll_region, (0, 29));
     }
 
     #[test]

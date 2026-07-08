@@ -16,12 +16,10 @@ use crate::clipboard::{self, CopyTarget};
 use crate::config::watch::WatchState;
 use crate::config::{persist, Config, ProcessSection, StartupState};
 use crate::copy_mode::CopyModeState;
-use crate::event_loop::PtyCommand;
-#[cfg(test)]
-use crate::event_loop::PtyCommandSender;
 use crate::grid::Cell;
 use crate::input::actions::{normalize_binding_key, Action, Keybindings};
 use crate::input::keymap::{self, Key as KKey, KeyEventKind, KeyModes, Mods};
+use crate::pty::PtyCommand;
 use crate::renderer::{PreeditState, Renderer};
 use crate::search::SearchState;
 use crate::selection::{Selection, SelectionMode, SelectionPoint};
@@ -235,6 +233,7 @@ impl App {
         config: Config,
         config_watch: Arc<Mutex<WatchState>>,
     ) -> Self {
+        debug_assert!(!sessions.is_empty(), "App requiere al menos una sesion");
         let font_size = config.font.size;
         let window_width = config.window.width as f32;
         let window_height = config.window.height as f32;
@@ -266,8 +265,139 @@ impl App {
         }
     }
 
-    pub fn focused_session(&self) -> &Session {
+    fn focused_session(&self) -> &Session {
         &self.sessions[self.focused]
+    }
+
+    /// Cambia la sesion enfocada; redibuja si la nueva sesion tiene output pendiente.
+    #[allow(dead_code)]
+    pub(crate) fn focus_session(&mut self, index: usize) {
+        debug_assert!(index < self.sessions.len());
+        if index == self.focused {
+            return;
+        }
+        self.focused = index;
+        self.apply_focused_window_title();
+        let needs_redraw = self.sessions[index].dirty
+            || self.sessions[index]
+                .term
+                .lock()
+                .ok()
+                .is_some_and(|t| t.dirty);
+        self.sessions[index].dirty = false;
+        if needs_redraw {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    fn apply_focused_window_title(&self) {
+        if let Some(window) = &self.window {
+            let title = &self.sessions[self.focused].title;
+            if !title.is_empty() {
+                window.set_title(title);
+            }
+        }
+    }
+
+    pub(crate) fn send_startup_input(&self, bytes: Vec<u8>) {
+        let _ = self.sessions[self.focused]
+            .pty_tx
+            .send(PtyCommand::Input(bytes));
+    }
+
+    /// Despacha un evento de usuario (usado por el event loop y tests).
+    pub(crate) fn dispatch_user_event(&mut self, event: UserEvent) {
+        match event {
+            UserEvent::RedrawNeeded(id) => {
+                if self.is_focused_session(id) {
+                    if let Some(idx) = self.session_by_id(id) {
+                        self.sessions[idx].dirty = false;
+                    }
+                    let since_last = self.last_gui_redraw.map(|t| t.elapsed());
+                    self.gui_redraw_metrics.record_redraw(since_last);
+                    self.last_gui_redraw = Some(Instant::now());
+                    self.gui_redraw_metrics.maybe_log();
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                } else if let Some(idx) = self.session_by_id(id) {
+                    self.sessions[idx].dirty = true;
+                }
+            }
+            UserEvent::PtyExited(id, code) => {
+                if self.is_focused_session(id) {
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.set_status(&format!("[Proceso terminado: codigo {}]", code));
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+            }
+            UserEvent::PtyError(id, msg) => {
+                if self.is_focused_session(id) {
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.set_status(&format!("[Error PTY: {}]", msg));
+                    }
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
+            }
+            UserEvent::SetTitle(id, title) => {
+                if let Some(idx) = self.session_by_id(id) {
+                    self.sessions[idx].title = title.clone();
+                    if self.is_focused_session(id) {
+                        if let Some(window) = &self.window {
+                            window.set_title(&title);
+                        }
+                    }
+                }
+            }
+            UserEvent::ReadClipboard(id, target, bell_terminated) => {
+                if !self.is_focused_session(id) {
+                    return;
+                }
+                let primary = target == b'p' || target == b's';
+                let text = clipboard::get(primary);
+                let encoded = crate::base64::encode(text.as_bytes());
+                let response = Term::format_osc52_read_response(target, &encoded, bell_terminated);
+                self.send_input(response);
+            }
+            UserEvent::ConfigReloaded(cfg) => {
+                if self.theme_picker.is_some() {
+                    tracing::debug!("config: reload omitido — theme picker activo");
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.set_status("[Config: reload omitido — theme picker activo]");
+                    }
+                } else {
+                    let restart_msg = self.apply_config(*cfg);
+                    if let Some(renderer) = &mut self.renderer {
+                        let status = if let Some(msg) = restart_msg {
+                            format!("[Config recargada — {msg}]")
+                        } else {
+                            "[Config recargada]".into()
+                        };
+                        renderer.set_status(&status);
+                    }
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            UserEvent::ConfigReloadFailed(msg) => {
+                tracing::warn!("config: recarga fallida: {msg}");
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_status("[Config: error de parseo — se mantuvo la anterior]");
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+        }
     }
 
     fn session_by_id(&self, id: SessionId) -> Option<usize> {
@@ -2200,91 +2330,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
-        match event {
-            UserEvent::RedrawNeeded(id) => {
-                if self.is_focused_session(id) {
-                    let since_last = self.last_gui_redraw.map(|t| t.elapsed());
-                    self.gui_redraw_metrics.record_redraw(since_last);
-                    self.last_gui_redraw = Some(Instant::now());
-                    self.gui_redraw_metrics.maybe_log();
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
-                    }
-                } else if let Some(idx) = self.session_by_id(id) {
-                    self.sessions[idx].dirty = true;
-                }
-            }
-            UserEvent::PtyExited(id, code) => {
-                if self.is_focused_session(id) {
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer.set_status(&format!("[Proceso terminado: codigo {}]", code));
-                    }
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
-                    }
-                }
-            }
-            UserEvent::PtyError(id, msg) => {
-                if self.is_focused_session(id) {
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer.set_status(&format!("[Error PTY: {}]", msg));
-                    }
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
-                    }
-                }
-            }
-            UserEvent::SetTitle(id, title) => {
-                if let Some(idx) = self.session_by_id(id) {
-                    self.sessions[idx].title = title.clone();
-                    if self.is_focused_session(id) {
-                        if let Some(window) = &self.window {
-                            window.set_title(&title);
-                        }
-                    }
-                }
-            }
-            UserEvent::ReadClipboard(id, target, bell_terminated) => {
-                if !self.is_focused_session(id) {
-                    return;
-                }
-                let primary = target == b'p' || target == b's';
-                let text = clipboard::get(primary);
-                let encoded = crate::base64::encode(text.as_bytes());
-                let response = Term::format_osc52_read_response(target, &encoded, bell_terminated);
-                self.send_input(response);
-            }
-            UserEvent::ConfigReloaded(cfg) => {
-                if self.theme_picker.is_some() {
-                    tracing::debug!("config: reload omitido — theme picker activo");
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer.set_status("[Config: reload omitido — theme picker activo]");
-                    }
-                } else {
-                    let restart_msg = self.apply_config(*cfg);
-                    if let Some(renderer) = &mut self.renderer {
-                        let status = if let Some(msg) = restart_msg {
-                            format!("[Config recargada — {msg}]")
-                        } else {
-                            "[Config recargada]".into()
-                        };
-                        renderer.set_status(&status);
-                    }
-                }
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
-            }
-            UserEvent::ConfigReloadFailed(msg) => {
-                tracing::warn!("config: recarga fallida: {msg}");
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.set_status("[Config: error de parseo — se mantuvo la anterior]");
-                }
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
-            }
-        }
+        self.dispatch_user_event(event);
     }
 }
 
@@ -2324,6 +2370,7 @@ static VTABLE: RawWakerVTable = RawWakerVTable::new(
 mod tests {
     use super::*;
     use crate::config::watch::WatchState;
+    use crate::pty::PtyCommandSender;
     use crate::renderer::limits::pixel_to_cell_coords;
     use nix::sys::eventfd::{EfdFlags, EventFd};
     use std::sync::mpsc;
@@ -2355,6 +2402,38 @@ mod tests {
             Config::default(),
             test_config_watch(),
         )
+    }
+
+    #[test]
+    fn redraw_needed_background_marca_dirty_sin_enfocada() {
+        let session_a = test_session(Arc::new(Mutex::new(Term::new())));
+        let id_a = session_a.id;
+        let session_b = test_session(Arc::new(Mutex::new(Term::new())));
+        let mut app = App::new(
+            vec![session_a, session_b],
+            Config::default(),
+            test_config_watch(),
+        );
+        app.focused = 1;
+
+        app.dispatch_user_event(UserEvent::RedrawNeeded(id_a));
+        assert!(app.sessions[0].dirty);
+        assert!(!app.sessions[1].dirty);
+    }
+
+    #[test]
+    fn focus_session_limpia_dirty_de_sesion_enfocada() {
+        let session_a = test_session(Arc::new(Mutex::new(Term::new())));
+        let session_b = test_session(Arc::new(Mutex::new(Term::new())));
+        let mut app = App::new(
+            vec![session_a, session_b],
+            Config::default(),
+            test_config_watch(),
+        );
+        app.sessions[0].dirty = true;
+        app.focused = 1;
+        app.focus_session(0);
+        assert!(!app.sessions[0].dirty);
     }
 
     #[test]

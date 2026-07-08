@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::ansi::Term;
 use crate::config::Config;
 use crate::grid::{DEFAULT_COLS, DEFAULT_ROWS};
-use crate::pty;
+use crate::pty::{self, PtyCommand, PtyCommandSender};
 use crate::session::{Session, SessionId};
 use crate::window::{App, UserEvent};
 use nix::fcntl::{fcntl, FcntlArg, OFlag};
@@ -30,16 +30,6 @@ const METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 // ponytail: tope de bytes por pasada del drain; suelta el mutex del Term para la GUI.
 const DRAIN_MAX_BYTES_PER_PASS: usize = 256 * 1024;
 
-/// Comandos del GUI al hilo PTY.
-pub enum PtyCommand {
-    /// Bytes de input para escribir al master.
-    Input(Vec<u8>),
-    /// Resize: el child debe actualizar su winsize.
-    Resize { rows: u16, cols: u16 },
-    /// Shutdown: enviar SIGHUP al child y esperar.
-    Shutdown,
-}
-
 /// Eventos que el hilo PTY envía al hilo drain.
 pub enum PtyEvent {
     /// Datos crudos leidos del master PTY.
@@ -53,26 +43,6 @@ pub enum PtyEvent {
 /// Retorna true si paso el intervalo minimo desde el ultimo redraw.
 pub(crate) fn should_redraw(last: Instant, now: Instant) -> bool {
     now.duration_since(last) >= REDRAW_MIN_INTERVAL
-}
-
-/// Envia comandos al hilo PTY y despierta `poll` via eventfd.
-#[derive(Clone)]
-pub struct PtyCommandSender {
-    tx: mpsc::Sender<PtyCommand>,
-    wakeup: Arc<EventFd>,
-}
-
-impl PtyCommandSender {
-    pub fn send(&self, cmd: PtyCommand) -> Result<(), mpsc::SendError<PtyCommand>> {
-        self.tx.send(cmd)?;
-        let _ = self.wakeup.write(1);
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub fn new_for_test(tx: mpsc::Sender<PtyCommand>, wakeup: Arc<EventFd>) -> Self {
-        Self { tx, wakeup }
-    }
 }
 
 struct DrainMetrics {
@@ -114,17 +84,8 @@ impl DrainMetrics {
     }
 }
 
-fn send_redraw(
-    proxy_slot: &Arc<Mutex<Option<winit::event_loop::EventLoopProxy<UserEvent>>>>,
-    session_id: SessionId,
-) {
-    if let Some(proxy) = proxy_slot
-        .lock()
-        .expect("proxy mutex poisoned en drain")
-        .as_ref()
-    {
-        let _ = proxy.send_event(UserEvent::RedrawNeeded(session_id));
-    }
+fn send_redraw(proxy: &winit::event_loop::EventLoopProxy<UserEvent>, session_id: SessionId) {
+    let _ = proxy.send_event(UserEvent::RedrawNeeded(session_id));
 }
 
 /// Agrupa `Output` del canal hasta `max_bytes`; el sobrante va en el vector devuelto.
@@ -161,22 +122,16 @@ fn coalesce_output_chunks(
 }
 
 fn send_title_and_clipboard(
-    proxy_slot: &Arc<Mutex<Option<winit::event_loop::EventLoopProxy<UserEvent>>>>,
+    proxy: &winit::event_loop::EventLoopProxy<UserEvent>,
     session_id: SessionId,
     title: Option<String>,
     clipboard_pending: Option<(u8, bool)>,
 ) {
-    if let Some(proxy) = proxy_slot
-        .lock()
-        .expect("proxy mutex poisoned en drain")
-        .as_ref()
-    {
-        if let Some(t) = title {
-            let _ = proxy.send_event(UserEvent::SetTitle(session_id, t));
-        }
-        if let Some((target, bell)) = clipboard_pending {
-            let _ = proxy.send_event(UserEvent::ReadClipboard(session_id, target, bell));
-        }
+    if let Some(t) = title {
+        let _ = proxy.send_event(UserEvent::SetTitle(session_id, t));
+    }
+    if let Some((target, bell)) = clipboard_pending {
+        let _ = proxy.send_event(UserEvent::ReadClipboard(session_id, target, bell));
     }
 }
 
@@ -303,29 +258,17 @@ fn spawn_blink_timer(
 
 fn handle_non_output_pty_event(
     event: PtyEvent,
-    proxy_slot: &Arc<Mutex<Option<winit::event_loop::EventLoopProxy<UserEvent>>>>,
+    proxy: &winit::event_loop::EventLoopProxy<UserEvent>,
     session_id: SessionId,
 ) {
     match event {
         PtyEvent::Exited(code) => {
             tracing::info!("child termino con codigo {code}");
-            if let Some(proxy) = proxy_slot
-                .lock()
-                .expect("proxy mutex poisoned en drain")
-                .as_ref()
-            {
-                let _ = proxy.send_event(UserEvent::PtyExited(session_id, code));
-            }
+            let _ = proxy.send_event(UserEvent::PtyExited(session_id, code));
         }
         PtyEvent::IoError(msg) => {
             tracing::warn!("error de I/O del PTY: {msg}");
-            if let Some(proxy) = proxy_slot
-                .lock()
-                .expect("proxy mutex poisoned en drain")
-                .as_ref()
-            {
-                let _ = proxy.send_event(UserEvent::PtyError(session_id, msg));
-            }
+            let _ = proxy.send_event(UserEvent::PtyError(session_id, msg));
         }
         PtyEvent::Output(_) => unreachable!("Output se maneja en el match principal"),
     }
@@ -345,7 +288,7 @@ pub fn spawn_session(
     cfg: &Config,
     rows: u16,
     cols: u16,
-    proxy_slot: Arc<Mutex<Option<winit::event_loop::EventLoopProxy<UserEvent>>>>,
+    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
 ) -> std::io::Result<SpawnedSession> {
     let process_cfg = cfg.process_config();
     let session_id = SessionId::next();
@@ -357,20 +300,19 @@ pub fn spawn_session(
     let (tx_gui_to_pty, rx_gui_to_pty) = mpsc::channel::<PtyCommand>();
     let wakeup =
         Arc::new(EventFd::from_flags(EfdFlags::EFD_NONBLOCK).expect("no se pudo crear eventfd"));
-    let cmd_sender = PtyCommandSender {
-        tx: tx_gui_to_pty,
-        wakeup: Arc::clone(&wakeup),
-    };
+    let cmd_sender = PtyCommandSender::new(tx_gui_to_pty, Arc::clone(&wakeup));
     let tx_response = cmd_sender.clone();
 
+    let rows_usize = rows as usize;
+    let cols_usize = cols as usize;
     let term = Arc::new(Mutex::new({
-        let mut t = Term::new_with_scrollback(cfg.scrollback_max_lines());
+        let mut t = Term::new_sized(rows_usize, cols_usize, cfg.scrollback_max_lines());
         cfg.apply_to_term(&mut t);
         t
     }));
 
     let term_drain = Arc::clone(&term);
-    let proxy_for_drain = Arc::clone(&proxy_slot);
+    let proxy_for_drain = proxy.clone();
 
     let drain_handle = thread::spawn(move || {
         let mut parser = vte::Parser::new();
@@ -540,9 +482,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let process_cfg = app_config.process_config();
     let startup_command = process_cfg.startup_command.clone();
 
-    let proxy_for_drain = Arc::new(Mutex::new(
-        None::<winit::event_loop::EventLoopProxy<UserEvent>>,
-    ));
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    let proxy = event_loop.create_proxy();
 
     let SpawnedSession {
         session,
@@ -552,15 +493,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         &app_config,
         DEFAULT_ROWS as u16,
         DEFAULT_COLS as u16,
-        Arc::clone(&proxy_for_drain),
+        proxy.clone(),
     )?;
-
-    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
-    let proxy = event_loop.create_proxy();
-
-    *proxy_for_drain
-        .lock()
-        .expect("proxy mutex poisoned al setear") = Some(proxy.clone());
 
     spawn_blink_timer(Arc::clone(&session.term), proxy.clone(), session.id);
 
@@ -589,10 +523,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = App::new(vec![session], app_config, config_watch);
 
     if let Some(cmd) = startup_command {
-        let _ = app
-            .focused_session()
-            .pty_tx
-            .send(PtyCommand::Input(format!("{cmd}\n").into_bytes()));
+        app.send_startup_input(format!("{cmd}\n").into_bytes());
     }
 
     tracing::info!("event loop iniciado, shell corriendo en PTY");
