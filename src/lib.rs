@@ -8,6 +8,7 @@ pub mod cursor;
 pub mod event_loop;
 pub mod grid;
 pub mod input;
+pub mod layout;
 pub mod pty;
 pub mod renderer;
 pub mod search;
