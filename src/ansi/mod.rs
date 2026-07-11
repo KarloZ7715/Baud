@@ -678,6 +678,21 @@ impl Term {
         d
     }
 
+    /// Tiempo maximo que se puede diferir el redraw esperando `CSI ?2026l`.
+    /// Si se supera, se pinta de todas formas para evitar un freeze permanente.
+    const SYNC_UPDATE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(150);
+
+    /// `true` si hay un frame sincronizado en curso y aun no se supero el
+    /// timeout de seguridad. El event loop consulta esto antes de pintar.
+    pub fn should_defer_redraw(&self) -> bool {
+        match self.sync_update_started_at {
+            Some(started) => {
+                self.sync_update_active && started.elapsed() < Self::SYNC_UPDATE_TIMEOUT
+            }
+            None => false,
+        }
+    }
+
     /// Resetea la fase de parpadeo a "on". Llamar en cada input del usuario y
     /// tras procesar salida del PTY, para que el cursor quede solido mientras
     /// se escribe (comportamiento xterm).
@@ -2400,6 +2415,28 @@ mod tests {
 
         feed(&mut term, b"\x1b[?2026h\x1b[?2026$p");
         assert_eq!(term.take_pty_response(), b"\x1b[?2026;1$y");
+    }
+
+    #[test]
+    fn test_should_defer_redraw_mientras_sync_activo() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?2026h");
+        assert!(term.should_defer_redraw());
+    }
+
+    #[test]
+    fn test_should_defer_redraw_false_sin_sync() {
+        let term = Term::new();
+        assert!(!term.should_defer_redraw());
+    }
+
+    #[test]
+    fn test_should_defer_redraw_false_tras_timeout() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?2026h");
+        term.sync_update_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(200));
+        assert!(!term.should_defer_redraw());
     }
 
     #[test]
