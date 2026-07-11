@@ -604,6 +604,10 @@ impl Term {
     }
 
     fn decrqm_state(&self, mode: u16) -> u16 {
+        // Clustering de grafemas siempre activo; no se puede desactivar.
+        if mode == 2027 {
+            return 3;
+        }
         let set = match mode {
             1 => self.app_cursor_keys,
             6 => self.origin_mode,
@@ -2323,6 +2327,14 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[5;10H\x1b[6n");
         assert_eq!(term.take_pty_response(), b"\x1b[5;10R");
+    }
+
+    #[test]
+    fn test_decrqm_2027_permanentemente_activo() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?2027$p");
+        let resp = term.take_pty_response();
+        assert_eq!(resp, b"\x1b[?2027;3$y");
     }
 
     #[test]
