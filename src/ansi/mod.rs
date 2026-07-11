@@ -206,7 +206,7 @@ pub struct Term {
     /// Instant del ultimo reset de fase de parpadeo (input o output del PTY).
     pub last_blink_reset: Instant,
     /// Bytes que el terminal debe escribir de vuelta al PTY (respuestas a
-    /// queries: DA1/DA2/DSR/CPR/XTVERSION y, mas adelante, OSC query).
+    /// queries: DA1/DA2/DSR/CPR/XTVERSION/XTGETTCAP y OSC query).
     /// El hilo drain lo vacia tras cada parser.advance().
     pub pty_response: Vec<u8>,
     /// Tab stops por columna (true = parada activa).
@@ -225,6 +225,12 @@ pub struct Term {
     pub keyboard_flags: u8,
     /// Stack para CSI > u (push) / CSI < u (pop).
     keyboard_flags_stack: Vec<u8>,
+    /// Intermedios del DCS activo (`+` en XTGETTCAP).
+    dcs_intermediates: Vec<u8>,
+    /// Final del DCS activo (`q` en XTGETTCAP).
+    dcs_action: Option<char>,
+    /// Payload del DCS activo (nombres hex separados por `;`).
+    dcs_payload: Vec<u8>,
 }
 
 fn default_tab_stops(cols: usize) -> Vec<bool> {
@@ -233,6 +239,43 @@ fn default_tab_stops(cols: usize) -> Vec<bool> {
         stops[col] = true;
     }
     stops
+}
+
+enum XtgettcapReply {
+    Boolean,
+    String(&'static str),
+}
+
+fn decode_hex_bytes(hex: &[u8]) -> Result<Vec<u8>, ()> {
+    if hex.is_empty() || !hex.len().is_multiple_of(2) {
+        return Err(());
+    }
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    for pair in hex.chunks_exact(2) {
+        let hi = hex_nibble(pair[0])?;
+        let lo = hex_nibble(pair[1])?;
+        out.push((hi << 4) | lo);
+    }
+    Ok(out)
+}
+
+fn encode_hex_bytes(bytes: &[u8]) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize]);
+        out.push(HEX[(b & 0x0f) as usize]);
+    }
+    out
+}
+
+fn hex_nibble(b: u8) -> Result<u8, ()> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        _ => Err(()),
+    }
 }
 
 fn resize_tab_stops(old: &[bool], new_cols: usize) -> Vec<bool> {
@@ -321,6 +364,9 @@ impl Term {
             newline_mode: false,
             keyboard_flags: 0,
             keyboard_flags_stack: Vec::new(),
+            dcs_intermediates: Vec::new(),
+            dcs_action: None,
+            dcs_payload: Vec::new(),
         }
     }
 
@@ -667,6 +713,70 @@ impl Term {
     /// Vacia y devuelve la respuesta pendiente (la mueve, dejando el buffer vacio).
     pub fn take_pty_response(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pty_response)
+    }
+
+    fn clear_dcs_state(&mut self) {
+        self.dcs_intermediates.clear();
+        self.dcs_action = None;
+        self.dcs_payload.clear();
+    }
+
+    /// Resuelve capacidades terminfo anunciadas via XTGETTCAP.
+    /// Bool afirmativa sin `=`; string/numerica con valor hex ASCII.
+    fn xtgettcap_value(name: &str) -> Option<XtgettcapReply> {
+        match name {
+            "RGB" => Some(XtgettcapReply::String("8/8/8")),
+            "Tc" => Some(XtgettcapReply::Boolean),
+            "colors" | "Co" => Some(XtgettcapReply::String("256")),
+            _ => None,
+        }
+    }
+
+    fn handle_xtgettcap(&mut self, payload: &[u8]) {
+        if payload.is_empty() {
+            self.respond(b"\x1bP0+r\x1b\\");
+            return;
+        }
+
+        let mut any = false;
+        for name_hex in payload.split(|&b| b == b';') {
+            if name_hex.is_empty() {
+                continue;
+            }
+            any = true;
+            let Ok(name_bytes) = decode_hex_bytes(name_hex) else {
+                self.respond_xtgettcap_miss(name_hex);
+                continue;
+            };
+            let Ok(name) = std::str::from_utf8(&name_bytes) else {
+                self.respond_xtgettcap_miss(name_hex);
+                continue;
+            };
+            match Self::xtgettcap_value(name) {
+                Some(XtgettcapReply::Boolean) => {
+                    self.respond(b"\x1bP1+r");
+                    self.respond(name_hex);
+                    self.respond(b"\x1b\\");
+                }
+                Some(XtgettcapReply::String(value)) => {
+                    self.respond(b"\x1bP1+r");
+                    self.respond(name_hex);
+                    self.respond(b"=");
+                    self.respond(&encode_hex_bytes(value.as_bytes()));
+                    self.respond(b"\x1b\\");
+                }
+                None => self.respond_xtgettcap_miss(name_hex),
+            }
+        }
+        if !any {
+            self.respond(b"\x1bP0+r\x1b\\");
+        }
+    }
+
+    fn respond_xtgettcap_miss(&mut self, name_hex: &[u8]) {
+        self.respond(b"\x1bP0+r");
+        self.respond(name_hex);
+        self.respond(b"\x1b\\");
     }
 
     pub fn mark_dirty(&mut self) {
@@ -2032,15 +2142,26 @@ impl vte::Perform for Term {
             _ => {}
         }
     }
-    fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, action: char) {
+    fn hook(&mut self, _params: &vte::Params, intermediates: &[u8], _ignore: bool, action: char) {
         self.clear_pending_grapheme();
-        tracing::debug!("DCS hook action={:?} (no implementado)", action);
+        self.dcs_intermediates = intermediates.to_vec();
+        self.dcs_action = Some(action);
+        self.dcs_payload.clear();
     }
 
-    fn put(&mut self, _byte: u8) {}
+    fn put(&mut self, byte: u8) {
+        self.dcs_payload.push(byte);
+    }
 
     fn unhook(&mut self) {
         self.clear_pending_grapheme();
+        let is_xtgettcap =
+            self.dcs_intermediates.as_slice() == b"+" && self.dcs_action == Some('q');
+        let payload = std::mem::take(&mut self.dcs_payload);
+        self.clear_dcs_state();
+        if is_xtgettcap {
+            self.handle_xtgettcap(&payload);
+        }
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
@@ -2754,6 +2875,56 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[>q");
         assert_eq!(term.take_pty_response(), b"\x1bP>|baud\x1b\\");
+    }
+
+    #[test]
+    fn test_xtgettcap_rgb() {
+        let mut term = Term::new();
+        // RGB → 524742; valor "8/8/8" → 382f382f38
+        feed(&mut term, b"\x1bP+q524742\x1b\\");
+        assert_eq!(term.take_pty_response(), b"\x1bP1+r524742=382f382f38\x1b\\");
+    }
+
+    #[test]
+    fn test_xtgettcap_tc_boolean() {
+        let mut term = Term::new();
+        // Tc → 5463; bool afirmativa sin '='
+        feed(&mut term, b"\x1bP+q5463\x1b\\");
+        assert_eq!(term.take_pty_response(), b"\x1bP1+r5463\x1b\\");
+    }
+
+    #[test]
+    fn test_xtgettcap_colors_y_co() {
+        let mut term = Term::new();
+        // colors → 636f6c6f7273; "256" → 323536
+        feed(&mut term, b"\x1bP+q636f6c6f7273\x1b\\");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1bP1+r636f6c6f7273=323536\x1b\\"
+        );
+        // Co → 436f
+        feed(&mut term, b"\x1bP+q436f\x1b\\");
+        assert_eq!(term.take_pty_response(), b"\x1bP1+r436f=323536\x1b\\");
+    }
+
+    #[test]
+    fn test_xtgettcap_desconocida() {
+        let mut term = Term::new();
+        // ZZ → 5a5a
+        feed(&mut term, b"\x1bP+q5a5a\x1b\\");
+        assert_eq!(term.take_pty_response(), b"\x1bP0+r5a5a\x1b\\");
+    }
+
+    #[test]
+    fn test_xtgettcap_multi_y_vacio() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1bP+q524742;5463\x1b\\");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1bP1+r524742=382f382f38\x1b\\\x1bP1+r5463\x1b\\"
+        );
+        feed(&mut term, b"\x1bP+q\x1b\\");
+        assert_eq!(term.take_pty_response(), b"\x1bP0+r\x1b\\");
     }
 
     #[test]
