@@ -5,8 +5,7 @@
 //! El hilo drain envía UserEvent::RedrawNeeded al GUI vía EventLoopProxy.
 
 use std::collections::VecDeque;
-use std::io::{ErrorKind, Read, Write};
-use std::os::fd::AsFd;
+use std::io::ErrorKind;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -15,14 +14,17 @@ use std::time::{Duration, Instant};
 use crate::ansi::Term;
 use crate::config::Config;
 use crate::grid::{DEFAULT_COLS, DEFAULT_ROWS};
-use crate::pty::{self, PtyCommand, PtyCommandSender};
+use crate::pty::{self, PtyCommand, PtyCommandSender, SessionBackend, WakeSource};
 use crate::session::{Session, SessionId};
 use crate::watchdog::EventLoopWatchdog;
 use crate::window::{App, SessionHost, UserEvent};
-use nix::fcntl::{fcntl, FcntlArg, OFlag};
-use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-use nix::sys::eventfd::{EfdFlags, EventFd};
 use winit::event_loop::EventLoop;
+
+#[cfg(unix)]
+use std::os::fd::AsFd;
+
+#[cfg(unix)]
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
 const METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -162,31 +164,26 @@ fn send_title_and_clipboard(
     }
 }
 
-fn drain_eventfd(efd: &EventFd) {
-    loop {
-        match efd.read() {
-            Ok(_) => continue,
-            Err(nix::errno::Errno::EAGAIN) => break,
-            Err(_) => break,
-        }
-    }
-}
-
 fn process_pty_commands(master: &mut pty::Pty, rx_gui_to_pty: &mpsc::Receiver<PtyCommand>) -> bool {
     let mut shutdown = false;
     while let Ok(cmd) = rx_gui_to_pty.try_recv() {
         match cmd {
             PtyCommand::Input(bytes) => {
                 tracing::trace!("pty_thread: write {} bytes: {:02x?}", bytes.len(), bytes);
-                let _ = master.write_all(&bytes);
+                let _ = master.write_input(&bytes);
             }
             PtyCommand::Resize { rows, cols } => {
-                if let Err(e) = master.set_winsize(rows, cols) {
+                if let Err(e) = master.resize(rows, cols) {
                     tracing::warn!("error al setear winsize: {e}");
                 }
             }
+            PtyCommand::Interrupt => {
+                if let Err(e) = master.interrupt() {
+                    tracing::warn!("error al interrumpir sesion: {e}");
+                }
+            }
             PtyCommand::Shutdown => {
-                let sent = master.send_sighup();
+                let sent = master.shutdown_graceful();
                 if sent {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
@@ -198,6 +195,7 @@ fn process_pty_commands(master: &mut pty::Pty, rx_gui_to_pty: &mpsc::Receiver<Pt
     shutdown
 }
 
+#[cfg(unix)]
 fn master_poll_ready(revents: PollFlags) -> bool {
     revents.intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR)
 }
@@ -209,24 +207,47 @@ enum ReadMasterOutcome {
     IoError,
 }
 
+/// Lee salida disponible en un buffer reutilizable y emite un `Output` coalescido.
+///
+/// Evita un `to_vec` por chunk desde un buffer de pila: los bytes se acumulan
+/// en `out` y la propiedad se mueve al canal una sola vez.
 fn read_master_available(
     master: &mut pty::Pty,
-    buf: &mut [u8],
+    scratch: &mut [u8],
+    out: &mut Vec<u8>,
     tx_pty_to_gui: &mpsc::Sender<PtyEvent>,
 ) -> ReadMasterOutcome {
+    out.clear();
     loop {
-        match master.read(buf) {
-            Ok(0) => return ReadMasterOutcome::Eof,
+        match master.read_output(scratch) {
+            Ok(0) => {
+                if !out.is_empty() {
+                    let chunk = std::mem::take(out);
+                    if tx_pty_to_gui.send(PtyEvent::Output(chunk)).is_err() {
+                        return ReadMasterOutcome::DrainClosed;
+                    }
+                }
+                return ReadMasterOutcome::Eof;
+            }
             Ok(n) => {
-                tracing::trace!("pty_thread: read {} bytes: {:02x?}", n, &buf[..n.min(40)]);
-                if tx_pty_to_gui
-                    .send(PtyEvent::Output(buf[..n].to_vec()))
-                    .is_err()
-                {
+                tracing::trace!(
+                    "pty_thread: read {} bytes: {:02x?}",
+                    n,
+                    &scratch[..n.min(40)]
+                );
+                out.extend_from_slice(&scratch[..n]);
+            }
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                if out.is_empty() {
+                    return ReadMasterOutcome::Done;
+                }
+                let chunk = std::mem::take(out);
+                out.reserve(scratch.len());
+                if tx_pty_to_gui.send(PtyEvent::Output(chunk)).is_err() {
                     return ReadMasterOutcome::DrainClosed;
                 }
+                return ReadMasterOutcome::Done;
             }
-            Err(e) if e.kind() == ErrorKind::WouldBlock => return ReadMasterOutcome::Done,
             Err(e) => {
                 tracing::warn!("error de I/O en PTY: {e}");
                 let _ = tx_pty_to_gui.send(PtyEvent::IoError(e.to_string()));
@@ -326,9 +347,14 @@ pub fn spawn_session(
 
     let (tx_pty_to_gui, rx_pty_to_gui) = mpsc::channel::<PtyEvent>();
     let (tx_gui_to_pty, rx_gui_to_pty) = mpsc::channel::<PtyCommand>();
-    let wakeup =
-        Arc::new(EventFd::from_flags(EfdFlags::EFD_NONBLOCK).expect("no se pudo crear eventfd"));
-    let cmd_sender = PtyCommandSender::new(tx_gui_to_pty, Arc::clone(&wakeup));
+
+    #[cfg(unix)]
+    let wakeup = Arc::new(pty::EventFdWake::new()?);
+    #[cfg(windows)]
+    let wakeup = Arc::new(pty::ConPtyWake::new()?);
+
+    let cmd_sender =
+        PtyCommandSender::new(tx_gui_to_pty, Arc::clone(&wakeup) as Arc<dyn WakeSource>);
     let tx_response = cmd_sender.clone();
 
     let rows_usize = rows as usize;
@@ -451,56 +477,7 @@ pub fn spawn_session(
 
     let wakeup_pty = Arc::clone(&wakeup);
     let pty_handle = thread::spawn(move || {
-        let mut master = master;
-        let mut buf = [0u8; 4096];
-
-        if let Ok(flags) = fcntl(master.fd(), FcntlArg::F_GETFL) {
-            let nonblock = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
-            let _ = fcntl(master.fd(), FcntlArg::F_SETFL(nonblock));
-        }
-
-        loop {
-            let (master_ready, wakeup_ready) = {
-                let mut poll_fds = [
-                    PollFd::new(master.fd().as_fd(), PollFlags::POLLIN),
-                    PollFd::new(wakeup_pty.as_fd(), PollFlags::POLLIN),
-                ];
-                loop {
-                    match poll(&mut poll_fds, PollTimeout::NONE) {
-                        Ok(_) => break,
-                        Err(nix::errno::Errno::EINTR) => continue,
-                        Err(e) => {
-                            tracing::warn!("poll en hilo PTY fallo: {e}");
-                            let _ = tx_pty_to_gui.send(PtyEvent::IoError(e.to_string()));
-                            return;
-                        }
-                    }
-                }
-                let master_ready = poll_fds[0].revents().is_some_and(master_poll_ready);
-                let wakeup_ready = poll_fds[1]
-                    .revents()
-                    .is_some_and(|r| r.contains(PollFlags::POLLIN));
-                (master_ready, wakeup_ready)
-            };
-
-            if wakeup_ready {
-                drain_eventfd(&wakeup_pty);
-                if process_pty_commands(&mut master, &rx_gui_to_pty) {
-                    return;
-                }
-            }
-
-            if master_ready {
-                match read_master_available(&mut master, &mut buf, &tx_pty_to_gui) {
-                    ReadMasterOutcome::Done => {}
-                    ReadMasterOutcome::Eof => {
-                        let _ = tx_pty_to_gui.send(PtyEvent::Exited(-1));
-                        return;
-                    }
-                    ReadMasterOutcome::DrainClosed | ReadMasterOutcome::IoError => return,
-                }
-            }
-        }
+        pty_thread_main(master, wakeup_pty, rx_gui_to_pty, tx_pty_to_gui);
     });
 
     let session = Session {
@@ -516,6 +493,108 @@ pub fn spawn_session(
         drain_handle,
         pty_handle,
     })
+}
+
+#[cfg(unix)]
+fn pty_thread_main(
+    mut master: pty::Pty,
+    wakeup_pty: Arc<pty::EventFdWake>,
+    rx_gui_to_pty: mpsc::Receiver<PtyCommand>,
+    tx_pty_to_gui: mpsc::Sender<PtyEvent>,
+) {
+    let mut scratch = [0u8; 4096];
+    let mut out_buf = Vec::with_capacity(4096);
+
+    if let Err(e) = master.set_nonblocking() {
+        tracing::warn!("no se pudo poner PTY en non-blocking: {e}");
+    }
+
+    loop {
+        let (master_ready, wakeup_ready) = {
+            let mut poll_fds = [
+                PollFd::new(master.as_fd(), PollFlags::POLLIN),
+                PollFd::new(wakeup_pty.eventfd().as_fd(), PollFlags::POLLIN),
+            ];
+            loop {
+                match poll(&mut poll_fds, PollTimeout::NONE) {
+                    Ok(_) => break,
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Err(e) => {
+                        tracing::warn!("poll en hilo PTY fallo: {e}");
+                        let _ = tx_pty_to_gui.send(PtyEvent::IoError(e.to_string()));
+                        return;
+                    }
+                }
+            }
+            let master_ready = poll_fds[0].revents().is_some_and(master_poll_ready);
+            let wakeup_ready = poll_fds[1]
+                .revents()
+                .is_some_and(|r| r.contains(PollFlags::POLLIN));
+            (master_ready, wakeup_ready)
+        };
+
+        if wakeup_ready {
+            wakeup_pty.drain();
+            if process_pty_commands(&mut master, &rx_gui_to_pty) {
+                return;
+            }
+        }
+
+        if master_ready {
+            match read_master_available(&mut master, &mut scratch, &mut out_buf, &tx_pty_to_gui) {
+                ReadMasterOutcome::Done => {}
+                ReadMasterOutcome::Eof => {
+                    let _ = tx_pty_to_gui.send(PtyEvent::Exited(-1));
+                    return;
+                }
+                ReadMasterOutcome::DrainClosed | ReadMasterOutcome::IoError => return,
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn pty_thread_main(
+    mut master: pty::Pty,
+    wakeup_pty: Arc<pty::ConPtyWake>,
+    rx_gui_to_pty: mpsc::Receiver<PtyCommand>,
+    tx_pty_to_gui: mpsc::Sender<PtyEvent>,
+) {
+    let mut scratch = [0u8; 4096];
+    let mut out_buf = Vec::with_capacity(4096);
+
+    if let Err(e) = master.set_nonblocking() {
+        tracing::warn!("no se pudo poner PTY en non-blocking: {e}");
+    }
+
+    loop {
+        let ready = match master.wait_ready(&wakeup_pty) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("wait en hilo PTY fallo: {e}");
+                let _ = tx_pty_to_gui.send(PtyEvent::IoError(e.to_string()));
+                return;
+            }
+        };
+
+        if ready.wake {
+            wakeup_pty.drain();
+            if process_pty_commands(&mut master, &rx_gui_to_pty) {
+                return;
+            }
+        }
+
+        if ready.output {
+            match read_master_available(&mut master, &mut scratch, &mut out_buf, &tx_pty_to_gui) {
+                ReadMasterOutcome::Done => {}
+                ReadMasterOutcome::Eof => {
+                    let _ = tx_pty_to_gui.send(PtyEvent::Exited(-1));
+                    return;
+                }
+                ReadMasterOutcome::DrainClosed | ReadMasterOutcome::IoError => return,
+            }
+        }
+    }
 }
 
 /// Punto de entrada del event loop.
@@ -604,11 +683,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    use std::io::Read;
+    #[cfg(unix)]
     use std::os::fd::AsFd;
 
+    #[cfg(unix)]
     use nix::poll::PollTimeout;
+    #[cfg(unix)]
     use nix::poll::{poll, PollFd, PollFlags};
-    use nix::sys::eventfd::{EfdFlags, EventFd};
 
     #[test]
     fn test_coalesce_respeta_tope_bytes() {
@@ -633,21 +717,24 @@ mod tests {
         assert!(should_redraw(t0, t0 + Duration::from_millis(1), 0));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_eventfd_despierta_poll() {
-        let efd = EventFd::from_flags(EfdFlags::EFD_NONBLOCK).expect("eventfd");
-        efd.write(1).expect("write eventfd");
-        let mut fds = [PollFd::new(efd.as_fd(), PollFlags::POLLIN)];
+        let wake = pty::EventFdWake::new().expect("eventfd");
+        wake.wake();
+        let mut fds = [PollFd::new(wake.eventfd().as_fd(), PollFlags::POLLIN)];
         let n = poll(&mut fds, PollTimeout::from(100u16)).expect("poll");
         assert!(n >= 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_set_winsize_after_spawn() {
         let master = pty::spawn("bash", &["-c", "exit"]).expect("spawn fallo");
         assert!(master.set_winsize(24, 80).is_ok());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_pty_eof_no_panic() {
         let mut master = pty::spawn("bash", &["-c", "exit"]).expect("spawn fallo");
@@ -657,6 +744,27 @@ mod tests {
                 Ok(0) => break,
                 Ok(_) => continue,
                 Err(_) => break,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_master_coalesces_without_per_chunk_to_vec() {
+        let (tx, rx) = mpsc::channel::<PtyEvent>();
+        let mut master = pty::spawn("bash", &["-c", "true"]).expect("spawn");
+        master.set_nonblocking().expect("nonblock");
+        let mut scratch = [0u8; 64];
+        let mut out = Vec::with_capacity(64);
+        match read_master_available(&mut master, &mut scratch, &mut out, &tx) {
+            ReadMasterOutcome::Done
+            | ReadMasterOutcome::Eof
+            | ReadMasterOutcome::DrainClosed
+            | ReadMasterOutcome::IoError => {}
+        }
+        while let Ok(ev) = rx.try_recv() {
+            if let PtyEvent::Output(bytes) = ev {
+                assert!(!bytes.is_empty());
             }
         }
     }

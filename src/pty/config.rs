@@ -15,7 +15,13 @@ pub struct ProcessConfig {
 
 impl Default for ProcessConfig {
     fn default() -> Self {
+        #[cfg(unix)]
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into());
+        #[cfg(windows)]
+        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into());
+        #[cfg(not(any(unix, windows)))]
+        let shell = "sh".into();
+
         Self {
             shell,
             args: Vec::new(),
@@ -31,6 +37,7 @@ impl Default for ProcessConfig {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn test_process_config_default_usa_shell_env() {
         unsafe {
@@ -43,9 +50,9 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_process_config_default_resuelve_shell() {
-        // sin $SHELL definido debe caer a /bin/bash; con $SHELL lo usa.
         unsafe {
             std::env::remove_var("SHELL");
         }
@@ -54,5 +61,12 @@ mod tests {
         assert!(cfg.args.is_empty());
         assert!(cfg.working_directory.is_none());
         assert!(!cfg.login_shell);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_process_config_default_windows_shell() {
+        let cfg = ProcessConfig::default();
+        assert!(!cfg.shell.is_empty());
     }
 }

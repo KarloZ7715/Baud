@@ -3578,7 +3578,6 @@ mod tests {
     use crate::config::watch::WatchState;
     use crate::pty::PtyCommandSender;
     use crate::renderer::limits::pixel_to_cell_coords;
-    use nix::sys::eventfd::{EfdFlags, EventFd};
     use std::sync::mpsc;
 
     fn test_config_watch() -> Arc<Mutex<WatchState>> {
@@ -3587,8 +3586,7 @@ mod tests {
 
     fn dummy_pty_sender() -> PtyCommandSender {
         let (tx, _rx) = mpsc::channel();
-        let wakeup =
-            Arc::new(EventFd::from_flags(EfdFlags::EFD_NONBLOCK).expect("eventfd para test"));
+        let wakeup = crate::pty::create_wake().expect("wake para test");
         PtyCommandSender::new_for_test(tx, wakeup)
     }
 

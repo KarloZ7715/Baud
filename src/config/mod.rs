@@ -901,7 +901,16 @@ impl Config {
             .program
             .clone()
             .or_else(|| std::env::var("SHELL").ok())
-            .unwrap_or_else(|| "/bin/bash".into());
+            .unwrap_or_else(|| {
+                #[cfg(windows)]
+                {
+                    std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into())
+                }
+                #[cfg(not(windows))]
+                {
+                    "bash".into()
+                }
+            });
         let env = self
             .process
             .env
