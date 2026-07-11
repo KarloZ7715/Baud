@@ -170,6 +170,10 @@ pub struct Term {
     pub hyperlinks: Vec<String>,
     /// Codepoints adicionales de grafemas multi-codepoint (indice desde `Cell::extra_codepoints`).
     pub grapheme_extras: Vec<String>,
+    /// Buffer del grafema en construccion (UAX #29).
+    pending_grapheme: String,
+    /// Celda base del grafema pendiente (`row`, `col`), si ya se escribio.
+    last_grapheme_cell: Option<(usize, usize)>,
     current_link: Option<usize>,
     /// Enlace bajo el cursor del mouse (hover).
     pub hovered_link: Option<LinkRange>,
@@ -277,6 +281,8 @@ impl Term {
             cwd: None,
             hyperlinks: Vec::new(),
             grapheme_extras: Vec::new(),
+            pending_grapheme: String::new(),
+            last_grapheme_cell: None,
             current_link: None,
             hovered_link: None,
             clipboard_read_pending: None,
@@ -1277,24 +1283,40 @@ impl Term {
     }
 }
 
-/// Implementa el trait vte::Perform para procesar secuencias ANSI.
-impl vte::Perform for Term {
-    /// Escribe un caracter en la posicion actual del cursor y avanza la columna
-    /// segun el ancho Unicode del caracter (1 para latino, 2 para CJK, etc.).
-    /// Si `c_width == 0` (caracter de ancho cero), no escribe nada.
-    /// Si hay pending_wrap activo, primero ejecuta el wrap (avanza fila,
-    /// columna a 0).
-    /// Si al escribir el cursor sale del grid, marca pending_wrap si
-    /// auto_wrap esta activo.
-    /// Los caracteres de ancho 2 en la ultima columna fuerzan un wrap.
-    fn print(&mut self, c: char) {
-        let c_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
-        // Caracteres de ancho cero (controles, combinantes) se ignoran.
-        if c_width == 0 {
+impl Term {
+    fn clear_pending_grapheme(&mut self) {
+        self.pending_grapheme.clear();
+        self.last_grapheme_cell = None;
+    }
+
+    fn refresh_pending_grapheme_extras(&mut self) {
+        let Some((row, col)) = self.last_grapheme_cell else {
+            return;
+        };
+        let extra: String = self.pending_grapheme.chars().skip(1).collect();
+        if extra.is_empty() {
             return;
         }
+        let existing = self.active_grid().get(row, col).extra_codepoints;
+        let idx = match existing {
+            Some(i) => {
+                self.grapheme_extras[i as usize] = extra;
+                i
+            }
+            None => {
+                self.grapheme_extras.push(extra);
+                (self.grapheme_extras.len() - 1) as u32
+            }
+        };
+        let width = self.active_grid().get(row, col).width;
+        if let Some(cell) = self.active_grid_mut().cell(row, col) {
+            cell.extra_codepoints = Some(idx);
+        }
+        self.active_grid_mut().mark_cell_written(row, col, width);
+    }
 
-        // Si hay wrap pendiente, primero hacer el wrap.
+    /// Escribe el primer codepoint de un grafema y registra la celda base.
+    fn write_grapheme_base(&mut self, c: char, c_width: usize) {
         if self.pending_wrap {
             self.do_pending_wrap();
         }
@@ -1305,7 +1327,6 @@ impl vte::Perform for Term {
         let link = self.current_link.map(|i| i as u32);
         let cols = self.cursor.cols_count;
 
-        // Caracter ancho (CJK) en la ultima columna: wrap forzado.
         if c_width >= 2 && col + c_width > cols && self.auto_wrap {
             self.pending_wrap = true;
             self.do_pending_wrap();
@@ -1325,8 +1346,10 @@ impl vte::Perform for Term {
                         cell.attrs = attrs;
                         cell.width = c_width as u8;
                         cell.hyperlink = link;
+                        cell.extra_codepoints = None;
                     }
                     active.mark_cell_written(row, col, c_width as u8);
+                    self.last_grapheme_cell = Some((row, col));
                 }
                 self.cursor.col = col + c_width;
                 if self.cursor.col >= cols {
@@ -1341,7 +1364,6 @@ impl vte::Perform for Term {
             return;
         }
 
-        // Ruta normal: escribir caracter y avanzar cursor.
         {
             if self.insert_mode {
                 self.active_grid_mut()
@@ -1356,8 +1378,10 @@ impl vte::Perform for Term {
                     cell.attrs = attrs;
                     cell.width = c_width as u8;
                     cell.hyperlink = link;
+                    cell.extra_codepoints = None;
                 }
                 active.mark_cell_written(row, col, c_width as u8);
+                self.last_grapheme_cell = Some((row, col));
             }
             self.cursor.col += c_width;
             if self.cursor.col >= cols {
@@ -1370,9 +1394,36 @@ impl vte::Perform for Term {
             }
         }
     }
+}
 
-    /// Ejecuta un byte de control C0 (BEL, BS, TAB, LF, CR, etc.).
+/// Implementa el trait vte::Perform para procesar secuencias ANSI.
+impl vte::Perform for Term {
+    /// Acumula codepoints en un grafema (UAX #29) y escribe la celda base
+    /// de inmediato; los codepoints que extienden el cluster se adjuntan sin
+    /// avanzar el cursor. El ancho de celda es el del primer codepoint.
+    fn print(&mut self, c: char) {
+        if !self.pending_grapheme.is_empty()
+            && crate::grapheme::extends_last_cluster(&self.pending_grapheme, c)
+        {
+            self.pending_grapheme.push(c);
+            self.refresh_pending_grapheme_extras();
+            return;
+        }
+
+        let c_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        // Codepoints de ancho 0 que no extienden un cluster previo se ignoran.
+        if c_width == 0 {
+            self.clear_pending_grapheme();
+            return;
+        }
+
+        self.pending_grapheme.clear();
+        self.pending_grapheme.push(c);
+        self.write_grapheme_base(c, c_width);
+    }
+
     fn execute(&mut self, byte: u8) {
+        self.clear_pending_grapheme();
         match byte {
             0x07 => {
                 // BEL: placeholder, un emulador real haria beep.
@@ -1428,6 +1479,7 @@ impl vte::Perform for Term {
         _ignore: bool,
         action: char,
     ) {
+        self.clear_pending_grapheme();
         if action == 'p' && intermediates == b"$" {
             let mode = params
                 .iter()
@@ -1863,6 +1915,7 @@ impl vte::Perform for Term {
     /// NO confundir con 0x07 (BEL) ni 0x08 (BS). vte ya ejecuta 0x07 y 0x08
     /// via execute(), asi que en esc_dispatch jamas llegan.
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        self.clear_pending_grapheme();
         if intermediates == b"#" && byte == 0x38 {
             let rows = self.active_grid().rows_count;
             let cols = self.active_grid().cols_count;
@@ -1918,14 +1971,18 @@ impl vte::Perform for Term {
         }
     }
     fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, action: char) {
+        self.clear_pending_grapheme();
         tracing::debug!("DCS hook action={:?} (no implementado)", action);
     }
 
     fn put(&mut self, _byte: u8) {}
 
-    fn unhook(&mut self) {}
+    fn unhook(&mut self) {
+        self.clear_pending_grapheme();
+    }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
+        self.clear_pending_grapheme();
         let Some(first) = params.first() else {
             return;
         };
@@ -2836,6 +2893,35 @@ mod tests {
     // -----------------------------------------------------------------------
     // Tests de flujo / integracion
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_combining_accent_no_se_descarta() {
+        let mut term = Term::new();
+        feed(&mut term, "e\u{0301}".as_bytes());
+        let cell = term.active_grid().get(0, 0);
+        assert_eq!(cell.ch, 'e');
+        let extra_idx = cell.extra_codepoints.expect("debe tener extra");
+        assert_eq!(term.grapheme_extras[extra_idx as usize], "\u{0301}");
+        assert_eq!(term.cursor.col, 1);
+    }
+
+    #[test]
+    fn test_zwj_emoji_ocupa_una_sola_celda_ancho_2() {
+        let mut term = Term::new();
+        let cluster = "\u{1F9D1}\u{200D}\u{1F33E}";
+        feed(&mut term, cluster.as_bytes());
+        let cell = term.active_grid().get(0, 0);
+        assert_eq!(cell.width, 2);
+        assert_eq!(term.cursor.col, 2);
+    }
+
+    #[test]
+    fn test_flush_ocurre_antes_de_una_secuencia_csi() {
+        let mut term = Term::new();
+        feed(&mut term, b"e\x1b[5C");
+        let cell = term.active_grid().get(0, 0);
+        assert_eq!(cell.ch, 'e');
+    }
 
     #[test]
     fn test_print_writes_char_to_grid() {
