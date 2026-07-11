@@ -1,9 +1,9 @@
 //! Telemetría del hilo GUI: heartbeat del event loop y fase activa del handler.
 //!
 //! Coste casi-cero en hot path (`ping` / `enter` / `leave`):
-//! - Solo atomics + seqlock (sin `Mutex`, sin `mpsc` por heartbeat).
-//! - El hilo watchdog solo *lee* cada 2s; el GUI nunca espera.
-//! - `HandlerGuard` clona el `Arc` (refcount) para no prestar `&App`.
+//! - `ping`: un `fetch_add` de generación (sin Instant).
+//! - `enter`/`leave`: atomics ordenados + `*const` (sin Mutex/mpsc/Arc::clone).
+//! - El hilo watchdog lee cada 2s y materializa timestamps al detectar stall.
 
 use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -27,14 +27,15 @@ pub struct TelemetrySnapshot {
 
 /// Estado compartido GUI ↔ hilo `baud-watchdog` (lock-free en hot path).
 ///
-/// Escritura solo desde el hilo GUI; el watchdog solo lee. Un seqlock evita
-/// que `snapshot` combine `ptr`/`len` de dos `enter` distintos.
+/// Escritura solo desde el hilo GUI. Orden: `started`/`len` antes de publicar
+/// `ptr` con `Release`; lectores hacen `Acquire` en `ptr` y luego leen el resto.
 #[derive(Debug)]
 struct LoopTelemetry {
     epoch: Instant,
+    /// Generación de heartbeat (incrementa en cada `ping`).
+    heartbeat_gen: AtomicU64,
+    /// Ms desde `epoch` en el último `ping` (rellenado perezoso en snapshot/stall).
     last_heartbeat_ms: AtomicU64,
-    /// Seqlock: impar = escritura en curso; par = estable.
-    handler_seq: AtomicU64,
     handler_ptr: AtomicPtr<u8>,
     handler_len: AtomicUsize,
     handler_started_ms: AtomicU64,
@@ -48,8 +49,8 @@ impl LoopTelemetry {
         let epoch = Instant::now();
         Self {
             epoch,
+            heartbeat_gen: AtomicU64::new(0),
             last_heartbeat_ms: AtomicU64::new(0),
-            handler_seq: AtomicU64::new(0),
             handler_ptr: AtomicPtr::new(std::ptr::null_mut()),
             handler_len: AtomicUsize::new(0),
             handler_started_ms: AtomicU64::new(0),
@@ -64,39 +65,33 @@ impl LoopTelemetry {
         self.epoch.elapsed().as_millis() as u64
     }
 
+    /// Hot path: un solo atomic. El timestamp lo materializa el watchdog.
     #[inline]
     fn ping(&self) {
-        self.last_heartbeat_ms
-            .store(self.now_ms(), Ordering::Relaxed);
+        self.heartbeat_gen.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline]
     fn enter(&self, name: &'static str) {
         let now = self.now_ms();
-        self.handler_seq.fetch_add(1, Ordering::Relaxed); // → impar
         self.handler_started_ms.store(now, Ordering::Relaxed);
         self.handler_len.store(name.len(), Ordering::Relaxed);
         self.handler_ptr
-            .store(name.as_ptr().cast_mut(), Ordering::Relaxed);
-        self.handler_seq.fetch_add(1, Ordering::Release); // → par
+            .store(name.as_ptr().cast_mut(), Ordering::Release);
     }
 
     #[inline]
     fn leave(&self, name: &'static str) {
-        self.handler_seq.fetch_add(1, Ordering::Relaxed); // → impar
         let ptr = self.handler_ptr.load(Ordering::Relaxed);
         let matches = !ptr.is_null() && std::ptr::eq(ptr, name.as_ptr());
-        let started = self.handler_started_ms.load(Ordering::Relaxed);
-        if matches {
-            self.handler_ptr
-                .store(std::ptr::null_mut(), Ordering::Relaxed);
-            self.handler_len.store(0, Ordering::Relaxed);
-        }
-        self.handler_seq.fetch_add(1, Ordering::Release); // → par
-
         if !matches {
             return;
         }
+        let started = self.handler_started_ms.load(Ordering::Relaxed);
+        self.handler_ptr
+            .store(std::ptr::null_mut(), Ordering::Release);
+        self.handler_len.store(0, Ordering::Relaxed);
+
         let elapsed_ms = self.now_ms().saturating_sub(started);
         if elapsed_ms < SLOW_HANDLER_WARN_MS {
             return;
@@ -116,35 +111,39 @@ impl LoopTelemetry {
     }
 
     fn current_handler_and_start(&self) -> (Option<&'static str>, u64) {
-        loop {
-            let s1 = self.handler_seq.load(Ordering::Acquire);
-            if s1 & 1 != 0 {
-                std::hint::spin_loop();
-                continue;
-            }
-            let ptr = self.handler_ptr.load(Ordering::Relaxed);
-            let len = self.handler_len.load(Ordering::Relaxed);
-            let started = self.handler_started_ms.load(Ordering::Relaxed);
-            let s2 = self.handler_seq.load(Ordering::Acquire);
-            if s1 != s2 {
-                continue;
-            }
-            if ptr.is_null() {
-                return (None, 0);
-            }
-            // SAFETY: ptr+len vienen del mismo `enter` (seqlock estable) sobre
-            // un literal `&'static str`.
-            let name =
-                unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) };
-            return (Some(name), started);
+        let ptr = self.handler_ptr.load(Ordering::Acquire);
+        if ptr.is_null() {
+            return (None, 0);
+        }
+        let len = self.handler_len.load(Ordering::Relaxed);
+        let started = self.handler_started_ms.load(Ordering::Relaxed);
+        // SAFETY: `enter` escribe len/started antes del Release de ptr; somos
+        // Acquire aquí. Solo literales `&'static str`.
+        let name = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len)) };
+        (Some(name), started)
+    }
+
+    /// Snapshot usado en WARN de stall (edad ya conocida por el hilo watchdog).
+    fn snapshot_for_stall(&self, heartbeat_age: Duration) -> TelemetrySnapshot {
+        let now = self.now_ms();
+        let (current_handler, started) = self.current_handler_and_start();
+        let current_handler_age =
+            current_handler.map(|_| Duration::from_millis(now.saturating_sub(started)));
+        TelemetrySnapshot {
+            heartbeat_age,
+            current_handler,
+            current_handler_age,
+            term_lock_busy: self.term_lock_busy.load(Ordering::Relaxed),
+            slow_handlers: self.slow_handlers.load(Ordering::Relaxed),
+            stalls: self.stalls.load(Ordering::Relaxed),
         }
     }
 
-    fn snapshot(&self) -> TelemetrySnapshot {
+    /// Diagnóstico/tests: edad desde el último materialize del watchdog o noop.
+    fn snapshot_diagnostic(&self) -> TelemetrySnapshot {
         let now = self.now_ms();
-        let heartbeat_age = Duration::from_millis(
-            now.saturating_sub(self.last_heartbeat_ms.load(Ordering::Relaxed)),
-        );
+        let last = self.last_heartbeat_ms.load(Ordering::Relaxed);
+        let heartbeat_age = Duration::from_millis(now.saturating_sub(last));
         let (current_handler, started) = self.current_handler_and_start();
         let current_handler_age =
             current_handler.map(|_| Duration::from_millis(now.saturating_sub(started)));
@@ -165,16 +164,20 @@ impl LoopTelemetry {
 
 /// RAII: marca la fase activa; al dropear mide duración (warn si es lenta).
 ///
-/// Clona el `Arc` (refcount atómico) para no bloquear `&mut App` mientras
-/// el guard vive. El coste relevante del hot path son los atomics, no el mutex.
+/// Guarda `*const LoopTelemetry` (el `Arc` del watchdog mantiene vivo el
+/// allocation). El guard no se envía entre hilos.
 pub struct HandlerGuard {
-    telemetry: Arc<LoopTelemetry>,
+    telemetry: *const LoopTelemetry,
     name: &'static str,
 }
 
 impl Drop for HandlerGuard {
     fn drop(&mut self) {
-        self.telemetry.leave(self.name);
+        // SAFETY: `enter` solo se llama mientras el Arc del watchdog vive;
+        // el guard no escapa del stack del handler.
+        unsafe {
+            (*self.telemetry).leave(self.name);
+        }
     }
 }
 
@@ -192,29 +195,41 @@ impl EventLoopWatchdog {
         let tel = Arc::clone(&telemetry);
         thread::Builder::new()
             .name("baud-watchdog".into())
-            .spawn(move || loop {
-                thread::sleep(HEARTBEAT_INTERVAL);
-                let snap = tel.snapshot();
-                if snap.heartbeat_age.as_millis() < u128::from(HEARTBEAT_INTERVAL_MS) {
-                    continue;
+            .spawn(move || {
+                let mut last_gen = tel.heartbeat_gen.load(Ordering::Relaxed);
+                let mut last_seen_at = Instant::now();
+                loop {
+                    thread::sleep(HEARTBEAT_INTERVAL);
+                    let gen = tel.heartbeat_gen.load(Ordering::Relaxed);
+                    if gen != last_gen {
+                        last_gen = gen;
+                        last_seen_at = Instant::now();
+                        tel.last_heartbeat_ms.store(tel.now_ms(), Ordering::Relaxed);
+                        continue;
+                    }
+                    let age = last_seen_at.elapsed();
+                    if age.as_millis() < u128::from(HEARTBEAT_INTERVAL_MS) {
+                        continue;
+                    }
+                    let stalls = tel.stalls.fetch_add(1, Ordering::Relaxed) + 1;
+                    let snap = tel.snapshot_for_stall(age);
+                    let handler = snap.current_handler.unwrap_or("idle");
+                    let handler_ms = snap
+                        .current_handler_age
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    tracing::warn!(
+                        target: "baud::watchdog",
+                        heartbeat_age_ms = age.as_millis() as u64,
+                        handler,
+                        handler_age_ms = handler_ms,
+                        term_lock_busy = snap.term_lock_busy,
+                        slow_handlers = snap.slow_handlers,
+                        stalls,
+                        uptime_s = tel.uptime_secs(),
+                        "event loop sin heartbeat — posible bloqueo (GPU, mutex, I/O)"
+                    );
                 }
-                let stalls = tel.stalls.fetch_add(1, Ordering::Relaxed) + 1;
-                let handler = snap.current_handler.unwrap_or("idle");
-                let handler_ms = snap
-                    .current_handler_age
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                tracing::warn!(
-                    target: "baud::watchdog",
-                    heartbeat_age_ms = snap.heartbeat_age.as_millis() as u64,
-                    handler,
-                    handler_age_ms = handler_ms,
-                    term_lock_busy = snap.term_lock_busy,
-                    slow_handlers = snap.slow_handlers,
-                    stalls,
-                    uptime_s = tel.uptime_secs(),
-                    "event loop sin heartbeat — posible bloqueo (GPU, mutex, I/O)"
-                );
             })
             .expect("no se pudo iniciar watchdog");
         Self { telemetry }
@@ -231,7 +246,7 @@ impl EventLoopWatchdog {
     pub fn enter(&self, name: &'static str) -> HandlerGuard {
         self.telemetry.enter(name);
         HandlerGuard {
-            telemetry: Arc::clone(&self.telemetry),
+            telemetry: Arc::as_ptr(&self.telemetry),
             name,
         }
     }
@@ -244,13 +259,16 @@ impl EventLoopWatchdog {
 
     /// Instantáneo para tests / diagnóstico (camino frío).
     pub fn snapshot(&self) -> TelemetrySnapshot {
-        self.telemetry.snapshot()
+        self.telemetry.snapshot_diagnostic()
     }
 
     /// Instancia sin hilo de vigilancia (tests).
     pub fn noop() -> Self {
         let telemetry = Arc::new(LoopTelemetry::new());
         telemetry.ping();
+        telemetry
+            .last_heartbeat_ms
+            .store(telemetry.now_ms(), Ordering::Relaxed);
         Self { telemetry }
     }
 }
@@ -293,10 +311,26 @@ mod tests {
     }
 
     #[test]
+    fn ping_advances_generation_for_stall_detection() {
+        let wd = EventLoopWatchdog::noop();
+        let before = wd.telemetry.heartbeat_gen.load(Ordering::Relaxed);
+        wd.ping();
+        let after = wd.telemetry.heartbeat_gen.load(Ordering::Relaxed);
+        assert!(after > before);
+    }
+
+    #[test]
     fn ping_resets_heartbeat_age() {
         let wd = EventLoopWatchdog::noop();
+        // Simula materialize del watchdog tras un ping.
+        wd.telemetry
+            .last_heartbeat_ms
+            .store(wd.telemetry.now_ms(), Ordering::Relaxed);
         thread::sleep(Duration::from_millis(5));
         wd.ping();
+        wd.telemetry
+            .last_heartbeat_ms
+            .store(wd.telemetry.now_ms(), Ordering::Relaxed);
         assert!(wd.snapshot().heartbeat_age < Duration::from_millis(50));
     }
 
