@@ -165,7 +165,11 @@ fn cell_contrast_context(
     is_sel: bool,
     cursor_block: bool,
     palette: &Palette<'_>,
+    ch: char,
 ) -> ((u8, u8, u8), bool) {
+    if super::builtin::is_geometric_glyph(ch) {
+        return (palette.bg_rgb(bg), true);
+    }
     if fg == bg {
         return (palette.bg_rgb(bg), true);
     }
@@ -221,7 +225,7 @@ fn underline_color_for_cell(
         cell.attrs.underline_color
     };
     let (contrast_bg, skip_contrast) =
-        cell_contrast_context(color, bg, is_sel, cursor_block, palette);
+        cell_contrast_context(color, bg, is_sel, cursor_block, palette, cell.ch);
     let mut resolved = resolve_fg_glyphon(
         color,
         cell.attrs.dim,
@@ -488,7 +492,7 @@ impl DisplayListBuilder {
 
             let cursor_block = cursor_rendered && matches!(term.cursor_style, CursorStyle::Block);
             let (contrast_bg, skip_contrast) =
-                cell_contrast_context(fg, bg, is_sel || is_search, cursor_block, palette);
+                cell_contrast_context(fg, bg, is_sel || is_search, cursor_block, palette, cell.ch);
 
             let box_glyph = builtin_box_drawing && super::builtin::supports(cell.ch);
 
@@ -778,8 +782,14 @@ impl DisplayListBuilder {
                 let is_sel = term.is_selected(row, col);
                 let is_search = term.search_hit_at(row, col).is_some();
                 let cursor_block = is_cursor && matches!(term.cursor_style, CursorStyle::Block);
-                let (contrast_bg, skip_contrast) =
-                    cell_contrast_context(fg, bg, is_sel || is_search, cursor_block, palette);
+                let (contrast_bg, skip_contrast) = cell_contrast_context(
+                    fg,
+                    bg,
+                    is_sel || is_search,
+                    cursor_block,
+                    palette,
+                    cell_at.ch,
+                );
                 let fg_color = if cursor_block {
                     let (r, g, b) = contrast_text_color(palette.cursor_rgb());
                     Color::Rgb(r, g, b)
@@ -1090,6 +1100,59 @@ mod tests {
         assert!(
             list.bg_quads.is_empty(),
             "box-drawing con bg por defecto no deberia generar bg_quad"
+        );
+    }
+
+    #[test]
+    fn geometric_glyph_skip_contrast_conserva_fg_oscuro() {
+        let theme = ThemeConfig {
+            minimum_contrast: 3.0,
+            ..ThemeConfig::default()
+        };
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let dark = Color::Rgb(0x1e, 0x1e, 0x1e);
+        let mut row = vec![Cell::default(); 2];
+        row[0].ch = '\u{2580}'; // ▀ geometrico
+        row[0].attrs.fg = dark;
+        row[1].ch = 'A';
+        row[1].attrs.fg = dark;
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let mut term = Term::default();
+        term.cursor_visible = false;
+
+        let list = build_full(&term, &metrics, &theme, &row_sources, 2, 1, &family);
+        assert!(list.text_glyphs[0].skip_contrast);
+        assert!(!list.text_glyphs[1].skip_contrast);
+
+        let mut cache = ContrastCache::default();
+        let palette = test_palette(&theme);
+        let geom = resolve_fg_glyphon(
+            dark,
+            false,
+            false,
+            &palette,
+            theme.dim_alpha,
+            list.text_glyphs[0].contrast_bg,
+            list.text_glyphs[0].skip_contrast,
+            &mut cache,
+        );
+        let text = resolve_fg_glyphon(
+            dark,
+            false,
+            false,
+            &palette,
+            theme.dim_alpha,
+            list.text_glyphs[1].contrast_bg,
+            list.text_glyphs[1].skip_contrast,
+            &mut cache,
+        );
+        assert_eq!((geom.r(), geom.g(), geom.b()), (0x1e, 0x1e, 0x1e));
+        let text_lum = 0.299 * text.r() as f64 + 0.587 * text.g() as f64 + 0.114 * text.b() as f64;
+        assert!(
+            text_lum > 40.0,
+            "texto oscuro debe recibir boost: {:?}",
+            (text.r(), text.g(), text.b())
         );
     }
 

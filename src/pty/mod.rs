@@ -159,6 +159,9 @@ pub fn spawn_with(cfg: &ProcessConfig) -> nix::Result<Pty> {
     // ponytail: TERM necesario para que bash active readline.
     // xterm-256color es el estandar y compatible con la mayoria de programas TUI.
     cmd.env("TERM", "xterm-256color");
+    // Truecolor: muchas TUI miran COLORTERM antes de capabilities DCS.
+    // Se fuerza tras cfg.env (misma politica que TERM).
+    cmd.env("COLORTERM", "truecolor");
     // Login shell: argv[0] con prefijo '-' (convencion POSIX, portable entre shells).
     if cfg.login_shell {
         let base_name = std::path::Path::new(&cfg.shell)
@@ -302,6 +305,27 @@ mod tests {
         let out = read_to_string_until_eof(&mut master);
         assert!(out.contains("CWD=/tmp"), "output: {out:?}");
         assert!(out.contains("VAR=ok"), "output: {out:?}");
+    }
+
+    #[test]
+    fn test_spawn_fuerza_colorterm_truecolor() {
+        let cfg = ProcessConfig {
+            shell: "/bin/bash".into(),
+            args: vec!["-c".into(), "echo COLORTERM=$COLORTERM TERM=$TERM".into()],
+            working_directory: None,
+            // Un COLORTERM previo en cfg.env no debe ganar.
+            env: vec![("COLORTERM".into(), "nope".into())],
+            startup_command: None,
+            login_shell: false,
+        };
+        let mut master = spawn_with(&cfg).expect("spawn");
+        let out = read_to_string_until_eof(&mut master);
+        assert!(out.contains("COLORTERM=truecolor"), "output: {out:?}");
+        assert!(out.contains("TERM=xterm-256color"), "output: {out:?}");
+        assert!(
+            !out.contains("COLORTERM=nope"),
+            "override de cfg.env no debe prevalecer: {out:?}"
+        );
     }
 
     #[test]

@@ -7,9 +7,13 @@ mod stroke;
 
 pub use cache::MaskCache;
 
-/// Rango Unicode cubierto por builtins.
+/// Rango Unicode cubierto por builtins de caja/bloque.
 pub const BUILTIN_START: u32 = 0x2500;
 pub const BUILTIN_END: u32 = 0x259F;
+
+/// Separadores Powerline (geometria de celda; no iconos E0A0..E0A3).
+pub const POWERLINE_SEP_START: u32 = 0xE0B0;
+pub const POWERLINE_SEP_END: u32 = 0xE0B3;
 
 static MASK_CACHE: std::sync::OnceLock<MaskCache> = std::sync::OnceLock::new();
 
@@ -20,6 +24,14 @@ fn cache() -> &'static MaskCache {
 /// True si el caracter pertenece a box-drawing o block elements.
 pub fn is_builtin_glyph(ch: char) -> bool {
     matches!(ch as u32, BUILTIN_START..=BUILTIN_END)
+}
+
+/// True si el codepoint es geometria decorativa (no debe recibir boost de contraste).
+pub fn is_geometric_glyph(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        BUILTIN_START..=BUILTIN_END | POWERLINE_SEP_START..=POWERLINE_SEP_END
+    )
 }
 
 /// True si el builtin puede rasterizar el caracter.
@@ -80,6 +92,16 @@ mod tests {
         assert!(is_builtin_glyph('\u{2500}'));
         assert!(is_builtin_glyph('\u{2588}'));
         assert!(!is_builtin_glyph('A'));
+    }
+
+    #[test]
+    fn geometric_incluye_box_block_y_separadores_powerline() {
+        assert!(is_geometric_glyph('\u{2500}'));
+        assert!(is_geometric_glyph('\u{2580}'));
+        assert!(is_geometric_glyph('\u{E0B0}'));
+        assert!(is_geometric_glyph('\u{E0B3}'));
+        assert!(!is_geometric_glyph('\u{E0A0}'));
+        assert!(!is_geometric_glyph('A'));
     }
 
     #[test]
