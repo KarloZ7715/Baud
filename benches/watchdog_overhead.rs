@@ -1,9 +1,15 @@
-//! Microbench de overhead del watchdog (release).
+//! Overhead del watchdog / telemetría del event loop.
 //!
-//! Imprime un único JSON en stdout para `/ce-optimize`:
-//! `{ "hot_path_ns", "ping_ns", "enter_leave_ns", "busy_ns", "tests_passed" }`
+//! Uso interactivo:
+//!   cargo bench --bench watchdog_overhead
+//!
+//! Resumen JSON (una línea en stdout):
+//!   cargo bench --bench watchdog_overhead -- --json
+//!
+//! El script `tools/eval/watchdog_overhead.sh` corre tests del módulo y ese modo JSON.
 
 use baud::watchdog::EventLoopWatchdog;
+use criterion::{criterion_group, Criterion};
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -59,7 +65,7 @@ fn measure_busy_ns() -> f64 {
     t0.elapsed().as_nanos() as f64 / f64::from(ITERS)
 }
 
-fn main() {
+fn print_json_summary() {
     let mut ping = Vec::with_capacity(SAMPLES);
     let mut enter = Vec::with_capacity(SAMPLES);
     let mut busy = Vec::with_capacity(SAMPLES);
@@ -75,4 +81,50 @@ fn main() {
     println!(
         "{{\"hot_path_ns\":{hot_path_ns:.3},\"ping_ns\":{ping_ns:.3},\"enter_leave_ns\":{enter_leave_ns:.3},\"busy_ns\":{busy_ns:.3},\"tests_passed\":1}}"
     );
+}
+
+fn bench_watchdog_ping(c: &mut Criterion) {
+    c.bench_function("watchdog_ping", |b| {
+        let wd = EventLoopWatchdog::noop();
+        b.iter(|| {
+            wd.ping();
+            black_box(());
+        });
+    });
+}
+
+fn bench_watchdog_enter_leave(c: &mut Criterion) {
+    c.bench_function("watchdog_enter_leave", |b| {
+        let wd = EventLoopWatchdog::noop();
+        b.iter(|| {
+            let g = wd.enter("CursorMoved");
+            black_box(&g);
+            drop(g);
+        });
+    });
+}
+
+fn bench_watchdog_term_lock_busy(c: &mut Criterion) {
+    c.bench_function("watchdog_term_lock_busy", |b| {
+        let wd = EventLoopWatchdog::noop();
+        b.iter(|| {
+            wd.note_term_lock_busy();
+            black_box(());
+        });
+    });
+}
+
+criterion_group!(
+    watchdog_benches,
+    bench_watchdog_ping,
+    bench_watchdog_enter_leave,
+    bench_watchdog_term_lock_busy
+);
+
+fn main() {
+    if std::env::args().any(|a| a == "--json") {
+        print_json_summary();
+        return;
+    }
+    watchdog_benches();
 }

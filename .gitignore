@@ -32,3 +32,6 @@ docs/*
 src/prompts/*
 .agents/*
 skills-lock.json
+
+# Scratch local
+.context/

@@ -28,5 +28,9 @@ criterion = { version = "0.8", features = ["html_reports"] }
 name = "bench"
 harness = false
 
+[[bench]]
+name = "watchdog_overhead"
+harness = false
+
 [lints.rust]
 unused = "warn"
