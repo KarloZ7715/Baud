@@ -137,6 +137,27 @@ impl Grid {
         }
     }
 
+    /// Si `(row, col)` era la base de un glifo ancho, restaura las columnas de
+    /// continuacion a celdas normales antes de sobrescribir la base.
+    pub fn clear_replaced_wide_span(&mut self, row: usize, col: usize) {
+        let old_w = self
+            .rows
+            .get(row)
+            .and_then(|r| r.get(col))
+            .map(|c| c.width)
+            .unwrap_or(0);
+        if old_w < 2 {
+            return;
+        }
+        let w = old_w as usize;
+        for c in (col + 1)..col.saturating_add(w).min(self.cols_count) {
+            if let Some(cell) = self.rows.get_mut(row).and_then(|r| r.get_mut(c)) {
+                *cell = Cell::default();
+            }
+            self.damage.mark_cell(row, c);
+        }
+    }
+
     /// Marca una celda y columnas de continuación de glifo ancho.
     pub fn mark_cell_written(&mut self, row: usize, col: usize, width: u8) {
         let w = width.max(1) as usize;

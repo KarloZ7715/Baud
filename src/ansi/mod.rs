@@ -1381,6 +1381,7 @@ impl Term {
                 let cols = active.cols_count;
                 let wrote = active.cell(row, col).is_some();
                 if wrote {
+                    active.clear_replaced_wide_span(row, col);
                     if let Some(cell) = active.cell(row, col) {
                         cell.ch = c;
                         cell.attrs = attrs;
@@ -1416,6 +1417,7 @@ impl Term {
             let cols = active.cols_count;
             let wrote = active.cell(row, col).is_some();
             if wrote {
+                active.clear_replaced_wide_span(row, col);
                 if let Some(cell) = active.cell(row, col) {
                     cell.ch = c;
                     cell.attrs = attrs;
@@ -3122,6 +3124,8 @@ mod tests {
         let cell = term.active_grid().get(1, 0);
         assert_eq!(cell.ch, '\u{1F9D1}');
         assert_eq!(cell.width, 2);
+        assert_eq!(term.active_grid().get(1, 1).ch, ' ');
+        assert_eq!(term.active_grid().get(1, 1).width, 0);
         let extra_idx = cell.extra_codepoints.expect("extras ZWJ");
         assert_eq!(
             term.grapheme_extras[extra_idx as usize],
@@ -3172,6 +3176,23 @@ mod tests {
         assert_eq!(term.active_grid().get(0, 1).width, 0);
         assert_eq!(term.active_grid().get(0, 2).ch, 'X');
         assert_eq!(term.cursor.col, 2);
+    }
+
+    #[test]
+    fn test_narrow_sobre_wide_restaura_continuacion() {
+        let mut term = Term::new();
+        feed(&mut term, "中".as_bytes());
+        feed(&mut term, b"\r");
+        feed(&mut term, b"A");
+        assert_eq!(term.active_grid().get(0, 0).ch, 'A');
+        assert_eq!(term.active_grid().get(0, 0).width, 1);
+        assert_eq!(term.active_grid().get(0, 1).ch, ' ');
+        assert_eq!(
+            term.active_grid().get(0, 1).width,
+            1,
+            "la continuacion del glifo ancho previo debe volver a celda normal"
+        );
+        assert_eq!(term.cursor.col, 1);
     }
 
     #[test]
