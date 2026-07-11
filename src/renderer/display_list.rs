@@ -941,6 +941,43 @@ mod tests {
         list
     }
 
+    /// Como `build_full` pero permite fijar `builtin_box_drawing`.
+    #[allow(clippy::too_many_arguments)]
+    fn build_with_builtin(
+        term: &Term,
+        metrics: &CellMetrics,
+        theme: &ThemeConfig,
+        row_sources: &[&[Cell]],
+        cols: usize,
+        rows: usize,
+        family: &str,
+        builtin_box_drawing: bool,
+    ) -> DisplayList {
+        let palette = test_palette(theme);
+        let mut list = DisplayList::default();
+        let mut contrast_cache = ContrastCache::default();
+        DisplayListBuilder::build(
+            &mut list,
+            term,
+            metrics,
+            &palette,
+            theme.dim_alpha,
+            row_sources,
+            cols,
+            rows,
+            family,
+            &DamageSnapshot::Full,
+            false,
+            builtin_box_drawing,
+            true,
+            false,
+            &mut None,
+            &mut None,
+            &mut contrast_cache,
+        );
+        list
+    }
+
     fn row_with_box_top() -> Vec<Cell> {
         let chars = ['┌', '─', '─', '┐'];
         let mut row = vec![Cell::default(); chars.len()];
@@ -979,6 +1016,44 @@ mod tests {
 
         assert_eq!(list.text_glyphs.len(), 4);
         assert!(list.text_glyphs.iter().all(|g| g.box_glyph));
+    }
+
+    #[test]
+    fn builtin_box_drawing_off_no_marca_box_glyph() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let row = row_with_box_top();
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let term = Term::default();
+
+        let list = build_with_builtin(&term, &metrics, &theme, &row_sources, 4, 1, &family, false);
+
+        assert_eq!(list.text_glyphs.len(), 4);
+        assert!(
+            list.text_glyphs.iter().all(|g| !g.box_glyph),
+            "con builtin desactivado los box-drawing van por el path de fuente"
+        );
+    }
+
+    #[test]
+    fn letter_no_es_box_glyph_aunque_haya_bloque_en_la_fila() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 3];
+        row[0].ch = 'A';
+        row[1].ch = '\u{2588}';
+        row[2].ch = 'B';
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let term = Term::default();
+
+        let list = build_full(&term, &metrics, &theme, &row_sources, 3, 1, &family);
+
+        assert_eq!(list.text_glyphs.len(), 3);
+        assert!(!list.text_glyphs[0].box_glyph);
+        assert!(list.text_glyphs[1].box_glyph);
+        assert!(!list.text_glyphs[2].box_glyph);
     }
 
     #[test]

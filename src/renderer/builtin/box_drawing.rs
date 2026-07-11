@@ -2,7 +2,7 @@
 
 use super::stroke::{
     paint_arc, paint_cross_diagonal, paint_dashed_horiz, paint_dashed_vert, paint_diagonal,
-    paint_segment, stroke_light, Segment, Weight,
+    paint_segment, stroke_for, stroke_light, Segment, Weight,
 };
 
 pub const BOX_DRAWING_START: u32 = 0x2500;
@@ -20,21 +20,30 @@ fn classify_segment(ch: char) -> Option<(Weight, Segment)> {
     if !is_box_drawing(ch) {
         return None;
     }
-    let o = ch as u32 - BOX_DRAWING_START;
     Some(match ch {
-        '\u{2500}' | '\u{2504}' | '\u{2508}' => (Weight::Light, Segment::Horiz),
-        '\u{2502}' | '\u{2506}' => (Weight::Light, Segment::Vert),
-        '\u{250C}' => (Weight::Light, Segment::CornerTl),
-        '\u{2510}' => (Weight::Light, Segment::CornerTr),
-        '\u{2514}' => (Weight::Light, Segment::CornerBl),
-        '\u{2518}' => (Weight::Light, Segment::CornerBr),
-        '\u{251C}' => (Weight::Light, Segment::TeeLeft),
-        '\u{2524}' => (Weight::Light, Segment::TeeRight),
-        '\u{252C}' => (Weight::Light, Segment::TeeTop),
-        '\u{2534}' => (Weight::Light, Segment::TeeBottom),
-        '\u{253C}' => (Weight::Light, Segment::Cross),
-        '\u{2501}' | '\u{2505}' | '\u{2509}' => (Weight::Heavy, Segment::Horiz),
-        '\u{2503}' | '\u{2507}' => (Weight::Heavy, Segment::Vert),
+        // Light straight
+        '\u{2500}' => (Weight::Light, Segment::Horiz),
+        '\u{2502}' => (Weight::Light, Segment::Vert),
+        // Heavy straight
+        '\u{2501}' => (Weight::Heavy, Segment::Horiz),
+        '\u{2503}' => (Weight::Heavy, Segment::Vert),
+        // Light corners / tees / cross
+        '\u{250C}' | '\u{250D}' | '\u{250E}' => (Weight::Light, Segment::CornerTl),
+        '\u{2510}' | '\u{2511}' | '\u{2512}' => (Weight::Light, Segment::CornerTr),
+        '\u{2514}' | '\u{2515}' | '\u{2516}' => (Weight::Light, Segment::CornerBl),
+        '\u{2518}' | '\u{2519}' | '\u{251A}' => (Weight::Light, Segment::CornerBr),
+        '\u{251C}' | '\u{251D}' | '\u{251E}' | '\u{251F}' | '\u{2520}' | '\u{2521}'
+        | '\u{2522}' => (Weight::Light, Segment::TeeLeft),
+        '\u{2524}' | '\u{2525}' | '\u{2526}' | '\u{2527}' | '\u{2528}' | '\u{2529}'
+        | '\u{252A}' => (Weight::Light, Segment::TeeRight),
+        '\u{252C}' | '\u{252D}' | '\u{252E}' | '\u{252F}' | '\u{2530}' | '\u{2531}'
+        | '\u{2532}' => (Weight::Light, Segment::TeeTop),
+        '\u{2534}' | '\u{2535}' | '\u{2536}' | '\u{2537}' | '\u{2538}' | '\u{2539}'
+        | '\u{253A}' => (Weight::Light, Segment::TeeBottom),
+        '\u{253C}' | '\u{253D}' | '\u{253E}' | '\u{253F}' | '\u{2540}' | '\u{2541}'
+        | '\u{2542}' | '\u{2543}' | '\u{2544}' | '\u{2545}' | '\u{2546}' | '\u{2547}'
+        | '\u{2548}' | '\u{2549}' | '\u{254A}' => (Weight::Light, Segment::Cross),
+        // Heavy corners / tees / cross
         '\u{250F}' => (Weight::Heavy, Segment::CornerTl),
         '\u{2513}' => (Weight::Heavy, Segment::CornerTr),
         '\u{2517}' => (Weight::Heavy, Segment::CornerBl),
@@ -44,32 +53,33 @@ fn classify_segment(ch: char) -> Option<(Weight, Segment)> {
         '\u{2533}' => (Weight::Heavy, Segment::TeeTop),
         '\u{253B}' => (Weight::Heavy, Segment::TeeBottom),
         '\u{254B}' => (Weight::Heavy, Segment::Cross),
+        // Double
         '\u{2550}' => (Weight::Double, Segment::Horiz),
         '\u{2551}' => (Weight::Double, Segment::Vert),
-        '\u{2554}' => (Weight::Double, Segment::CornerTl),
-        '\u{2557}' => (Weight::Double, Segment::CornerTr),
-        '\u{255A}' => (Weight::Double, Segment::CornerBl),
-        '\u{255D}' => (Weight::Double, Segment::CornerBr),
-        '\u{2560}' => (Weight::Double, Segment::TeeLeft),
-        '\u{2563}' => (Weight::Double, Segment::TeeRight),
-        '\u{2566}' => (Weight::Double, Segment::TeeTop),
-        '\u{2569}' => (Weight::Double, Segment::TeeBottom),
-        '\u{256C}' => (Weight::Double, Segment::Cross),
-        _ => fallback_segment(o),
+        '\u{2552}' | '\u{2553}' | '\u{2554}' => (Weight::Double, Segment::CornerTl),
+        '\u{2555}' | '\u{2556}' | '\u{2557}' => (Weight::Double, Segment::CornerTr),
+        '\u{2558}' | '\u{2559}' | '\u{255A}' => (Weight::Double, Segment::CornerBl),
+        '\u{255B}' | '\u{255C}' | '\u{255D}' => (Weight::Double, Segment::CornerBr),
+        '\u{255E}' | '\u{255F}' | '\u{2560}' => (Weight::Double, Segment::TeeLeft),
+        '\u{2561}' | '\u{2562}' | '\u{2563}' => (Weight::Double, Segment::TeeRight),
+        '\u{2564}' | '\u{2565}' | '\u{2566}' => (Weight::Double, Segment::TeeTop),
+        '\u{2567}' | '\u{2568}' | '\u{2569}' => (Weight::Double, Segment::TeeBottom),
+        '\u{256A}' | '\u{256B}' | '\u{256C}' => (Weight::Double, Segment::Cross),
+        // Half lines
+        '\u{2574}' => (Weight::Light, Segment::HorizLeft),
+        '\u{2575}' => (Weight::Light, Segment::VertUp),
+        '\u{2576}' => (Weight::Light, Segment::HorizRight),
+        '\u{2577}' => (Weight::Light, Segment::VertDown),
+        '\u{2578}' => (Weight::Heavy, Segment::HorizLeft),
+        '\u{2579}' => (Weight::Heavy, Segment::VertUp),
+        '\u{257A}' => (Weight::Heavy, Segment::HorizRight),
+        '\u{257B}' => (Weight::Heavy, Segment::VertDown),
+        // Mixed-weight full lines (topologia: linea completa)
+        '\u{257C}' | '\u{257E}' => (Weight::Light, Segment::Horiz),
+        '\u{257D}' | '\u{257F}' => (Weight::Light, Segment::Vert),
+        // Arcs / dashed / diagonals se resuelven en render_box antes de classify.
+        _ => (Weight::Light, Segment::Horiz),
     })
-}
-
-fn fallback_segment(o: u32) -> (Weight, Segment) {
-    // Variantes Unicode no mapeadas explicitamente: heuristica por offset.
-    if o.is_multiple_of(4) {
-        (Weight::Light, Segment::Horiz)
-    } else if o % 4 == 1 {
-        (Weight::Light, Segment::Vert)
-    } else if o % 4 == 2 {
-        (Weight::Light, Segment::Cross)
-    } else {
-        (Weight::Light, Segment::Horiz)
-    }
 }
 
 pub fn render_box(ch: char, w: usize, h: usize) -> Option<Vec<u8>> {
@@ -96,12 +106,20 @@ pub fn render_box(ch: char, w: usize, h: usize) -> Option<Vec<u8>> {
             paint_arc(&mut m, w, h, Segment::CornerBl, stroke);
             return Some(m);
         }
-        '\u{254C}' | '\u{2504}' | '\u{2505}' => {
+        '\u{254C}' | '\u{2504}' | '\u{2508}' => {
             paint_dashed_horiz(&mut m, w, h, stroke);
             return Some(m);
         }
-        '\u{254E}' | '\u{2506}' | '\u{2507}' => {
+        '\u{2505}' | '\u{2509}' | '\u{254D}' => {
+            paint_dashed_horiz(&mut m, w, h, stroke_for(Weight::Heavy, w, h));
+            return Some(m);
+        }
+        '\u{254E}' | '\u{2506}' | '\u{250A}' => {
             paint_dashed_vert(&mut m, w, h, stroke);
+            return Some(m);
+        }
+        '\u{2507}' | '\u{250B}' | '\u{254F}' => {
+            paint_dashed_vert(&mut m, w, h, stroke_for(Weight::Heavy, w, h));
             return Some(m);
         }
         '\u{2571}' => {
@@ -236,5 +254,102 @@ mod tests {
             runs, 2,
             "la esquina de linea doble debe tener dos brazos horizontales paralelos, no uno solo"
         );
+    }
+
+    #[test]
+    fn dashed_horiz_has_gaps_not_full_solid() {
+        // U+2504 light triple dash horizontal, U+254C light double dash horizontal.
+        for ch in ['\u{2504}', '\u{254C}', '\u{2508}'] {
+            let w = 24usize;
+            let h = 20usize;
+            let m = render_box(ch, w, h).expect("dashed");
+            let midy = h / 2;
+            let filled: Vec<bool> = (0..w).map(|x| m[midy * w + x] > 0).collect();
+            let gaps = filled.iter().filter(|&&f| !f).count();
+            let solids = filled.iter().filter(|&&f| f).count();
+            assert!(
+                solids > 0 && gaps > 0,
+                "U+{:04X} debe ser discontinua (solidos={solids} huecos={gaps})",
+                ch as u32
+            );
+        }
+    }
+
+    #[test]
+    fn dashed_vert_has_gaps_not_full_solid() {
+        for ch in ['\u{2506}', '\u{254E}', '\u{250A}'] {
+            let w = 12usize;
+            let h = 24usize;
+            let m = render_box(ch, w, h).expect("dashed");
+            let midx = w / 2;
+            let filled: Vec<bool> = (0..h).map(|y| m[y * w + midx] > 0).collect();
+            let gaps = filled.iter().filter(|&&f| !f).count();
+            let solids = filled.iter().filter(|&&f| f).count();
+            assert!(
+                solids > 0 && gaps > 0,
+                "U+{:04X} debe ser discontinua (solidos={solids} huecos={gaps})",
+                ch as u32
+            );
+        }
+    }
+
+    #[test]
+    fn half_lines_occupy_only_their_half() {
+        let w = 20usize;
+        let h = 20usize;
+        let midx = w / 2;
+        let midy = h / 2;
+
+        let left = render_box('\u{2574}', w, h).expect("left");
+        assert!(left[midy * w] > 0, "LEFT debe pintar borde izquierdo");
+        assert_eq!(
+            left[midy * w + (w - 1)],
+            0,
+            "LEFT no debe llegar al borde derecho"
+        );
+
+        let right = render_box('\u{2576}', w, h).expect("right");
+        assert_eq!(right[midy * w], 0, "RIGHT no debe pintar borde izquierdo");
+        assert!(
+            right[midy * w + (w - 1)] > 0,
+            "RIGHT debe pintar borde derecho"
+        );
+
+        let up = render_box('\u{2575}', w, h).expect("up");
+        assert!(up[midx] > 0, "UP debe pintar borde superior");
+        assert_eq!(
+            up[(h - 1) * w + midx],
+            0,
+            "UP no debe llegar al borde inferior"
+        );
+
+        let down = render_box('\u{2577}', w, h).expect("down");
+        assert_eq!(down[midx], 0, "DOWN no debe pintar borde superior");
+        assert!(
+            down[(h - 1) * w + midx] > 0,
+            "DOWN debe pintar borde inferior"
+        );
+    }
+
+    #[test]
+    fn corner_meets_adjacent_straight_lines() {
+        let w = 16usize;
+        let h = 16usize;
+        let corner = render_box('\u{250C}', w, h).expect("corner");
+        let horiz = render_box('\u{2500}', w, h).expect("horiz");
+        let vert = render_box('\u{2502}', w, h).expect("vert");
+        let midy = h / 2;
+        let midx = w / 2;
+        // El brazo derecho de ┌ y la ─ vecina deben compartir la franja media en el borde.
+        assert!(corner[midy * w + (w - 1)] > 0 && horiz[midy * w] > 0);
+        // El brazo inferior de ┌ y la │ vecina deben compartir la columna media en el borde.
+        assert!(corner[(h - 1) * w + midx] > 0 && vert[midx] > 0);
+    }
+
+    #[test]
+    fn supports_rejects_outside_box_block_ranges() {
+        assert!(!supports_box('A'));
+        assert!(!supports_box('\u{24FF}'));
+        assert!(!supports_box('\u{2580}')); // block elements, no box-drawing
     }
 }

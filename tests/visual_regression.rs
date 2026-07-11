@@ -66,3 +66,19 @@ fn builtin_block_range_non_empty() {
         assert!(m.iter().any(|&b| b > 0), "U+{cp:X}");
     }
 }
+
+#[test]
+fn dashed_box_glyphs_have_gaps() {
+    for ch in ['\u{2504}', '\u{2506}', '\u{254C}', '\u{254E}'] {
+        let w = 24usize;
+        let h = 24usize;
+        let m = render_builtin_uncached(ch, w, h).expect("dashed");
+        let mid_row_gaps = (0..w).filter(|&x| m[(h / 2) * w + x] == 0).count();
+        let mid_col_gaps = (0..h).filter(|&y| m[y * w + (w / 2)] == 0).count();
+        assert!(
+            mid_row_gaps > 0 || mid_col_gaps > 0,
+            "U+{:04X} no debe colapsar a trazo solido continuo",
+            ch as u32
+        );
+    }
+}

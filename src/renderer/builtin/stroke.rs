@@ -120,6 +120,10 @@ fn paint_half_vert(
 pub enum Segment {
     Horiz,
     Vert,
+    HorizLeft,
+    HorizRight,
+    VertUp,
+    VertDown,
     CornerTl,
     CornerTr,
     CornerBl,
@@ -207,6 +211,10 @@ pub fn paint_segment(mask: &mut [u8], w: usize, h: usize, weight: Weight, seg: S
     match seg {
         Segment::Horiz => paint_horiz(mask, w, h, weight),
         Segment::Vert => paint_vert(mask, w, h, weight),
+        Segment::HorizLeft => paint_half_horiz(mask, w, h, weight, true, extend),
+        Segment::HorizRight => paint_half_horiz(mask, w, h, weight, false, extend),
+        Segment::VertUp => paint_half_vert(mask, w, h, weight, true, extend),
+        Segment::VertDown => paint_half_vert(mask, w, h, weight, false, extend),
         Segment::CornerTl => {
             paint_half_horiz(mask, w, h, weight, false, extend);
             paint_half_vert(mask, w, h, weight, false, extend);
@@ -223,10 +231,8 @@ pub fn paint_segment(mask: &mut [u8], w: usize, h: usize, weight: Weight, seg: S
             paint_half_horiz(mask, w, h, weight, true, extend);
             paint_half_vert(mask, w, h, weight, true, extend);
         }
-        // ponytail: tees/cruz de linea doble usan un solo trazo (sin anidar
-        // las dos lineas como en las esquinas); no aparecen en los fixtures
-        // visuales actuales. Aplicar el mismo patron de paint_double_corner
-        // si aparece un caso real que lo necesite.
+        // Tees/cruz de linea doble usan un solo trazo (sin anidar las dos
+        // lineas como en las esquinas).
         Segment::TeeLeft => {
             paint_vert(mask, w, h, weight);
             paint_half_horiz(mask, w, h, weight, false, extend);
@@ -333,16 +339,13 @@ pub fn paint_arc(mask: &mut [u8], w: usize, h: usize, corner: Segment, stroke: u
 pub fn paint_dashed_horiz(mask: &mut [u8], w: usize, h: usize, stroke: usize) {
     let midy = h / 2;
     let dash = (w / 6).max(2);
-    let gap = dash / 2;
+    let gap = (dash / 2).max(1);
+    let y0 = midy.saturating_sub(stroke / 2);
+    let y1 = (midy + stroke - stroke / 2).min(h);
     let mut x = 0;
     while x < w {
         let x1 = (x + dash).min(w);
-        horiz_band(mask, w, h, midy, stroke);
-        for xx in x..x1 {
-            for yy in midy.saturating_sub(stroke / 2)..(midy + stroke - stroke / 2).min(h) {
-                mask[yy * w + xx] = 255;
-            }
-        }
+        fill(mask, w, x, y0, x1, y1);
         x += dash + gap;
     }
 }

@@ -90,7 +90,7 @@ pub fn render_block(ch: char, w: usize, h: usize) -> Option<Vec<u8>> {
         '\u{2588}' => fill(&mut m, w, 0, 0, w, h),
         '\u{2580}' => paint_eight_block_top(&mut m, w, h, 4),
         '\u{2584}' => paint_eight_block_bottom(&mut m, w, h, 4),
-        '\u{258C}' => fill(&mut m, w, 0, 0, (w / 2).max(1), h),
+        '\u{258C}' => paint_left_eighth(&mut m, w, h, 4),
         '\u{2590}' => paint_right_eighth(&mut m, w, h, 4),
         '\u{2594}' => fill(&mut m, w, 0, 0, w, stroke_light(w, h).max(1)),
         '\u{2595}' => paint_right_eighth(&mut m, w, h, 1),
@@ -190,6 +190,22 @@ mod tests {
             assert!(
                 top_rows.abs_diff(bottom_rows) <= 1,
                 "mitades desiguales en h={h}: top={top_rows} bottom={bottom_rows}"
+            );
+        }
+    }
+
+    #[test]
+    fn left_and_right_half_blocks_are_symmetric() {
+        for w in 8..=16 {
+            let h = 12usize;
+            let left = render_block('\u{258C}', w, h).expect("left half");
+            let right = render_block('\u{2590}', w, h).expect("right half");
+            let left_cols = (0..w).filter(|&x| left[x] > 0).count();
+            let right_cols = (0..w).filter(|&x| right[x] > 0).count();
+            assert_eq!(left_cols + right_cols, w, "w={w}");
+            assert!(
+                left_cols.abs_diff(right_cols) <= 1,
+                "mitades desiguales en w={w}: left={left_cols} right={right_cols}"
             );
         }
     }
