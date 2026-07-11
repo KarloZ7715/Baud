@@ -29,6 +29,8 @@ pub use tab_bar::{
 };
 
 /// Base de ids reservados para box/block glyphs programaticos (sobre ids de cache).
+/// El `GlyphCache` de texto asigna desde ids bajos; estos rangos altos quedan
+/// reservados para builtins geometricos (sin solape con SOLID_MASK=0).
 pub const BOX_GLYPH_ID_BASE: u16 = 0xF000;
 /// Slots reservados: cubre U+2500..=U+259F (box-drawing + block elements).
 pub const BOX_GLYPH_ID_COUNT: u16 = 0xA0;

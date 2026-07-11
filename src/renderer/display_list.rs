@@ -1031,6 +1031,48 @@ mod tests {
     }
 
     #[test]
+    fn powerline_builtin_off_usa_fuente_pero_skip_contrast() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 1];
+        row[0].ch = '\u{E0B0}';
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let term = Term::default();
+
+        let list = build_with_builtin(&term, &metrics, &theme, &row_sources, 1, 1, &family, false);
+
+        assert_eq!(list.text_glyphs.len(), 1);
+        assert!(
+            !list.text_glyphs[0].box_glyph,
+            "con builtin desactivado los separadores van por fuente"
+        );
+        assert!(list.text_glyphs[0].skip_contrast);
+    }
+
+    #[test]
+    fn powerline_icono_e0a0_sigue_elegible_a_contraste() {
+        let theme = ThemeConfig {
+            minimum_contrast: 3.0,
+            ..ThemeConfig::default()
+        };
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let dark = Color::Rgb(0x1e, 0x1e, 0x1e);
+        let mut row = vec![Cell::default(); 1];
+        row[0].ch = '\u{E0A0}';
+        row[0].attrs.fg = dark;
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let mut term = Term::default();
+        term.cursor_visible = false;
+
+        let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
+        assert_eq!(list.text_glyphs.len(), 1);
+        assert!(!list.text_glyphs[0].box_glyph);
+        assert!(!list.text_glyphs[0].skip_contrast);
+    }
+
+    #[test]
     fn box_drawing_row_marca_box_glyph() {
         let theme = ThemeConfig::default();
         let metrics = test_metrics();

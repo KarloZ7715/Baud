@@ -137,13 +137,12 @@ mod tests {
         let solid = render_powerline('\u{E0B0}', w, h).expect("solid");
         let hollow = render_powerline('\u{E0B1}', w, h).expect("hollow");
         let mid = h / 2;
-        let solid_on = solid[mid * w + 1] > 0;
-        let hollow_on = hollow[mid * w + 1] > 0;
-        assert!(solid_on);
-        // El hueco deja el interior cerca de la base sin relleno denso.
         let hollow_fill: usize = hollow.iter().map(|&p| (p > 0) as usize).sum();
         let solid_fill: usize = solid.iter().map(|&p| (p > 0) as usize).sum();
         assert!(hollow_fill < solid_fill);
-        assert!(!hollow_on || hollow_fill > 0);
+        assert!(hollow_fill > 0);
+        // Interior cerca de la base: solido relleno, hueco no.
+        assert!(solid[mid * w + 1] > 0);
+        assert_eq!(hollow[mid * w + 1], 0);
     }
 }

@@ -4,7 +4,8 @@ pub struct ProcessConfig {
     pub shell: String,
     pub args: Vec<String>,
     pub working_directory: Option<String>,
-    /// Variables extra (se añaden a las heredadas). TERM lo fija spawn.
+    /// Variables extra (se añaden a las heredadas). Spawn fija
+    /// `TERM=xterm-256color` y `COLORTERM=truecolor` despues de este env.
     pub env: Vec<(String, String)>,
     /// Comando a escribir al PTY tras arrancar (con newline). None = nada.
     pub startup_command: Option<String>,
