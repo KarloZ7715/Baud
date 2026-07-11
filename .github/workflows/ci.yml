@@ -68,17 +68,23 @@ jobs:
       - name: Compilar en release
         run: cargo build --release --locked
 
-  # Job 4: matriz para validar que anda en multiples OS (Fase 0 = solo Linux, pero listo para crecer)
-  # Por ahora comentado para mantener CI rapido. Descomentar cuando agreguemos Windows/macOS.
-  # matrix:
-  #   name: build (${{ matrix.os }})
-  #   strategy:
-  #     fail-fast: false
-  #     matrix:
-  #       os: [ubuntu-latest, macos-latest, windows-latest]
-  #   runs-on: ${{ matrix.os }}
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: dtolnay/rust-toolchain@stable
-  #     - uses: Swatinem/rust-cache@v2
-  #     - run: cargo build --release --locked
+  # Job 4: gate de compile en Windows (required). La matriz runtime Windows queda diferida.
+  windows-compile:
+    name: windows compile
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cachear target/
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: cargo check (Windows)
+        run: cargo check --all-targets
+
+      - name: cargo build (Windows)
+        run: cargo build --locked
