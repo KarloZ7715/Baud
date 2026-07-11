@@ -1816,12 +1816,38 @@ impl vte::Perform for Term {
                 if intermediates == b">" {
                     self.respond(b"\x1bP>|baud\x1b\\");
                 } else {
+                    // DECSCUSR (CSI Ps SP q).
                     let style = flat_params.first().copied().unwrap_or(0);
-                    self.cursor_style = match style {
-                        2 | 4 => CursorStyle::Underline,
-                        6 => CursorStyle::Bar,
-                        _ => CursorStyle::Block,
-                    };
+                    match style {
+                        0 | 1 => {
+                            self.cursor_style = CursorStyle::Block;
+                            self.cursor_blink_enabled = true;
+                        }
+                        2 => {
+                            self.cursor_style = CursorStyle::Block;
+                            self.cursor_blink_enabled = false;
+                        }
+                        3 => {
+                            self.cursor_style = CursorStyle::Underline;
+                            self.cursor_blink_enabled = true;
+                        }
+                        4 => {
+                            self.cursor_style = CursorStyle::Underline;
+                            self.cursor_blink_enabled = false;
+                        }
+                        5 => {
+                            self.cursor_style = CursorStyle::Bar;
+                            self.cursor_blink_enabled = true;
+                        }
+                        6 => {
+                            self.cursor_style = CursorStyle::Bar;
+                            self.cursor_blink_enabled = false;
+                        }
+                        _ => {
+                            self.cursor_style = CursorStyle::Block;
+                            self.cursor_blink_enabled = true;
+                        }
+                    }
                 }
             }
             _ => {}
@@ -4348,6 +4374,63 @@ mod tests {
             assert!(term.grid.rows[0][0].attrs.bold);
             assert_eq!(term.grid.rows[0][0].attrs.fg, Color::Red);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // DECSCUSR (CSI Ps SP q) - forma y blink del cursor
+    // -----------------------------------------------------------------
+
+    /// Mapeo xterm de DECSCUSR: cada Ps fija forma (Block/Underline/Bar) y
+    /// blink (impar/0 = blinking, par = steady).
+    #[test]
+    fn test_decscusr_mapeo_completo() {
+        let mut term = Term::new();
+
+        // 0: blinking block (default)
+        assert_eq!(term.cursor_style, CursorStyle::Block);
+        assert!(term.cursor_blink_enabled);
+
+        // 1: blinking block
+        feed(&mut term, b"\x1b[1 q");
+        assert_eq!(term.cursor_style, CursorStyle::Block);
+        assert!(term.cursor_blink_enabled);
+
+        // 2: steady block
+        feed(&mut term, b"\x1b[2 q");
+        assert_eq!(
+            term.cursor_style,
+            CursorStyle::Block,
+            "DECSCUSR 2 debe ser Block (steady)"
+        );
+        assert!(!term.cursor_blink_enabled, "DECSCUSR 2 debe ser sin blink");
+
+        // 3: blinking underline
+        feed(&mut term, b"\x1b[3 q");
+        assert_eq!(
+            term.cursor_style,
+            CursorStyle::Underline,
+            "DECSCUSR 3 debe ser Underline (blink)"
+        );
+        assert!(term.cursor_blink_enabled);
+
+        // 4: steady underline
+        feed(&mut term, b"\x1b[4 q");
+        assert_eq!(term.cursor_style, CursorStyle::Underline);
+        assert!(!term.cursor_blink_enabled);
+
+        // 5: blinking bar
+        feed(&mut term, b"\x1b[5 q");
+        assert_eq!(
+            term.cursor_style,
+            CursorStyle::Bar,
+            "DECSCUSR 5 debe ser Bar (blink)"
+        );
+        assert!(term.cursor_blink_enabled);
+
+        // 6: steady bar
+        feed(&mut term, b"\x1b[6 q");
+        assert_eq!(term.cursor_style, CursorStyle::Bar);
+        assert!(!term.cursor_blink_enabled);
     }
 
     // -----------------------------------------------------------------
