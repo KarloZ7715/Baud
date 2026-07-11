@@ -3088,6 +3088,10 @@ mod tests {
         assert_eq!(cell.width, 2);
         assert_eq!(term.active_grid().get(0, 1).width, 0);
         assert_eq!(term.cursor.col, 2);
+        // Ancho del primer codepoint coincide con el del cluster completo:
+        // no hace falta medir UnicodeWidthStr del grafema entero.
+        let full = unicode_width::UnicodeWidthStr::width(cluster);
+        assert_eq!(cell.width as usize, full);
     }
 
     #[test]
@@ -3137,6 +3141,8 @@ mod tests {
         assert_eq!(term.cursor.col, 2);
         let extra_idx = cell.extra_codepoints.expect("skin tone");
         assert_eq!(term.grapheme_extras[extra_idx as usize], "\u{1F3FD}");
+        let full = unicode_width::UnicodeWidthStr::width(cluster);
+        assert_eq!(cell.width as usize, full);
     }
 
     #[test]
