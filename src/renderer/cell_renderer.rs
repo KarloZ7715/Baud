@@ -349,34 +349,28 @@ fn cached_text_to_custom(
         return None;
     }
 
-    let max_cells_w = u32::from(text.width_cells.max(1));
-    let width =
-        limits::clamp_custom_dimension(f32::from(cached.raster.width), metrics.cell_w, max_cells_w);
-    let height = limits::clamp_custom_dimension(f32::from(cached.raster.height), metrics.cell_h, 1);
+    // width/height DEBEN coincidir con el bitmap cacheado: rasterize_custom_glyph
+    // rechaza el glifo si request y raster difieren (caracter invisible con hueco).
+    let width = f32::from(cached.raster.width).max(1.0);
+    let height = f32::from(cached.raster.height).max(1.0);
     if limits::custom_pixels(width, height) > MAX_CUSTOM_GLYPH_PIXELS {
         return None;
     }
 
-    // El rectangulo de clip es siempre el de la(s) columna(s) del glifo.
-    // Con ligaduras, `x_offset` es el origen del run para colocar el shaped
-    // glyph; el clip no debe usar ese origen ni limitar a 2 celdas.
-    let span_w = metrics.cell_w * max_cells_w as f32;
-    let cell_left = text.col as f32 * metrics.cell_w + metrics.padding_x;
-    let cell_top = text.row as f32 * metrics.cell_h + metrics.padding_y;
-
-    let left_raw = if let Some(x_offset) = text.x_offset {
+    let left = if let Some(x_offset) = text.x_offset {
         x_offset + metrics.padding_x + cached.shaped.left + cached.raster.placement_left as f32
     } else {
-        cell_left + cached.shaped.left + cached.raster.placement_left as f32
+        text.col as f32 * metrics.cell_w
+            + metrics.padding_x
+            + cached.shaped.left
+            + cached.raster.placement_left as f32
     };
-    let left = limits::clamp_glyph_origin(left_raw, width, cell_left, span_w);
-    let top = limits::clamp_glyph_origin(
-        cell_top + metrics.glyph_offset_y + cached.shaped.line_y + cached.shaped.top
-            - cached.raster.placement_top as f32,
-        height,
-        cell_top,
-        metrics.cell_h,
-    );
+    let top = text.row as f32 * metrics.cell_h
+        + metrics.padding_y
+        + metrics.glyph_offset_y
+        + cached.shaped.line_y
+        + cached.shaped.top
+        - cached.raster.placement_top as f32;
 
     let fg_color = if text.selected {
         selection_fg_glyphon(palette.theme)
@@ -789,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn bold_text_glyph_stays_inside_cell_rect() {
+    fn bold_text_glyph_quad_matches_raster_dims() {
         let (mut font_system, metrics) = test_metrics();
         let mut swash_cache = glyphon::SwashCache::new();
         let font_config = FontConfig::default();
@@ -799,11 +793,9 @@ mod tests {
         let bg = crate::config::parse_hex(&theme.background);
         let mut contrast_cache = ContrastCache::default();
 
-        let col = 3usize;
-        let row = 1usize;
         let text = TextGlyph {
-            row,
-            col,
+            row: 1,
+            col: 3,
             width_cells: 1,
             glyph_key: GlyphKey {
                 ch: 'W',
@@ -841,51 +833,54 @@ mod tests {
         .next()
         .expect("bold W");
 
-        let cell_left = col as f32 * metrics.cell_w + metrics.padding_x;
-        let cell_top = row as f32 * metrics.cell_h + metrics.padding_y;
-        let cell_right = cell_left + metrics.cell_w;
-        let cell_bottom = cell_top + metrics.cell_h;
-
-        assert!(
-            cg.width <= metrics.cell_w + f32::EPSILON,
-            "width {} debe caber en cell_w {}",
+        let cached = cache.get_by_custom_id(cg.id).expect("en cache");
+        assert_eq!(
             cg.width,
-            metrics.cell_w
+            f32::from(cached.raster.width),
+            "clampear el quad rompe rasterize (glifo invisible)"
+        );
+        assert_eq!(cg.height, f32::from(cached.raster.height));
+
+        let out = rasterize_custom_glyph(
+            RasterizeCustomGlyphRequest {
+                id: cg.id,
+                width: cached.raster.width,
+                height: cached.raster.height,
+                x_bin: glyphon::SubpixelBin::Zero,
+                y_bin: glyphon::SubpixelBin::Zero,
+                scale: 1.0,
+            },
+            &cache,
         );
         assert!(
-            cg.height <= metrics.cell_h + f32::EPSILON,
-            "height {} debe caber en cell_h {}",
-            cg.height,
-            metrics.cell_h
+            out.is_some(),
+            "rasterize con dims del bitmap debe funcionar"
         );
-        assert!(
-            cg.left + f32::EPSILON >= cell_left,
-            "left {} invade celda izquierda (origen {})",
-            cg.left,
-            cell_left
-        );
-        assert!(
-            cg.left + cg.width <= cell_right + f32::EPSILON,
-            "right {} invade celda derecha ({})",
-            cg.left + cg.width,
-            cell_right
-        );
-        assert!(
-            cg.top + f32::EPSILON >= cell_top,
-            "top {} invade fila superior (origen {})",
-            cg.top,
-            cell_top
-        );
-        assert!(
-            cg.top + cg.height <= cell_bottom + f32::EPSILON,
-            "bottom {} invade fila inferior ({})",
-            cg.top + cg.height,
-            cell_bottom
-        );
+
+        // Si el quad se clampea a la celda, rasterize falla y el caracter desaparece.
+        let cell_w = metrics.cell_w.round().max(1.0) as u16;
+        let cell_h = metrics.cell_h.round().max(1.0) as u16;
+        if cached.raster.width > cell_w || cached.raster.height > cell_h {
+            let mismatched = rasterize_custom_glyph(
+                RasterizeCustomGlyphRequest {
+                    id: cg.id,
+                    width: cell_w.min(cached.raster.width),
+                    height: cell_h.min(cached.raster.height),
+                    x_bin: glyphon::SubpixelBin::Zero,
+                    y_bin: glyphon::SubpixelBin::Zero,
+                    scale: 1.0,
+                },
+                &cache,
+            );
+            assert!(
+                mismatched.is_none(),
+                "dims != raster deben rechazarse (contrato actual)"
+            );
+        }
     }
 
     #[test]
-    fn ligature_glyph_clips_to_own_columns_not_run_origin() {
+    fn ligature_x_offset_keeps_run_based_left() {
         let (mut font_system, metrics) = test_metrics();
         let mut swash_cache = glyphon::SwashCache::new();
         let font_config = FontConfig::default();
@@ -895,23 +890,21 @@ mod tests {
         let bg = crate::config::parse_hex(&theme.background);
         let mut contrast_cache = ContrastCache::default();
 
-        let run_start_col = 1usize;
-        let glyph_col = 3usize;
-        let run_x = run_start_col as f32 * metrics.cell_w;
+        let run_x = 1.0 * metrics.cell_w;
         let text = TextGlyph {
             row: 0,
-            col: glyph_col,
+            col: 3,
             width_cells: 1,
             glyph_key: GlyphKey {
-                ch: 'W',
+                ch: 'A',
                 extra: String::new(),
-                bold: true,
+                bold: false,
                 italic: false,
                 dim: false,
                 family: font_config.family.clone(),
             },
             fg: Color::Default,
-            bold: true,
+            bold: false,
             dim: false,
             contrast_bg: bg,
             skip_contrast: false,
@@ -936,84 +929,17 @@ mod tests {
         .expect("ok")
         .into_iter()
         .next()
-        .expect("ligature-path glyph");
+        .expect("glyph");
 
-        let cell_left = glyph_col as f32 * metrics.cell_w + metrics.padding_x;
-        let cell_right = cell_left + metrics.cell_w;
+        let cached = cache.get_by_custom_id(cg.id).expect("cache");
+        let expected_left =
+            run_x + metrics.padding_x + cached.shaped.left + cached.raster.placement_left as f32;
         assert!(
-            cg.left + f32::EPSILON >= cell_left,
-            "left {} debe respetar col propia ({})",
+            (cg.left - expected_left).abs() < 0.01,
+            "left {} != run-based {} (no reclavar a col)",
             cg.left,
-            cell_left
+            expected_left
         );
-        assert!(
-            cg.left + cg.width <= cell_right + f32::EPSILON,
-            "right {} no debe quedar anclado al origen del run",
-            cg.left + cg.width
-        );
-    }
-
-    #[test]
-    fn wide_cluster_span_allows_three_cells() {
-        let (mut font_system, metrics) = test_metrics();
-        let mut swash_cache = glyphon::SwashCache::new();
-        let font_config = FontConfig::default();
-        let mut cache = GlyphCache::new();
-        let theme = crate::config::ThemeConfig::default();
-        let palette = Palette::from_theme(&theme);
-        let bg = crate::config::parse_hex(&theme.background);
-        let mut contrast_cache = ContrastCache::default();
-
-        let text = TextGlyph {
-            row: 0,
-            col: 0,
-            width_cells: 3,
-            glyph_key: GlyphKey {
-                ch: 'W',
-                extra: String::new(),
-                bold: true,
-                italic: false,
-                dim: false,
-                family: font_config.family.clone(),
-            },
-            fg: Color::Default,
-            bold: true,
-            dim: false,
-            contrast_bg: bg,
-            skip_contrast: false,
-            custom_id: 0,
-            selected: false,
-            box_glyph: false,
-            x_offset: None,
-            run_shaped: None,
-        };
-
-        let cg = text_glyph_to_customs(
-            &text,
-            &metrics,
-            &palette,
-            theme.dim_alpha,
-            &font_config.family,
-            &mut cache,
-            &mut font_system,
-            &mut swash_cache,
-            &mut contrast_cache,
-        )
-        .expect("ok")
-        .into_iter()
-        .next()
-        .expect("wide cluster");
-
-        let max_w = 3.0 * metrics.cell_w;
-        assert!(
-            cg.width <= max_w + f32::EPSILON,
-            "width {} > 3*cell_w {}",
-            cg.width,
-            max_w
-        );
-        // No debe quedar artificialmente limitado a 2 celdas si el raster cabe en 3.
-        let cell_right = metrics.padding_x + max_w;
-        assert!(cg.left + cg.width <= cell_right + f32::EPSILON);
     }
 
     #[test]
