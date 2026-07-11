@@ -48,6 +48,9 @@ pub struct Grid {
     pub cols_count: usize,
     /// Máximo de líneas en scrollback para este grid.
     pub max_scrollback: usize,
+    /// Total de líneas recortadas del scrollback desde que se creó el Grid.
+    /// Monótono creciente; sirve para reconciliar índices lógicos externos.
+    pub scrollback_trimmed: u64,
     /// Indica si cada fila es continuación de la anterior por soft-wrap (true)
     /// o por hard break / Enter explícito (false).
     /// Usado por reflow para decidir si insertar un newline marker entre filas.
@@ -95,6 +98,7 @@ impl Grid {
             rows_count: rows,
             cols_count: cols,
             max_scrollback,
+            scrollback_trimmed: 0,
             row_continuations: vec![false; rows],
             damage: GridDamage::new(rows, cols),
         }
@@ -345,10 +349,13 @@ impl Grid {
     /// Guarda una fila en el scrollback cuando sale por arriba de la pantalla.
     fn push_scrollback(&mut self, row: Vec<Cell>) {
         if self.max_scrollback == 0 {
+            // Sin buffer: la línea se descarta; igual cuenta para reconciliar índices.
+            self.scrollback_trimmed += 1;
             return;
         }
         if self.scrollback.len() >= self.max_scrollback {
             self.scrollback.pop_front();
+            self.scrollback_trimmed += 1;
         }
         self.scrollback.push_back(row);
     }
@@ -358,6 +365,7 @@ impl Grid {
         self.max_scrollback = max;
         while self.scrollback.len() > self.max_scrollback {
             self.scrollback.pop_front();
+            self.scrollback_trimmed += 1;
         }
     }
 
@@ -676,12 +684,39 @@ mod tests {
         assert_eq!(cell.extra_codepoints, None);
     }
     #[test]
+    fn push_scrollback_incrementa_trimmed_al_recortar() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 2);
+        assert_eq!(grid.scrollback_trimmed, 0);
+        for _ in 0..2 {
+            grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        }
+        assert_eq!(grid.scrollback.len(), 2);
+        assert_eq!(grid.scrollback_trimmed, 0);
+        grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        assert_eq!(grid.scrollback.len(), 2);
+        assert_eq!(grid.scrollback_trimmed, 1);
+    }
+
+    #[test]
+    fn set_max_scrollback_incrementa_trimmed_al_truncar() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 5);
+        for _ in 0..5 {
+            grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        }
+        assert_eq!(grid.scrollback_trimmed, 0);
+        grid.set_max_scrollback(2);
+        assert_eq!(grid.scrollback.len(), 2);
+        assert_eq!(grid.scrollback_trimmed, 3);
+    }
+
+    #[test]
     fn test_grid_scrollback_zero_no_almacena() {
         let mut grid = Grid::new_sized_with_scrollback(24, 80, 0);
         for _ in 0..5 {
             grid.scroll_up_region(1, 0, grid.rows_count - 1);
         }
         assert_eq!(grid.scrollback.len(), 0);
+        assert_eq!(grid.scrollback_trimmed, 5);
     }
 
     #[test]

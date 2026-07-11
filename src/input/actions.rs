@@ -12,6 +12,8 @@ pub enum Action {
     ScrollPageUp,
     ScrollPageDown,
     ScrollToBottom,
+    JumpToPrevPrompt,
+    JumpToNextPrompt,
     FontZoomIn,
     FontZoomOut,
     FontZoomReset,
@@ -120,6 +122,8 @@ impl Default for Keybindings {
                 (Key::PageUp, Mods::NONE, Action::ScrollPageUp),
                 (Key::PageDown, Mods::NONE, Action::ScrollPageDown),
                 (Key::End, ctrl, Action::ScrollToBottom),
+                (Key::Up, alt_ctrl, Action::JumpToPrevPrompt),
+                (Key::Down, alt_ctrl, Action::JumpToNextPrompt),
                 (Key::Char('d'), cs, Action::SplitPane),
                 (Key::Char('|'), cs, Action::ToggleSplit),
                 (Key::Char('s'), cs, Action::SwapSplit),
@@ -204,6 +208,8 @@ pub fn parse_action(s: &str) -> Option<Action> {
         "scroll_page_up" => Action::ScrollPageUp,
         "scroll_page_down" => Action::ScrollPageDown,
         "scroll_to_bottom" => Action::ScrollToBottom,
+        "jump_to_prev_prompt" => Action::JumpToPrevPrompt,
+        "jump_to_next_prompt" => Action::JumpToNextPrompt,
         "font_zoom_in" => Action::FontZoomIn,
         "font_zoom_out" => Action::FontZoomOut,
         "font_zoom_reset" => Action::FontZoomReset,
@@ -394,6 +400,33 @@ mod tests {
             Some(Action::ScrollToBottom)
         );
         assert_eq!(parse_action("desconocida"), None);
+    }
+
+    #[test]
+    fn parse_action_reconoce_jump_prompt() {
+        assert_eq!(
+            parse_action("jump_to_prev_prompt"),
+            Some(Action::JumpToPrevPrompt)
+        );
+        assert_eq!(
+            parse_action("jump_to_next_prompt"),
+            Some(Action::JumpToNextPrompt)
+        );
+    }
+
+    #[test]
+    fn test_default_bindings_jump_prompt() {
+        let kb = Keybindings::default();
+        let alt_ctrl = Mods {
+            ctrl: true,
+            alt: true,
+            ..Mods::NONE
+        };
+        assert_eq!(kb.lookup(Key::Up, alt_ctrl), Some(Action::JumpToPrevPrompt));
+        assert_eq!(
+            kb.lookup(Key::Down, alt_ctrl),
+            Some(Action::JumpToNextPrompt)
+        );
     }
 
     #[test]

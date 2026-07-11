@@ -1698,6 +1698,22 @@ impl App {
         self.clear_link_hover_state();
     }
 
+    fn jump_to_prev_prompt(&mut self) {
+        let mut guard = self.focused_term().lock().expect("term mutex poisoned");
+        guard.jump_to_prev_prompt();
+        guard.mark_dirty();
+        drop(guard);
+        self.clear_link_hover_state();
+    }
+
+    fn jump_to_next_prompt(&mut self) {
+        let mut guard = self.focused_term().lock().expect("term mutex poisoned");
+        guard.jump_to_next_prompt();
+        guard.mark_dirty();
+        drop(guard);
+        self.clear_link_hover_state();
+    }
+
     /// Entra en copy mode si esta habilitado en config (no sale; usar q/Esc en copy mode).
     fn toggle_copy_mode(&mut self) {
         if !self.config.copy_mode.enabled {
@@ -1958,6 +1974,8 @@ impl App {
             ScrollPageUp => self.scroll_page(1),
             ScrollPageDown => self.scroll_page(-1),
             ScrollToBottom => self.scroll_to_bottom(),
+            JumpToPrevPrompt => self.jump_to_prev_prompt(),
+            JumpToNextPrompt => self.jump_to_next_prompt(),
             FontZoomIn => self.font_zoom(1),
             FontZoomOut => self.font_zoom(-1),
             FontZoomReset => self.font_zoom(0),
@@ -3415,7 +3433,7 @@ impl ApplicationHandler<UserEvent> for App {
                             use crate::input::actions::Action::*;
                             match action {
                                 ScrollLineUp | ScrollLineDown | ScrollPageUp | ScrollPageDown
-                                | ScrollToBottom => {}
+                                | ScrollToBottom | JumpToPrevPrompt | JumpToNextPrompt => {}
                                 _ => {
                                     self.run_action(action);
                                     return;

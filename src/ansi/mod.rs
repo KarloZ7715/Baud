@@ -21,6 +21,16 @@ impl MouseReporting {
         self.drag || self.any_motion
     }
 }
+
+/// Marca de un prompt de shell (OSC 133;A).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptMark {
+    /// Fila lógica (scrollback + grid) donde inició el prompt.
+    pub row: usize,
+    /// Exit code del comando anterior, si el shell lo reportó (OSC 133;D;N).
+    pub exit_code: Option<i32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CursorStyle {
     #[default]
@@ -172,6 +182,10 @@ pub struct Term {
     pub title_dirty: bool,
     pub cwd: Option<String>,
     pub hyperlinks: Vec<String>,
+    /// Marcas de prompt (OSC 133). Preferir `prompt_marks()` para leer índices válidos.
+    pub(crate) prompt_marks: Vec<PromptMark>,
+    /// Último `scrollback_trimmed` ya aplicado a `prompt_marks`.
+    last_reconciled_trim: u64,
     /// Codepoints adicionales de grafemas multi-codepoint (indice desde `Cell::extra_codepoints`).
     pub grapheme_extras: Vec<String>,
     /// Buffer del grafema en construccion (UAX #29).
@@ -335,6 +349,8 @@ impl Term {
             title_dirty: false,
             cwd: None,
             hyperlinks: Vec::new(),
+            prompt_marks: Vec::new(),
+            last_reconciled_trim: 0,
             grapheme_extras: Vec::new(),
             pending_grapheme: String::new(),
             last_grapheme_cell: None,
@@ -943,6 +959,9 @@ impl Term {
                     .grid
                     .reflow_with_cursor(new_cols, Some(cursor_pos))
                     .unwrap_or(cursor_pos);
+                // Reflow remapea filas lógicas; las marcas previas dejan de ser válidas.
+                self.prompt_marks.clear();
+                self.last_reconciled_trim = self.grid.scrollback_trimmed;
             } else if !reflow && new_cols != old_cols {
                 for c in &mut self.grid.row_continuations {
                     *c = false;
@@ -1233,6 +1252,66 @@ impl Term {
             self.scrollback_offset = (sb_len - logical_row) as isize;
         } else {
             self.scrollback_offset = 0;
+        }
+    }
+
+    /// Ajusta `prompt_marks` contra el recorte de scrollback primario: cada
+    /// línea recortada desplaza -1 los índices lógicos posteriores y descarta
+    /// marcas que cayeron fuera del buffer retenido.
+    /// Las marcas son estado del shell en pantalla primaria; el alt screen
+    /// no participa en el contador ni en el índice.
+    pub fn reconcile_prompt_marks(&mut self) {
+        let total_trim = self.grid.scrollback_trimmed;
+        let delta = total_trim.saturating_sub(self.last_reconciled_trim) as usize;
+        if delta == 0 {
+            return;
+        }
+        self.prompt_marks.retain_mut(|m| {
+            if m.row < delta {
+                false
+            } else {
+                m.row -= delta;
+                true
+            }
+        });
+        self.last_reconciled_trim = total_trim;
+    }
+
+    /// Marcas de prompt con índices reconciliados contra el scrollback actual.
+    pub fn prompt_marks(&mut self) -> &[PromptMark] {
+        self.reconcile_prompt_marks();
+        &self.prompt_marks
+    }
+
+    /// Salta al prompt anterior relativo a la vista actual (o al cursor).
+    pub fn jump_to_prev_prompt(&mut self) {
+        if self.alt_screen {
+            return;
+        }
+        self.reconcile_prompt_marks();
+        // Con scroll activo, navegar respecto al tope visible; al fondo,
+        // respecto al cursor para no saltarse marcas en la pantalla viva.
+        let current = if self.scrollback_offset > 0 {
+            self.visible_to_logical_row(0)
+        } else {
+            self.cursor_logical_row()
+        };
+        if let Some(mark) = self.prompt_marks.iter().rev().find(|m| m.row < current) {
+            let row = mark.row;
+            self.scroll_to_show_logical_row(row);
+        }
+    }
+
+    /// Salta al siguiente prompt por debajo del tope visible.
+    pub fn jump_to_next_prompt(&mut self) {
+        if self.alt_screen {
+            return;
+        }
+        self.reconcile_prompt_marks();
+        let current = self.visible_to_logical_row(0);
+        if let Some(mark) = self.prompt_marks.iter().find(|m| m.row > current) {
+            let row = mark.row;
+            self.scroll_to_show_logical_row(row);
         }
     }
 
@@ -2266,6 +2345,34 @@ impl vte::Perform for Term {
                     }
                 }
             }
+            133 => {
+                // Marcas de prompt solo aplican a la pantalla primaria.
+                if self.alt_screen {
+                    return;
+                }
+                let sub = params.get(1).copied().unwrap_or(b"");
+                match sub {
+                    b"A" => {
+                        self.reconcile_prompt_marks();
+                        self.prompt_marks.push(PromptMark {
+                            row: self.cursor_logical_row(),
+                            exit_code: None,
+                        });
+                    }
+                    // B (inicio de comando) y C (inicio de output) no aportan
+                    // estado propio a la navegación básica.
+                    b"D" => {
+                        let code = params
+                            .get(2)
+                            .and_then(|p| std::str::from_utf8(p).ok())
+                            .and_then(|s| s.parse::<i32>().ok());
+                        if let Some(last) = self.prompt_marks.last_mut() {
+                            last.exit_code = code;
+                        }
+                    }
+                    _ => {}
+                }
+            }
             9 => {
                 let body = params
                     .get(1)
@@ -2646,6 +2753,217 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"\x1b]\x07");
         feed(&mut term, b"\x1b]99999;x\x07");
+    }
+
+    #[test]
+    fn test_osc_133_a_marca_prompt() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]133;A\x07");
+        assert_eq!(term.prompt_marks.len(), 1);
+        assert_eq!(term.prompt_marks[0].row, term.cursor_logical_row());
+        assert_eq!(term.prompt_marks[0].exit_code, None);
+    }
+
+    #[test]
+    fn test_osc_133_d_guarda_exit_code() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]133;A\x07");
+        feed(&mut term, b"\x1b]133;D;127\x07");
+        assert_eq!(term.prompt_marks[0].exit_code, Some(127));
+    }
+
+    #[test]
+    fn test_osc_133_b_y_c_no_crean_marcas() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]133;B\x07");
+        feed(&mut term, b"\x1b]133;C\x07");
+        assert!(term.prompt_marks.is_empty());
+    }
+
+    #[test]
+    fn test_osc_133_d_sin_a_no_panic() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]133;D;1\x07");
+        feed(&mut term, b"\x1b]133;D\x07");
+        feed(&mut term, b"\x1b]133;D;nope\x07");
+        assert!(term.prompt_marks().is_empty());
+    }
+
+    #[test]
+    fn test_prompt_marks_se_reconcilian_al_recortar_scrollback() {
+        // scrollback mínimo: al llenar pantalla + scrollback, la marca de fila 0
+        // se recorta y debe desaparecer tras reconcile.
+        let mut term = Term::new_with_scrollback(2);
+        feed(&mut term, b"\x1b]133;A\x07");
+        assert_eq!(term.prompt_marks.len(), 1);
+        for _ in 0..30 {
+            feed(&mut term, b"\r\n");
+        }
+        term.reconcile_prompt_marks();
+        assert!(
+            term.prompt_marks.is_empty(),
+            "la marca recortada debe eliminarse"
+        );
+    }
+
+    #[test]
+    fn test_prompt_marks_survivor_row_se_desplaza_al_recortar() {
+        let mut term = Term::new_with_scrollback(50);
+        feed(&mut term, b"\x1b]133;A\x07");
+        for _ in 0..10 {
+            feed(&mut term, b"\r\n");
+        }
+        feed(&mut term, b"\x1b]133;A\x07");
+        term.reconcile_prompt_marks();
+        assert_eq!(term.prompt_marks.len(), 2);
+        let newer = term.prompt_marks[1].row;
+        while term.grid.scrollback.len() < 50 {
+            feed(&mut term, b"\r\n");
+        }
+        assert_eq!(term.grid.scrollback_trimmed, 0);
+        term.grid.set_max_scrollback(40);
+        assert_eq!(term.grid.scrollback_trimmed, 10);
+        term.reconcile_prompt_marks();
+        assert_eq!(term.prompt_marks.len(), 1);
+        assert_eq!(term.prompt_marks[0].row, newer - 10);
+    }
+
+    #[test]
+    fn test_osc_133_en_alt_screen_no_modifica_marcas() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]133;A\x07");
+        assert_eq!(term.prompt_marks.len(), 1);
+        let row = term.prompt_marks[0].row;
+        feed(&mut term, b"\x1b[?1049h");
+        feed(&mut term, b"\x1b]133;A\x07");
+        feed(&mut term, b"\x1b]133;D;1\x07");
+        assert_eq!(term.prompt_marks.len(), 1);
+        assert_eq!(term.prompt_marks[0].row, row);
+        assert_eq!(term.prompt_marks[0].exit_code, None);
+        feed(&mut term, b"\x1b[?1049l");
+        assert_eq!(term.prompt_marks.len(), 1);
+        assert_eq!(term.prompt_marks[0].row, row);
+    }
+
+    #[test]
+    fn test_jump_to_prev_prompt_scroll_a_marca_anterior() {
+        let mut term = Term::new_with_scrollback(100);
+        feed(&mut term, b"\x1b]133;A\x07");
+        for _ in 0..(DEFAULT_ROWS + 5) {
+            feed(&mut term, b"\r\n");
+        }
+        feed(&mut term, b"\x1b]133;A\x07");
+        term.reconcile_prompt_marks();
+        assert_eq!(term.prompt_marks.len(), 2);
+        let first = term.prompt_marks[0].row;
+        let second = term.prompt_marks[1].row;
+        assert!(second > first);
+        term.scroll_to_show_logical_row(second);
+        assert_eq!(term.scrollback_offset, 0);
+        term.jump_to_prev_prompt();
+        assert_eq!(term.visible_to_logical_row(0), first);
+    }
+
+    #[test]
+    fn test_jump_to_prev_elige_marca_en_pantalla_antes_que_scrollback() {
+        // Una marca en scrollback y otra en la pantalla viva encima del cursor:
+        // jump_to_prev debe ir a la más cercana (pantalla), no saltar a la vieja.
+        let mut term = Term::new_with_scrollback(100);
+        feed(&mut term, b"\x1b]133;A\x07");
+        for _ in 0..(DEFAULT_ROWS + 3) {
+            feed(&mut term, b"\r\n");
+        }
+        feed(&mut term, b"\x1b]133;A\x07");
+        for _ in 0..3 {
+            feed(&mut term, b"\r\n");
+        }
+        term.reconcile_prompt_marks();
+        assert_eq!(term.prompt_marks.len(), 2);
+        let older = term.prompt_marks[0].row;
+        let nearer = term.prompt_marks[1].row;
+        assert!(older < term.grid.scrollback.len());
+        assert!(nearer >= term.grid.scrollback.len());
+        assert!(nearer < term.cursor_logical_row());
+        assert_eq!(term.scrollback_offset, 0);
+        term.jump_to_prev_prompt();
+        // Si eligiera `older`, offset > 0. Tras elegir nearer (grid vivo),
+        // un segundo jump_to_prev desde ahí sí debe anclar a `older`.
+        assert_eq!(term.scrollback_offset, 0);
+        assert_ne!(term.visible_to_logical_row(0), older);
+        term.scroll_to_show_logical_row(nearer);
+        // Simular “estamos en nearer”: forzar current vía offset=0 y cursor
+        // debajo; el siguiente prev desde una vista en nearer+epsilon.
+        // Anclar a nearer y luego prev otra vez no cambia (nearer ya es el
+        // tope vivo). En cambio, prev tras anclar la vista a older+1:
+        term.scroll_to_show_logical_row(older + 1);
+        assert!(term.scrollback_offset > 0);
+        term.jump_to_prev_prompt();
+        assert_eq!(term.visible_to_logical_row(0), older);
+    }
+
+    #[test]
+    fn test_jump_to_next_prompt_desde_marca_anterior() {
+        let mut term = Term::new_with_scrollback(100);
+        feed(&mut term, b"\x1b]133;A\x07");
+        for _ in 0..(DEFAULT_ROWS + 5) {
+            feed(&mut term, b"\r\n");
+        }
+        feed(&mut term, b"\x1b]133;A\x07");
+        term.reconcile_prompt_marks();
+        let first = term.prompt_marks[0].row;
+        let second = term.prompt_marks[1].row;
+        term.scroll_to_show_logical_row(first);
+        assert!(term.scrollback_offset > 0);
+        assert_eq!(term.visible_to_logical_row(0), first);
+        term.jump_to_next_prompt();
+        assert_eq!(term.scrollback_offset, 0);
+        // second está en grid vivo: al fondo, el tope visible es sb_len <= second.
+        assert!(term.visible_to_logical_row(0) <= second);
+        assert!(second < term.visible_to_logical_row(0) + term.grid.rows_count);
+    }
+
+    #[test]
+    fn test_jump_to_prev_con_offset_usa_tope_visible() {
+        let mut term = Term::new_with_scrollback(200);
+        feed(&mut term, b"\x1b]133;A\x07");
+        for _ in 0..8 {
+            feed(&mut term, b"\r\n");
+        }
+        feed(&mut term, b"\x1b]133;A\x07");
+        for _ in 0..(DEFAULT_ROWS + 8) {
+            feed(&mut term, b"\r\n");
+        }
+        feed(&mut term, b"\x1b]133;A\x07");
+        term.reconcile_prompt_marks();
+        assert_eq!(term.prompt_marks.len(), 3);
+        let first = term.prompt_marks[0].row;
+        let mid = term.prompt_marks[1].row;
+        term.scroll_to_show_logical_row(mid);
+        assert!(term.scrollback_offset > 0);
+        assert_eq!(term.visible_to_logical_row(0), mid);
+        term.jump_to_prev_prompt();
+        assert_eq!(term.visible_to_logical_row(0), first);
+    }
+
+    #[test]
+    fn test_reflow_invalida_prompt_marks() {
+        let mut term = Term::new_sized(10, 40, 100);
+        feed(&mut term, b"\x1b]133;A\x07");
+        assert_eq!(term.prompt_marks().len(), 1);
+        term.resize_grid(10, 20, true);
+        assert!(term.prompt_marks().is_empty());
+    }
+
+    #[test]
+    fn test_scrollback_cero_reconcilia_marcas_descartadas() {
+        let mut term = Term::new_with_scrollback(0);
+        feed(&mut term, b"\x1b]133;A\x07");
+        assert_eq!(term.prompt_marks().len(), 1);
+        for _ in 0..(DEFAULT_ROWS + 2) {
+            feed(&mut term, b"\r\n");
+        }
+        assert!(term.grid.scrollback_trimmed > 0);
+        assert!(term.prompt_marks().is_empty());
     }
 
     #[test]
