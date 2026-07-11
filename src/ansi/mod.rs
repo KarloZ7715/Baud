@@ -188,7 +188,8 @@ pub struct Term {
     pub search: Option<SearchState>,
     pub search_cache: Option<search::SearchRenderCache>,
     pub cursor_style: CursorStyle,
-    /// Habilita el parpadeo del cursor (config `[cursor] blink`).
+    /// Parpadeo del cursor: valor inicial desde config `[cursor] blink`,
+    /// sobrescribible en runtime por DECSCUSR (CSI Ps SP q).
     pub cursor_blink_enabled: bool,
     /// Intervalo de parpadeo en ms (config `[cursor] blink_interval_ms`).
     pub blink_interval_ms: u64,
@@ -4380,17 +4381,24 @@ mod tests {
     // DECSCUSR (CSI Ps SP q) - forma y blink del cursor
     // -----------------------------------------------------------------
 
-    /// Mapeo xterm de DECSCUSR: cada Ps fija forma (Block/Underline/Bar) y
+    /// Mapeo de DECSCUSR: cada Ps fija forma (Block/Underline/Bar) y
     /// blink (impar/0 = blinking, par = steady).
     #[test]
     fn test_decscusr_mapeo_completo() {
         let mut term = Term::new();
 
-        // 0: blinking block (default)
+        // Partimos de un estado no-default para que cada feed demuestre mutación.
+        feed(&mut term, b"\x1b[6 q");
+        assert_eq!(term.cursor_style, CursorStyle::Bar);
+        assert!(!term.cursor_blink_enabled);
+
+        // 0: blinking block
+        feed(&mut term, b"\x1b[0 q");
         assert_eq!(term.cursor_style, CursorStyle::Block);
         assert!(term.cursor_blink_enabled);
 
         // 1: blinking block
+        feed(&mut term, b"\x1b[4 q");
         feed(&mut term, b"\x1b[1 q");
         assert_eq!(term.cursor_style, CursorStyle::Block);
         assert!(term.cursor_blink_enabled);
@@ -4431,6 +4439,11 @@ mod tests {
         feed(&mut term, b"\x1b[6 q");
         assert_eq!(term.cursor_style, CursorStyle::Bar);
         assert!(!term.cursor_blink_enabled);
+
+        // Desconocido: fallback a blinking block
+        feed(&mut term, b"\x1b[7 q");
+        assert_eq!(term.cursor_style, CursorStyle::Block);
+        assert!(term.cursor_blink_enabled);
     }
 
     // -----------------------------------------------------------------
