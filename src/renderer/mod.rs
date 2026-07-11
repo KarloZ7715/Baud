@@ -32,6 +32,35 @@ pub use tab_bar::{
 pub const BOX_GLYPH_ID_BASE: u16 = 0xF000;
 /// Slots reservados: cubre U+2500..=U+259F (box-drawing + block elements).
 pub const BOX_GLYPH_ID_COUNT: u16 = 0xA0;
+/// Base de ids para separadores Powerline U+E0B0..=U+E0B3 (tras el rango box/block).
+pub const POWERLINE_GLYPH_ID_BASE: u16 = BOX_GLYPH_ID_BASE + BOX_GLYPH_ID_COUNT;
+/// Cuatro slots: E0B0..E0B3.
+pub const POWERLINE_GLYPH_ID_COUNT: u16 = 4;
+
+/// Id de CustomGlyph para un builtin geometrico, o None si no aplica.
+pub fn builtin_custom_glyph_id(ch: char) -> Option<u16> {
+    let cp = ch as u32;
+    if (0x2500..=0x259F).contains(&cp) {
+        Some(BOX_GLYPH_ID_BASE + (cp - 0x2500) as u16)
+    } else if (0xE0B0..=0xE0B3).contains(&cp) {
+        Some(POWERLINE_GLYPH_ID_BASE + (cp - 0xE0B0) as u16)
+    } else {
+        None
+    }
+}
+
+/// Codepoint asociado a un id de builtin geometrico.
+pub fn char_from_builtin_glyph_id(id: u16) -> Option<char> {
+    if (BOX_GLYPH_ID_BASE..BOX_GLYPH_ID_BASE + BOX_GLYPH_ID_COUNT).contains(&id) {
+        char::from_u32(0x2500 + u32::from(id - BOX_GLYPH_ID_BASE))
+    } else if (POWERLINE_GLYPH_ID_BASE..POWERLINE_GLYPH_ID_BASE + POWERLINE_GLYPH_ID_COUNT)
+        .contains(&id)
+    {
+        char::from_u32(0xE0B0 + u32::from(id - POWERLINE_GLYPH_ID_BASE))
+    } else {
+        None
+    }
+}
 
 use limits::{custom_pixels, MAX_CUSTOM_GLYPH_PIXELS};
 use std::collections::HashMap;

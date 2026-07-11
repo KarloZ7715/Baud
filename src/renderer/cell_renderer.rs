@@ -19,8 +19,7 @@ use super::limits::{self, MAX_CUSTOM_GLYPH_PIXELS};
 use super::metrics::CellMetrics;
 use super::palette::Palette;
 use super::selection_fg_glyphon;
-use super::BOX_GLYPH_ID_BASE;
-use super::BOX_GLYPH_ID_COUNT;
+use super::{builtin_custom_glyph_id, char_from_builtin_glyph_id};
 
 fn line_quad_to_custom(line: &LineQuad, metrics: &CellMetrics) -> CustomGlyph {
     let mut glyph = line_quad(
@@ -225,8 +224,9 @@ fn text_glyph_to_customs(
     contrast_cache: &mut ContrastCache,
 ) -> Result<Vec<CustomGlyph>, String> {
     if text.box_glyph {
-        let ch = text.glyph_key.ch as u32;
-        let id = BOX_GLYPH_ID_BASE + (ch - 0x2500) as u16;
+        let Some(id) = builtin_custom_glyph_id(text.glyph_key.ch) else {
+            return Ok(Vec::new());
+        };
         let gw = metrics.geometry.cell_w as f32;
         let gh = metrics.geometry.cell_h as f32;
         let width = limits::clamp_custom_dimension(gw * text.width_cells.min(2) as f32, gw, 2);
@@ -464,8 +464,7 @@ fn rasterize_custom_glyph(
     request: RasterizeCustomGlyphRequest,
     glyph_cache: &GlyphCache,
 ) -> Option<RasterizedCustomGlyph> {
-    if (BOX_GLYPH_ID_BASE..BOX_GLYPH_ID_BASE + BOX_GLYPH_ID_COUNT).contains(&request.id) {
-        let ch = char::from_u32(0x2500 + (request.id - BOX_GLYPH_ID_BASE) as u32)?;
+    if let Some(ch) = char_from_builtin_glyph_id(request.id) {
         let data = builtin::render(ch, u32::from(request.width), u32::from(request.height))?;
         return Some(RasterizedCustomGlyph {
             data,
@@ -551,6 +550,7 @@ mod tests {
     use super::*;
     use crate::ansi::Color;
     use crate::config::FontConfig;
+    use crate::renderer::{BOX_GLYPH_ID_BASE, POWERLINE_GLYPH_ID_BASE};
 
     use super::super::display_list::BgQuad;
     use super::super::glyph::GlyphKey;
@@ -668,12 +668,91 @@ mod tests {
         .expect("box glyph");
 
         assert!(cache.is_empty(), "box_glyph no debe insertar en GlyphCache");
-        assert_eq!(cg.id, BOX_GLYPH_ID_BASE + (ch as u32 - 0x2500) as u16);
+        assert_eq!(cg.id, builtin_custom_glyph_id(ch).expect("id"));
         assert_eq!(cg.width, 10.0);
         assert_eq!(cg.height, 20.0);
         assert_eq!(cg.left, 12.0);
         assert_eq!(cg.top, 43.0);
         assert!(cg.color.is_some());
+    }
+
+    #[test]
+    fn text_glyph_powerline_usa_id_y_sin_cache() {
+        let (mut font_system, _) = test_metrics();
+        let mut swash_cache = glyphon::SwashCache::new();
+        let font_config = FontConfig::default();
+        let mut cache = GlyphCache::new();
+        let theme = crate::config::ThemeConfig::default();
+        let palette = Palette::from_theme(&theme);
+        let metrics = CellMetrics {
+            geometry: super::super::geometry::CellGeometry::from_u32(10, 20),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            font_size: 14.0,
+            baseline_y: 14.0,
+            underline_position: 1.0,
+            underline_thickness: 1.0,
+            glyph_offset_x: 4.0,
+            glyph_offset_y: 2.0,
+            padding_x: 2.0,
+            padding_y: 3.0,
+        };
+        let ch = '\u{E0B0}';
+        let bg = crate::config::parse_hex(&theme.background);
+        let mut contrast_cache = ContrastCache::default();
+        let text = TextGlyph {
+            row: 0,
+            col: 0,
+            width_cells: 1,
+            glyph_key: GlyphKey {
+                ch,
+                extra: String::new(),
+                bold: false,
+                italic: false,
+                dim: false,
+                family: font_config.family.clone(),
+            },
+            fg: Color::Green,
+            bold: false,
+            dim: false,
+            contrast_bg: bg,
+            skip_contrast: true,
+            custom_id: 0,
+            selected: false,
+            box_glyph: true,
+            x_offset: None,
+            run_shaped: None,
+        };
+
+        let cg = text_glyph_to_customs(
+            &text,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &font_config.family,
+            &mut cache,
+            &mut font_system,
+            &mut swash_cache,
+            &mut contrast_cache,
+        )
+        .expect("ok")
+        .into_iter()
+        .next()
+        .expect("powerline");
+
+        assert!(cache.is_empty());
+        assert_eq!(cg.id, POWERLINE_GLYPH_ID_BASE);
+        let request = RasterizeCustomGlyphRequest {
+            id: cg.id,
+            width: 10,
+            height: 20,
+            x_bin: glyphon::SubpixelBin::Zero,
+            y_bin: glyphon::SubpixelBin::Zero,
+            scale: 1.0,
+        };
+        let out = rasterize_custom_glyph(request, &GlyphCache::new()).expect("raster");
+        assert_eq!(out.data.len(), 200);
+        assert!(out.data.iter().any(|&p| p > 0));
     }
 
     #[test]

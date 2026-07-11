@@ -423,7 +423,8 @@ pub struct FontConfig {
     pub glyph_offset: GlyphOffset,
     #[serde(default = "default_line_height")]
     pub line_height: f32,
-    /// Dibujar U+2500..U+259F programaticamente. Si false, usa fuente.
+    /// Dibujar U+2500..U+259F y separadores Powerline U+E0B0..U+E0B3
+    /// de forma programatica. Si false, usa la fuente.
     #[serde(default = "default_true")]
     pub builtin_box_drawing: bool,
     /// Shaping multi-caracter con ligaduras tipograficas (off por defecto).

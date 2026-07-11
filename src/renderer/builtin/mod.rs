@@ -1,8 +1,9 @@
-//! Render programatico de box-drawing y block elements.
+//! Render programatico de box-drawing, block elements y separadores Powerline.
 
 mod block_elements;
 mod box_drawing;
 mod cache;
+mod powerline;
 mod stroke;
 
 pub use cache::MaskCache;
@@ -21,17 +22,17 @@ fn cache() -> &'static MaskCache {
     MASK_CACHE.get_or_init(MaskCache::new)
 }
 
-/// True si el caracter pertenece a box-drawing o block elements.
+/// True si el caracter pertenece a box-drawing, block elements o separadores Powerline.
 pub fn is_builtin_glyph(ch: char) -> bool {
-    matches!(ch as u32, BUILTIN_START..=BUILTIN_END)
-}
-
-/// True si el codepoint es geometria decorativa (no debe recibir boost de contraste).
-pub fn is_geometric_glyph(ch: char) -> bool {
     matches!(
         ch as u32,
         BUILTIN_START..=BUILTIN_END | POWERLINE_SEP_START..=POWERLINE_SEP_END
     )
+}
+
+/// True si el codepoint es geometria decorativa (no debe recibir boost de contraste).
+pub fn is_geometric_glyph(ch: char) -> bool {
+    is_builtin_glyph(ch)
 }
 
 /// True si el builtin puede rasterizar el caracter.
@@ -39,7 +40,9 @@ pub fn supports(ch: char) -> bool {
     if !is_builtin_glyph(ch) {
         return false;
     }
-    box_drawing::supports_box(ch) || block_elements::supports_block(ch)
+    box_drawing::supports_box(ch)
+        || block_elements::supports_block(ch)
+        || powerline::supports_powerline(ch)
 }
 
 /// Invalida cache (resize / cambio de fuente).
@@ -67,6 +70,9 @@ pub fn render_uncached(ch: char, w: usize, h: usize) -> Option<Vec<u8>> {
     if block_elements::supports_block(ch) {
         return block_elements::render_block(ch, w, h);
     }
+    if powerline::supports_powerline(ch) {
+        return powerline::render_powerline(ch, w, h);
+    }
     None
 }
 
@@ -91,7 +97,11 @@ mod tests {
     fn detecta_rangos_box_y_block() {
         assert!(is_builtin_glyph('\u{2500}'));
         assert!(is_builtin_glyph('\u{2588}'));
+        assert!(is_builtin_glyph('\u{E0B0}'));
+        assert!(!is_builtin_glyph('\u{E0A0}'));
         assert!(!is_builtin_glyph('A'));
+        assert!(supports('\u{E0B2}'));
+        assert!(!supports('\u{E0A0}'));
     }
 
     #[test]
