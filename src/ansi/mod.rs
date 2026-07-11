@@ -1389,6 +1389,9 @@ impl Term {
                         cell.extra_codepoints = None;
                     }
                     active.mark_cell_written(row, col, c_width as u8);
+                    if c_width >= 2 {
+                        active.mark_wide_continuation(row, col, c_width as u8, attrs);
+                    }
                     self.last_grapheme_cell = Some((row, col));
                 }
                 self.cursor.col = col + c_width;
@@ -1421,6 +1424,9 @@ impl Term {
                     cell.extra_codepoints = None;
                 }
                 active.mark_cell_written(row, col, c_width as u8);
+                if c_width >= 2 {
+                    active.mark_wide_continuation(row, col, c_width as u8, attrs);
+                }
                 self.last_grapheme_cell = Some((row, col));
             }
             self.cursor.col += c_width;
@@ -3080,6 +3086,7 @@ mod tests {
         feed(&mut term, cluster.as_bytes());
         let cell = term.active_grid().get(0, 0);
         assert_eq!(cell.width, 2);
+        assert_eq!(term.active_grid().get(0, 1).width, 0);
         assert_eq!(term.cursor.col, 2);
     }
 
@@ -3126,9 +3133,54 @@ mod tests {
         feed(&mut term, cluster.as_bytes());
         let cell = term.active_grid().get(0, 0);
         assert_eq!(cell.width, 2);
+        assert_eq!(term.active_grid().get(0, 1).width, 0);
         assert_eq!(term.cursor.col, 2);
         let extra_idx = cell.extra_codepoints.expect("skin tone");
         assert_eq!(term.grapheme_extras[extra_idx as usize], "\u{1F3FD}");
+    }
+
+    #[test]
+    fn test_wide_cjk_limpia_continuacion_y_avanza_cursor() {
+        let mut term = Term::new();
+        feed(&mut term, "中AB".as_bytes());
+        let base = term.active_grid().get(0, 0);
+        assert_eq!(base.ch, '中');
+        assert_eq!(base.width, 2);
+        let cont = term.active_grid().get(0, 1);
+        assert_eq!(cont.ch, ' ');
+        assert_eq!(cont.width, 0);
+        assert_eq!(term.active_grid().get(0, 2).ch, 'A');
+        assert_eq!(term.active_grid().get(0, 3).ch, 'B');
+        assert_eq!(term.cursor.col, 4);
+    }
+
+    #[test]
+    fn test_wide_cjk_sobrescribe_continuacion_previa() {
+        let mut term = Term::new();
+        feed(&mut term, b"XXXX");
+        feed(&mut term, b"\r");
+        feed(&mut term, "中".as_bytes());
+        assert_eq!(term.active_grid().get(0, 0).ch, '中');
+        assert_eq!(term.active_grid().get(0, 0).width, 2);
+        assert_eq!(term.active_grid().get(0, 1).ch, ' ');
+        assert_eq!(term.active_grid().get(0, 1).width, 0);
+        assert_eq!(term.active_grid().get(0, 2).ch, 'X');
+        assert_eq!(term.cursor.col, 2);
+    }
+
+    #[test]
+    fn test_wide_cjk_al_final_de_linea_con_autowrap() {
+        let mut term = Term::new();
+        term.resize_grid(term.grid.rows_count, 4, true);
+        feed(&mut term, "AB中".as_bytes());
+        assert_eq!(term.active_grid().get(0, 0).ch, 'A');
+        assert_eq!(term.active_grid().get(0, 1).ch, 'B');
+        assert_eq!(term.active_grid().get(0, 2).ch, '中');
+        assert_eq!(term.active_grid().get(0, 2).width, 2);
+        assert_eq!(term.active_grid().get(0, 3).ch, ' ');
+        assert_eq!(term.active_grid().get(0, 3).width, 0);
+        assert_eq!(term.cursor.col, 3);
+        assert!(term.pending_wrap);
     }
 
     #[test]
