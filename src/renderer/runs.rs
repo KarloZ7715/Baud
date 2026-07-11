@@ -158,6 +158,7 @@ pub fn run_glyph_to_shaped(g: &RunGlyph) -> super::glyph::ShapedGlyph {
         line_y: g.line_y,
         advance: g.width,
         used_bold_fallback: false,
+        overlays: Vec::new(),
     }
 }
 

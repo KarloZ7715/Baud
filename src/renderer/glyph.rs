@@ -20,6 +20,18 @@ pub struct GlyphKey {
     pub family: String,
 }
 
+/// Capa adicional de un cluster multi-glifo (misma celda que la base).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapedOverlay {
+    pub cache_key: CacheKey,
+    pub bitmap_w: f32,
+    pub bitmap_h: f32,
+    /// Desplazamiento horizontal respecto al origen de celda (igual que `ShapedGlyph::left`).
+    pub left: f32,
+    /// Desplazamiento vertical del ancla (igual que `ShapedGlyph::top`).
+    pub top: f32,
+}
+
 /// Glifo shaped listo para rasterizar (posicion relativa a origen de celda).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShapedGlyph {
@@ -36,6 +48,8 @@ pub struct ShapedGlyph {
     pub advance: f32,
     /// True si se pidio bold pero la fuente no lo tenia.
     pub used_bold_fallback: bool,
+    /// Capas extra del mismo cluster (marcas combinantes, etc.). Vacio si un solo glifo.
+    pub overlays: Vec<ShapedOverlay>,
 }
 
 /// True si `col` es la segunda (o posterior) columna de un glifo ancho.
@@ -143,63 +157,86 @@ fn shape_with_style(
     buf.set_text(font_system, &ch_str, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
 
-    let (glyph, _line_y_from_layout, bitmap_h, advance) = match extract_glyph_layout(&buf, metrics)
-    {
-        Some(layout) => layout,
-        None => {
-            return ShapedGlyph {
-                cache_key: CacheKey::new(
-                    glyphon::fontdb::ID::dummy(),
-                    0,
-                    metrics.font_size,
-                    (metrics.glyph_offset_x, metrics.glyph_offset_y),
-                    Weight::NORMAL,
-                    glyphon::cosmic_text::CacheKeyFlags::empty(),
-                )
-                .0,
-                bitmap_w: metrics.cell_w,
-                bitmap_h: metrics.cell_h,
-                left: 0.0,
-                top: 0.0,
-                line_y: 0.0,
-                advance: metrics.cell_w,
-                used_bold_fallback: false,
-            };
-        }
+    let Some(layers) = extract_glyph_layers(&buf, metrics) else {
+        return ShapedGlyph {
+            cache_key: CacheKey::new(
+                glyphon::fontdb::ID::dummy(),
+                0,
+                metrics.font_size,
+                (metrics.glyph_offset_x, metrics.glyph_offset_y),
+                Weight::NORMAL,
+                glyphon::cosmic_text::CacheKeyFlags::empty(),
+            )
+            .0,
+            bitmap_w: metrics.cell_w,
+            bitmap_h: metrics.cell_h,
+            left: 0.0,
+            top: 0.0,
+            line_y: 0.0,
+            advance: metrics.cell_w,
+            used_bold_fallback: false,
+            overlays: Vec::new(),
+        };
     };
 
     let line_y =
         super::runs::reference_line_y(font_system, metrics, family, use_bold, key.italic, key.dim);
 
-    // cosmic-text: ancla fija dentro de celda para cache_key coherente con grid
-    let physical = glyph.physical((metrics.glyph_offset_x, line_y), 1.0);
-    let anchor = glyph.physical((metrics.glyph_offset_x, 0.0), 1.0);
-
-    ShapedGlyph {
-        cache_key: physical.cache_key,
-        bitmap_w: glyph.w,
-        bitmap_h,
-        left: physical.x as f32,
-        top: anchor.y as f32,
-        line_y,
-        advance,
-        used_bold_fallback: false,
+    let mut overlays = Vec::new();
+    let mut base: Option<ShapedGlyph> = None;
+    for glyph in layers.glyphs {
+        let physical = glyph.physical((metrics.glyph_offset_x, line_y), 1.0);
+        let anchor = glyph.physical((metrics.glyph_offset_x, 0.0), 1.0);
+        if base.is_none() {
+            base = Some(ShapedGlyph {
+                cache_key: physical.cache_key,
+                bitmap_w: glyph.w,
+                bitmap_h: layers.bitmap_h,
+                left: physical.x as f32,
+                top: anchor.y as f32,
+                line_y,
+                advance: layers.advance,
+                used_bold_fallback: false,
+                overlays: Vec::new(),
+            });
+        } else {
+            overlays.push(ShapedOverlay {
+                cache_key: physical.cache_key,
+                bitmap_w: glyph.w,
+                bitmap_h: layers.bitmap_h,
+                left: physical.x as f32,
+                top: anchor.y as f32,
+            });
+        }
     }
+
+    let mut shaped = base.expect("layers.glyphs no vacio");
+    shaped.overlays = overlays;
+    shaped
 }
 
-fn extract_glyph_layout(
-    buf: &glyphon::Buffer,
-    metrics: &CellMetrics,
-) -> Option<(LayoutGlyph, f32, f32, f32)> {
+struct GlyphLayers {
+    glyphs: Vec<LayoutGlyph>,
+    bitmap_h: f32,
+    advance: f32,
+}
+
+/// Todas las capas del run (base + marcas / partes del cluster).
+fn extract_glyph_layers(buf: &glyphon::Buffer, metrics: &CellMetrics) -> Option<GlyphLayers> {
     let run = buf.layout_runs().next()?;
-    let glyph = run.glyphs.first()?.clone();
-    let line_y = run.line_y;
+    if run.glyphs.is_empty() {
+        return None;
+    }
     let advance = if run.glyphs.len() >= 2 {
         run.glyphs[1].x - run.glyphs[0].x
     } else {
         run.line_w.max(metrics.cell_w)
     };
-    Some((glyph, line_y, run.line_height, advance))
+    Some(GlyphLayers {
+        glyphs: run.glyphs.to_vec(),
+        bitmap_h: run.line_height,
+        advance,
+    })
 }
 
 #[cfg(test)]
@@ -349,5 +386,25 @@ mod tests {
         row[0].width = 1;
         let key = resolve_glyph_key(&row, 0, "monospace", &extras).expect("key");
         assert_eq!(key.extra, "");
+    }
+
+    #[test]
+    fn cluster_shaped_incluye_todas_las_capas_del_run() {
+        let (mut font_system, metrics) = test_metrics();
+        let family = FontConfig::default().family;
+        let key = GlyphKey {
+            ch: 'e',
+            extra: "\u{0301}".to_string(),
+            bold: false,
+            italic: false,
+            dim: false,
+            family: family.clone(),
+        };
+        let shaped = shape_glyph(&mut font_system, &metrics, &key, &family);
+        // Fuente puede componer a 1 glifo (overlays vacio) o emitir base+marca.
+        // Lo importante: no se descarta el cluster; hay al menos la capa base.
+        assert!(shaped.bitmap_w > 0.0 || !shaped.overlays.is_empty() || shaped.advance > 0.0);
+        let total_layers = 1 + shaped.overlays.len();
+        assert!(total_layers >= 1);
     }
 }

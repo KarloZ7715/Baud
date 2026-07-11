@@ -267,7 +267,11 @@ impl Term {
             scroll_region: (0, rows.saturating_sub(1)),
             auto_wrap: true,
             pending_wrap: false,
-            cursor: Cursor::new(),
+            cursor: {
+                let mut cursor = Cursor::new();
+                cursor.resize(rows, cols);
+                cursor
+            },
             attrs: Attrs::default(),
             cursor_visible: true,
             saved_cursor: None,
@@ -1308,8 +1312,12 @@ impl Term {
                 i
             }
             None => {
-                self.grapheme_extras.push(extra);
-                (self.grapheme_extras.len() - 1) as u32
+                if let Some(i) = self.grapheme_extras.iter().position(|e| e == &extra) {
+                    i as u32
+                } else {
+                    self.grapheme_extras.push(extra);
+                    (self.grapheme_extras.len() - 1) as u32
+                }
             }
         };
         let width = self.active_grid().get(row, col).width;
@@ -2127,6 +2135,8 @@ mod tests {
         let term = Term::new_sized(30, 100, 500);
         assert_eq!(term.grid.rows_count, 30);
         assert_eq!(term.grid.cols_count, 100);
+        assert_eq!(term.cursor.rows_count, 30);
+        assert_eq!(term.cursor.cols_count, 100);
         assert_eq!(term.scroll_region, (0, 29));
     }
 
@@ -2953,6 +2963,60 @@ mod tests {
         feed(&mut term, b"e\x1b[5C");
         let cell = term.active_grid().get(0, 0);
         assert_eq!(cell.ch, 'e');
+    }
+
+    #[test]
+    fn test_bs_rompe_cluster_pendiente() {
+        let mut term = Term::new();
+        feed(&mut term, b"e");
+        feed(&mut term, b"\x08");
+        feed(&mut term, "\u{0301}".as_bytes());
+        let cell = term.active_grid().get(0, 0);
+        assert_eq!(cell.ch, 'e');
+        assert_eq!(cell.extra_codepoints, None);
+    }
+
+    #[test]
+    fn test_zwj_tras_wrap_forzado_en_ultima_columna() {
+        let mut term = Term::new_sized(24, 3, 1000);
+        feed(&mut term, b"ab");
+        let cluster = "\u{1F9D1}\u{200D}\u{1F33E}";
+        feed(&mut term, cluster.as_bytes());
+        let cell = term.active_grid().get(1, 0);
+        assert_eq!(cell.ch, '\u{1F9D1}');
+        assert_eq!(cell.width, 2);
+        let extra_idx = cell.extra_codepoints.expect("extras ZWJ");
+        assert_eq!(
+            term.grapheme_extras[extra_idx as usize],
+            "\u{200D}\u{1F33E}"
+        );
+        assert_eq!(term.cursor.col, 2);
+    }
+
+    #[test]
+    fn test_skin_tone_ocupa_una_celda() {
+        let mut term = Term::new();
+        let cluster = "\u{1F44B}\u{1F3FD}";
+        feed(&mut term, cluster.as_bytes());
+        let cell = term.active_grid().get(0, 0);
+        assert_eq!(cell.width, 2);
+        assert_eq!(term.cursor.col, 2);
+        let extra_idx = cell.extra_codepoints.expect("skin tone");
+        assert_eq!(term.grapheme_extras[extra_idx as usize], "\u{1F3FD}");
+    }
+
+    #[test]
+    fn test_grapheme_extras_reutiliza_indice() {
+        let mut term = Term::new();
+        feed(&mut term, "e\u{0301}".as_bytes());
+        feed(&mut term, b" ");
+        feed(&mut term, "a\u{0301}".as_bytes());
+        let c0 = term.active_grid().get(0, 0);
+        let c2 = term.active_grid().get(0, 2);
+        let i0 = c0.extra_codepoints.expect("e acute");
+        let i2 = c2.extra_codepoints.expect("a acute");
+        assert_eq!(i0, i2);
+        assert_eq!(term.grapheme_extras.len(), 1);
     }
 
     #[test]

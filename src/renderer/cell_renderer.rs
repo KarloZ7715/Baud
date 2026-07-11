@@ -13,6 +13,7 @@ use super::decorations::{
 };
 use super::display_list::{resolve_fg_glyphon, CursorGlyph, DisplayList, LineQuad, TextGlyph};
 use super::geometry::cell_origin;
+use super::glyph::{GlyphKey, ShapedGlyph};
 use super::glyph_cache::GlyphCache;
 use super::limits::{self, MAX_CUSTOM_GLYPH_PIXELS};
 use super::metrics::CellMetrics;
@@ -86,7 +87,7 @@ impl CellRenderer {
         }
 
         for text in &display_list.text_glyphs {
-            if let Some(glyph) = text_glyph_to_custom(
+            for glyph in text_glyph_to_customs(
                 text,
                 metrics,
                 palette,
@@ -212,7 +213,7 @@ const LAYER_TEXT: usize = 2;
     clippy::too_many_arguments,
     reason = "GPU glyph build needs palette + cache handles"
 )]
-fn text_glyph_to_custom(
+fn text_glyph_to_customs(
     text: &TextGlyph,
     metrics: &CellMetrics,
     palette: &Palette<'_>,
@@ -222,7 +223,7 @@ fn text_glyph_to_custom(
     font_system: &mut glyphon::FontSystem,
     swash_cache: &mut glyphon::SwashCache,
     contrast_cache: &mut ContrastCache,
-) -> Result<Option<CustomGlyph>, String> {
+) -> Result<Vec<CustomGlyph>, String> {
     if text.box_glyph {
         let ch = text.glyph_key.ch as u32;
         let id = BOX_GLYPH_ID_BASE + (ch - 0x2500) as u16;
@@ -231,7 +232,7 @@ fn text_glyph_to_custom(
         let width = limits::clamp_custom_dimension(gw * text.width_cells.min(2) as f32, gw, 2);
         let height = limits::clamp_custom_dimension(gh, gh, 1);
         if limits::custom_pixels(width, height) > MAX_CUSTOM_GLYPH_PIXELS {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let fg_color = if text.selected {
             selection_fg_glyphon(palette.theme)
@@ -247,7 +248,6 @@ fn text_glyph_to_custom(
                 contrast_cache,
             )
         };
-        // Relleno de celda: mismo anclaje que bg_quads (padding), no glyph_offset de texto.
         let (left, top) = cell_origin(
             text.row,
             text.col,
@@ -255,7 +255,7 @@ fn text_glyph_to_custom(
             metrics.padding_x,
             metrics.padding_y,
         );
-        return Ok(Some(CustomGlyph {
+        return Ok(vec![CustomGlyph {
             id,
             left,
             top,
@@ -264,7 +264,7 @@ fn text_glyph_to_custom(
             color: Some(fg_color),
             snap_to_physical_pixel: true,
             metadata: LAYER_TEXT,
-        }));
+        }]);
     }
 
     let cached = if let Some(shaped) = text.run_shaped.clone() {
@@ -285,15 +285,74 @@ fn text_glyph_to_custom(
         )
     };
 
-    if cached.raster.missing {
-        return Ok(None);
+    let overlays = cached.shaped.overlays.clone();
+    let line_y = cached.shaped.line_y;
+    let mut out = Vec::new();
+
+    if let Some(cg) =
+        cached_text_to_custom(text, metrics, palette, dim_alpha, contrast_cache, cached)
+    {
+        out.push(cg);
     }
 
-    // Usar dimensiones del bitmap; deben coincidir con lo que rasterize_custom_glyph devuelve.
+    for (i, overlay) in overlays.into_iter().enumerate() {
+        let overlay_key = GlyphKey {
+            ch: text.glyph_key.ch,
+            extra: format!("{}\u{0001}ov{i}", text.glyph_key.extra),
+            bold: text.glyph_key.bold,
+            italic: text.glyph_key.italic,
+            dim: text.glyph_key.dim,
+            family: text.glyph_key.family.clone(),
+        };
+        let overlay_shaped = ShapedGlyph {
+            cache_key: overlay.cache_key,
+            bitmap_w: overlay.bitmap_w,
+            bitmap_h: overlay.bitmap_h,
+            left: overlay.left,
+            top: overlay.top,
+            line_y,
+            advance: 0.0,
+            used_bold_fallback: false,
+            overlays: Vec::new(),
+        };
+        let overlay_cached = glyph_cache.get_or_insert_shaped(
+            font_system,
+            swash_cache,
+            metrics,
+            overlay_key,
+            overlay_shaped,
+        );
+        if let Some(cg) = cached_text_to_custom(
+            text,
+            metrics,
+            palette,
+            dim_alpha,
+            contrast_cache,
+            overlay_cached,
+        ) {
+            out.push(cg);
+        }
+    }
+
+    Ok(out)
+}
+
+fn cached_text_to_custom(
+    text: &TextGlyph,
+    metrics: &CellMetrics,
+    palette: &Palette<'_>,
+    dim_alpha: bool,
+    contrast_cache: &mut ContrastCache,
+    cached: &super::glyph_cache::CachedGlyph,
+) -> Option<CustomGlyph> {
+    if cached.raster.missing {
+        return None;
+    }
+
     let width = f32::from(cached.raster.width).max(1.0);
     let height = f32::from(cached.raster.height).max(1.0);
     if limits::custom_pixels(width, height) > MAX_CUSTOM_GLYPH_PIXELS {
-        return Ok(None);
+        return None;
     }
 
     let left = if let Some(x_offset) = text.x_offset {
@@ -326,14 +385,13 @@ fn text_glyph_to_custom(
         )
     };
 
-    // glyphon: bitmaps a color (emoji) no deben llevar tinte de foreground.
     let glyph_color = if cached.raster.content_type == ContentType::Color {
         None
     } else {
         Some(fg_color)
     };
 
-    Ok(Some(CustomGlyph {
+    Some(CustomGlyph {
         id: cached.custom_glyph_id,
         left,
         top,
@@ -342,9 +400,8 @@ fn text_glyph_to_custom(
         color: glyph_color,
         snap_to_physical_pixel: true,
         metadata: LAYER_TEXT,
-    }))
+    })
 }
-
 fn cursor_glyph_to_custom(
     cursor: &CursorGlyph,
     metrics: &CellMetrics,
@@ -592,7 +649,7 @@ mod tests {
             run_shaped: None,
         };
 
-        let cg = text_glyph_to_custom(
+        let cg = text_glyph_to_customs(
             &text,
             &metrics,
             &palette,
@@ -604,6 +661,8 @@ mod tests {
             &mut contrast_cache,
         )
         .expect("ok")
+        .into_iter()
+        .next()
         .expect("box glyph");
 
         assert!(cache.is_empty(), "box_glyph no debe insertar en GlyphCache");
@@ -696,7 +755,7 @@ mod tests {
             run_shaped: None,
         };
 
-        let cg = text_glyph_to_custom(
+        let cg = text_glyph_to_customs(
             &text,
             &metrics,
             &palette,
@@ -708,6 +767,8 @@ mod tests {
             &mut contrast_cache,
         )
         .expect("ok")
+        .into_iter()
+        .next()
         .expect("Some glyph");
 
         assert!(
@@ -754,7 +815,7 @@ mod tests {
             run_shaped: None,
         };
 
-        let cg = text_glyph_to_custom(
+        let cg = text_glyph_to_customs(
             &text,
             &metrics,
             &palette,
@@ -766,6 +827,8 @@ mod tests {
             &mut contrast_cache,
         )
         .expect("ok")
+        .into_iter()
+        .next()
         .expect("emoji rasterizado");
 
         assert!(
