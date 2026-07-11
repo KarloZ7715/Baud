@@ -466,11 +466,23 @@ impl App {
         match event {
             UserEvent::RedrawNeeded(id) => {
                 if self.is_focused_session(id) {
-                    if let Some(idx) = self.session_by_id(id) {
-                        self.sessions[idx].session.dirty = false;
-                    }
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
+                    let deferred = self
+                        .session_by_id(id)
+                        .and_then(|idx| self.sessions[idx].session.term.try_lock().ok())
+                        .map(|term| term.should_defer_redraw())
+                        .unwrap_or(false);
+                    if deferred {
+                        // Mantener dirty para reintentar en el proximo tick (p.ej. blink).
+                        if let Some(idx) = self.session_by_id(id) {
+                            self.sessions[idx].session.dirty = true;
+                        }
+                    } else {
+                        if let Some(idx) = self.session_by_id(id) {
+                            self.sessions[idx].session.dirty = false;
+                        }
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
                     }
                 } else if self.is_session_in_active_tab(id) {
                     if let Some(idx) = self.session_by_id(id) {
@@ -3538,6 +3550,38 @@ mod tests {
         app.dispatch_user_event(UserEvent::RedrawNeeded(id_a));
         assert!(app.sessions[0].session.dirty);
         assert!(!app.sessions[1].session.dirty);
+    }
+
+    fn feed_term(term: &mut Term, data: &[u8]) {
+        let mut parser = vte::Parser::new();
+        parser.advance(term, data);
+    }
+
+    #[test]
+    fn redraw_needed_diferido_mientras_sync_update_activo() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        {
+            let mut guard = term.lock().expect("term mutex");
+            feed_term(&mut guard, b"\x1b[?2026h");
+            assert!(guard.should_defer_redraw());
+        }
+        let mut app = test_app(term);
+        let id = app.sessions[0].session.id;
+        app.dispatch_user_event(UserEvent::RedrawNeeded(id));
+        assert!(
+            app.sessions[0].session.dirty,
+            "sync activo debe diferir el redraw y dejar dirty"
+        );
+    }
+
+    #[test]
+    fn redraw_needed_enfocada_limpia_dirty_sin_sync() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term);
+        let id = app.sessions[0].session.id;
+        app.sessions[0].session.dirty = true;
+        app.dispatch_user_event(UserEvent::RedrawNeeded(id));
+        assert!(!app.sessions[0].session.dirty);
     }
 
     #[test]
