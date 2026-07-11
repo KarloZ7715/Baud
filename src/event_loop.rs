@@ -236,12 +236,11 @@ fn read_master_available(
     }
 }
 
-/// Lanza el hilo timer de parpadeo.
+/// Lanza el hilo periodico de parpadeo y de recuperacion de sync.
 ///
-/// Cada `blink_interval/2` consulta `Term::has_blink_stuff`; si hay cursor o
-/// celdas SGR 5 que parpadean, marca el term dirty y envia `RedrawNeeded` por
-/// el proxy. cuando el parpadeo esta desactivado (`blink_interval_ms == 0` o
-/// nada que parpadear), el hilo duerme sin enviar eventos.
+/// Cada `blink_interval/2` (o ~50ms si el parpadeo esta desactivado) consulta
+/// el term: si hay cursor/celdas SGR 5 que parpadean, o un frame sincronizado
+/// cuyo timeout de seguridad ya vencio, marca dirty y envia `RedrawNeeded`.
 pub(crate) fn spawn_blink_timer(
     term: Arc<Mutex<Term>>,
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
@@ -256,18 +255,23 @@ pub(crate) fn spawn_blink_timer(
                 continue;
             }
         };
-        if interval_ms == 0 {
-            thread::sleep(Duration::from_secs(1));
-            continue;
-        }
-        let interval = Duration::from_millis(interval_ms);
-        thread::sleep(interval / 2);
+        // Con blink desactivado seguimos sondeando el timeout de sync (~50ms).
+        let sleep_for = if interval_ms == 0 {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(interval_ms) / 2
+        };
+        thread::sleep(sleep_for);
         if !focus.is_active(session_id) {
             continue;
         }
-        let blinking = match term.try_lock() {
+        let need_redraw = match term.try_lock() {
             Ok(mut g) => {
                 if g.has_blink_stuff() {
+                    g.mark_dirty();
+                    true
+                } else if g.sync_update_active && !g.should_defer_redraw() {
+                    // Sync activo pero ya vencio el timeout: forzar oportunidad de paint.
                     g.mark_dirty();
                     true
                 } else {
@@ -276,7 +280,7 @@ pub(crate) fn spawn_blink_timer(
             }
             Err(_) => false,
         };
-        if blinking {
+        if need_redraw {
             let _ = proxy.send_event(UserEvent::RedrawNeeded(session_id));
         }
     });

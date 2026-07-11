@@ -2437,6 +2437,20 @@ mod tests {
         term.sync_update_started_at =
             Some(std::time::Instant::now() - std::time::Duration::from_millis(200));
         assert!(!term.should_defer_redraw());
+        assert!(
+            term.sync_update_active,
+            "el timeout solo deja de diferir; el modo sigue activo hasta ESU"
+        );
+    }
+
+    #[test]
+    fn test_should_defer_redraw_false_tras_esu() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?2026h");
+        assert!(term.should_defer_redraw());
+        feed(&mut term, b"\x1b[?2026l");
+        assert!(!term.should_defer_redraw());
+        assert!(!term.sync_update_active);
     }
 
     #[test]

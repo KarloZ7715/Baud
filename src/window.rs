@@ -466,19 +466,19 @@ impl App {
         match event {
             UserEvent::RedrawNeeded(id) => {
                 if self.is_focused_session(id) {
-                    let deferred = self
-                        .session_by_id(id)
-                        .and_then(|idx| self.sessions[idx].session.term.try_lock().ok())
+                    let idx = self.session_by_id(id);
+                    let deferred = idx
+                        .and_then(|i| self.sessions[i].session.term.try_lock().ok())
                         .map(|term| term.should_defer_redraw())
                         .unwrap_or(false);
                     if deferred {
-                        // Mantener dirty para reintentar en el proximo tick (p.ej. blink).
-                        if let Some(idx) = self.session_by_id(id) {
-                            self.sessions[idx].session.dirty = true;
+                        // Mantener dirty; el timer periodico reintenta tras el timeout.
+                        if let Some(i) = idx {
+                            self.sessions[i].session.dirty = true;
                         }
                     } else {
-                        if let Some(idx) = self.session_by_id(id) {
-                            self.sessions[idx].session.dirty = false;
+                        if let Some(i) = idx {
+                            self.sessions[i].session.dirty = false;
                         }
                         if let Some(window) = &self.window {
                             window.request_redraw();
@@ -2779,7 +2779,15 @@ impl ApplicationHandler<UserEvent> for App {
                     .filter_map(|(id, rect)| {
                         let idx = self.session_by_id(*id)?;
                         let renderer = self.renderer.as_ref()?;
-                        let rebuild = self.pane_is_dirty(*id) || !renderer.has_pane_cache(*id);
+                        let deferred = self.sessions[idx]
+                            .session
+                            .term
+                            .try_lock()
+                            .map(|t| t.should_defer_redraw())
+                            .unwrap_or(false);
+                        // Durante sync, reutilizar el frame cacheado; no reconstruir a medias.
+                        let rebuild =
+                            !deferred && (self.pane_is_dirty(*id) || !renderer.has_pane_cache(*id));
                         Some((*id, *rect, idx, rebuild))
                     })
                     .collect();
@@ -2824,6 +2832,17 @@ impl ApplicationHandler<UserEvent> for App {
                     Ok(updated) => {
                         for id in updated {
                             if let Some(idx) = self.session_by_id(id) {
+                                let deferred = self.sessions[idx]
+                                    .session
+                                    .term
+                                    .try_lock()
+                                    .map(|t| t.should_defer_redraw())
+                                    .unwrap_or(false);
+                                if deferred {
+                                    // Frame diferido: no limpiar dirty; reintentar al cerrar sync.
+                                    self.sessions[idx].session.dirty = true;
+                                    continue;
+                                }
                                 self.sessions[idx].session.dirty = false;
                                 if let Ok(mut guard) = self.sessions[idx].session.term.try_lock() {
                                     guard.take_dirty();
