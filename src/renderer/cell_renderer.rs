@@ -574,6 +574,7 @@ mod tests {
             width_cells: 1,
             glyph_key: GlyphKey {
                 ch,
+                extra: String::new(),
                 bold: false,
                 italic: false,
                 dim: false,
@@ -677,6 +678,7 @@ mod tests {
             width_cells: 1,
             glyph_key: GlyphKey {
                 ch: 'A',
+                extra: String::new(),
                 bold: false,
                 italic: false,
                 dim: false,
@@ -734,6 +736,7 @@ mod tests {
             width_cells: 2,
             glyph_key: GlyphKey {
                 ch: '😀',
+                extra: String::new(),
                 bold: false,
                 italic: false,
                 dim: false,
@@ -779,6 +782,7 @@ mod tests {
         let mut cache = GlyphCache::new();
         let key = GlyphKey {
             ch: '😀',
+            extra: String::new(),
             bold: false,
             italic: false,
             dim: false,
@@ -825,6 +829,7 @@ mod tests {
         let mut cache = GlyphCache::new();
         let key = GlyphKey {
             ch: '中',
+            extra: String::new(),
             bold: false,
             italic: false,
             dim: false,

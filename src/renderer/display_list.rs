@@ -374,6 +374,7 @@ impl DisplayListBuilder {
                         style,
                         glyph_key: GlyphKey {
                             ch,
+                            extra: String::new(),
                             bold: false,
                             italic: false,
                             dim: false,
@@ -640,10 +641,13 @@ impl DisplayListBuilder {
                 continue;
             }
 
-            let Some(glyph_key) = resolve_glyph_key(source_row, col, font_family) else {
+            let Some(glyph_key) =
+                resolve_glyph_key(source_row, col, font_family, &term.grapheme_extras)
+            else {
                 if cursor_rendered && cell.ch == ' ' {
                     let mut space_key = GlyphKey {
                         ch: ' ',
+                        extra: String::new(),
                         bold: false,
                         italic: false,
                         dim: false,
@@ -789,6 +793,7 @@ impl DisplayListBuilder {
                 };
                 let glyph_key = GlyphKey {
                     ch: run.text.chars().nth(g.col_in_run).unwrap_or(' '),
+                    extra: String::new(),
                     bold,
                     italic: cell.attrs.italic,
                     dim: cell.attrs.dim,

@@ -12,6 +12,8 @@ use super::resolve_family;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
     pub ch: char,
+    /// Codepoints del grafema mas alla de `ch` (vacio si es un solo codepoint).
+    pub extra: String,
     pub bold: bool,
     pub italic: bool,
     pub dim: bool,
@@ -60,7 +62,12 @@ pub fn is_wide_continuation(row: &[Cell], col: usize) -> bool {
 /// Construye la clave de cache para la celda en `(row, col)`.
 ///
 /// Devuelve `None` en columnas de continuacion de glifos anchos o celdas vacias.
-pub fn resolve_glyph_key(row: &[Cell], col: usize, family: &str) -> Option<GlyphKey> {
+pub fn resolve_glyph_key(
+    row: &[Cell],
+    col: usize,
+    family: &str,
+    grapheme_extras: &[String],
+) -> Option<GlyphKey> {
     if is_wide_continuation(row, col) {
         return None;
     }
@@ -68,8 +75,13 @@ pub fn resolve_glyph_key(row: &[Cell], col: usize, family: &str) -> Option<Glyph
     if cell.width == 0 {
         return None;
     }
+    let extra = cell
+        .extra_codepoints
+        .and_then(|idx| grapheme_extras.get(idx as usize).cloned())
+        .unwrap_or_default();
     Some(GlyphKey {
         ch: cell.ch,
+        extra,
         bold: cell.attrs.bold,
         italic: cell.attrs.italic,
         dim: cell.attrs.dim,
@@ -123,7 +135,11 @@ fn shape_with_style(
         attrs = attrs.style(Style::Italic);
     }
 
-    let ch_str = key.ch.to_string();
+    let ch_str = if key.extra.is_empty() {
+        key.ch.to_string()
+    } else {
+        format!("{}{}", key.ch, key.extra)
+    };
     buf.set_text(font_system, &ch_str, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
 
@@ -213,6 +229,7 @@ mod tests {
         let family = FontConfig::default().family;
         let key = GlyphKey {
             ch: 'M',
+            extra: String::new(),
             bold: false,
             italic: false,
             dim: false,
@@ -239,6 +256,7 @@ mod tests {
             .map(|ch| {
                 let key = GlyphKey {
                     ch,
+                    extra: String::new(),
                     bold: false,
                     italic: false,
                     dim: false,
@@ -270,6 +288,7 @@ mod tests {
             .map(|ch| {
                 let key = GlyphKey {
                     ch,
+                    extra: String::new(),
                     bold: false,
                     italic: false,
                     dim: false,
@@ -303,11 +322,32 @@ mod tests {
         row[0].ch = '\u{4e2d}';
         row[0].width = 2;
 
-        let key = resolve_glyph_key(&row, 0, &family);
+        let key = resolve_glyph_key(&row, 0, &family, &[]);
         assert!(key.is_some(), "col 0 debe producir clave");
         assert_eq!(key.unwrap().ch, '\u{4e2d}');
 
         assert!(is_wide_continuation(&row, 1));
-        assert!(resolve_glyph_key(&row, 1, &family).is_none());
+        assert!(resolve_glyph_key(&row, 1, &family, &[]).is_none());
+    }
+
+    #[test]
+    fn glyph_key_incluye_extra_codepoints_en_el_texto_a_shapear() {
+        let extras = vec!["\u{0301}".to_string()];
+        let mut row = vec![Cell::default(); 2];
+        row[0].ch = 'e';
+        row[0].width = 1;
+        row[0].extra_codepoints = Some(0);
+        let key = resolve_glyph_key(&row, 0, "monospace", &extras).expect("key");
+        assert_eq!(key.extra, "\u{0301}");
+    }
+
+    #[test]
+    fn glyph_key_extra_vacio_sin_extra_codepoints() {
+        let extras: Vec<String> = vec![];
+        let mut row = vec![Cell::default(); 1];
+        row[0].ch = 'a';
+        row[0].width = 1;
+        let key = resolve_glyph_key(&row, 0, "monospace", &extras).expect("key");
+        assert_eq!(key.extra, "");
     }
 }

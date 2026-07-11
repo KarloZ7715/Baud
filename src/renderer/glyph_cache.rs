@@ -355,6 +355,7 @@ mod tests {
         let mut cache = GlyphCache::new();
         let key = GlyphKey {
             ch: 'X',
+            extra: String::new(),
             bold: false,
             italic: false,
             dim: false,
@@ -422,6 +423,7 @@ mod tests {
             }
             let key = GlyphKey {
                 ch,
+                extra: String::new(),
                 bold: false,
                 italic: false,
                 dim: false,
@@ -465,6 +467,7 @@ mod tests {
         let metrics_14 = CellMetrics::measure(&mut font_system, &family, 14.0, 1.3, offset);
         let key = GlyphKey {
             ch: 'M',
+            extra: String::new(),
             bold: false,
             italic: false,
             dim: false,
@@ -516,6 +519,7 @@ mod tests {
         for ch in ['😀', '中'] {
             let key = GlyphKey {
                 ch,
+                extra: String::new(),
                 bold: false,
                 italic: false,
                 dim: false,
@@ -562,6 +566,7 @@ mod tests {
         for ch in chars {
             let key = GlyphKey {
                 ch,
+                extra: String::new(),
                 bold: false,
                 italic: false,
                 dim: false,

@@ -383,6 +383,7 @@ mod tests {
             &m,
             &crate::renderer::glyph::GlyphKey {
                 ch: '=',
+                extra: String::new(),
                 bold: false,
                 italic: false,
                 dim: false,
@@ -472,6 +473,7 @@ mod tests {
             &m,
             &crate::renderer::glyph::GlyphKey {
                 ch: '=',
+                extra: String::new(),
                 bold: false,
                 italic: false,
                 dim: false,
@@ -531,6 +533,7 @@ mod tests {
                 let gi = g.col_in_run;
                 let key = crate::renderer::glyph::GlyphKey {
                     ch: pattern.chars().nth(g.col_in_run).unwrap_or(' '),
+                    extra: String::new(),
                     bold: false,
                     italic: false,
                     dim: false,
@@ -640,6 +643,7 @@ mod ligature_probe {
                     metrics,
                     &crate::renderer::glyph::GlyphKey {
                         ch,
+                        extra: String::new(),
                         bold: false,
                         italic: false,
                         dim: false,
