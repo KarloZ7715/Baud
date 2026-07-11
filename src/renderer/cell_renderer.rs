@@ -349,7 +349,7 @@ fn cached_text_to_custom(
         return None;
     }
 
-    let max_cells_w = u32::from(text.width_cells.clamp(1, 2));
+    let max_cells_w = u32::from(text.width_cells.max(1));
     let width =
         limits::clamp_custom_dimension(f32::from(cached.raster.width), metrics.cell_w, max_cells_w);
     let height = limits::clamp_custom_dimension(f32::from(cached.raster.height), metrics.cell_h, 1);
@@ -357,20 +357,19 @@ fn cached_text_to_custom(
         return None;
     }
 
+    // El rectangulo de clip es siempre el de la(s) columna(s) del glifo.
+    // Con ligaduras, `x_offset` es el origen del run para colocar el shaped
+    // glyph; el clip no debe usar ese origen ni limitar a 2 celdas.
     let span_w = metrics.cell_w * max_cells_w as f32;
-    let cell_left = if let Some(x_offset) = text.x_offset {
-        x_offset + metrics.padding_x
-    } else {
-        text.col as f32 * metrics.cell_w + metrics.padding_x
-    };
+    let cell_left = text.col as f32 * metrics.cell_w + metrics.padding_x;
     let cell_top = text.row as f32 * metrics.cell_h + metrics.padding_y;
 
-    let left = limits::clamp_glyph_origin(
-        cell_left + cached.shaped.left + cached.raster.placement_left as f32,
-        width,
-        cell_left,
-        span_w,
-    );
+    let left_raw = if let Some(x_offset) = text.x_offset {
+        x_offset + metrics.padding_x + cached.shaped.left + cached.raster.placement_left as f32
+    } else {
+        cell_left + cached.shaped.left + cached.raster.placement_left as f32
+    };
+    let left = limits::clamp_glyph_origin(left_raw, width, cell_left, span_w);
     let top = limits::clamp_glyph_origin(
         cell_top + metrics.glyph_offset_y + cached.shaped.line_y + cached.shaped.top
             - cached.raster.placement_top as f32,
@@ -883,6 +882,138 @@ mod tests {
             cg.top + cg.height,
             cell_bottom
         );
+    }
+
+    #[test]
+    fn ligature_glyph_clips_to_own_columns_not_run_origin() {
+        let (mut font_system, metrics) = test_metrics();
+        let mut swash_cache = glyphon::SwashCache::new();
+        let font_config = FontConfig::default();
+        let mut cache = GlyphCache::new();
+        let theme = crate::config::ThemeConfig::default();
+        let palette = Palette::from_theme(&theme);
+        let bg = crate::config::parse_hex(&theme.background);
+        let mut contrast_cache = ContrastCache::default();
+
+        let run_start_col = 1usize;
+        let glyph_col = 3usize;
+        let run_x = run_start_col as f32 * metrics.cell_w;
+        let text = TextGlyph {
+            row: 0,
+            col: glyph_col,
+            width_cells: 1,
+            glyph_key: GlyphKey {
+                ch: 'W',
+                extra: String::new(),
+                bold: true,
+                italic: false,
+                dim: false,
+                family: font_config.family.clone(),
+            },
+            fg: Color::Default,
+            bold: true,
+            dim: false,
+            contrast_bg: bg,
+            skip_contrast: false,
+            custom_id: 0,
+            selected: false,
+            box_glyph: false,
+            x_offset: Some(run_x),
+            run_shaped: None,
+        };
+
+        let cg = text_glyph_to_customs(
+            &text,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &font_config.family,
+            &mut cache,
+            &mut font_system,
+            &mut swash_cache,
+            &mut contrast_cache,
+        )
+        .expect("ok")
+        .into_iter()
+        .next()
+        .expect("ligature-path glyph");
+
+        let cell_left = glyph_col as f32 * metrics.cell_w + metrics.padding_x;
+        let cell_right = cell_left + metrics.cell_w;
+        assert!(
+            cg.left + f32::EPSILON >= cell_left,
+            "left {} debe respetar col propia ({})",
+            cg.left,
+            cell_left
+        );
+        assert!(
+            cg.left + cg.width <= cell_right + f32::EPSILON,
+            "right {} no debe quedar anclado al origen del run",
+            cg.left + cg.width
+        );
+    }
+
+    #[test]
+    fn wide_cluster_span_allows_three_cells() {
+        let (mut font_system, metrics) = test_metrics();
+        let mut swash_cache = glyphon::SwashCache::new();
+        let font_config = FontConfig::default();
+        let mut cache = GlyphCache::new();
+        let theme = crate::config::ThemeConfig::default();
+        let palette = Palette::from_theme(&theme);
+        let bg = crate::config::parse_hex(&theme.background);
+        let mut contrast_cache = ContrastCache::default();
+
+        let text = TextGlyph {
+            row: 0,
+            col: 0,
+            width_cells: 3,
+            glyph_key: GlyphKey {
+                ch: 'W',
+                extra: String::new(),
+                bold: true,
+                italic: false,
+                dim: false,
+                family: font_config.family.clone(),
+            },
+            fg: Color::Default,
+            bold: true,
+            dim: false,
+            contrast_bg: bg,
+            skip_contrast: false,
+            custom_id: 0,
+            selected: false,
+            box_glyph: false,
+            x_offset: None,
+            run_shaped: None,
+        };
+
+        let cg = text_glyph_to_customs(
+            &text,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &font_config.family,
+            &mut cache,
+            &mut font_system,
+            &mut swash_cache,
+            &mut contrast_cache,
+        )
+        .expect("ok")
+        .into_iter()
+        .next()
+        .expect("wide cluster");
+
+        let max_w = 3.0 * metrics.cell_w;
+        assert!(
+            cg.width <= max_w + f32::EPSILON,
+            "width {} > 3*cell_w {}",
+            cg.width,
+            max_w
+        );
+        // No debe quedar artificialmente limitado a 2 celdas si el raster cabe en 3.
+        let cell_right = metrics.padding_x + max_w;
+        assert!(cg.left + cg.width <= cell_right + f32::EPSILON);
     }
 
     #[test]

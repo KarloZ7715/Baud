@@ -20,11 +20,9 @@ pub fn eight_range(total: usize) -> [usize; 8] {
     bands
 }
 
-/// Pixeles ocupados por `n` octavos de `total`.
-///
-/// Con `total >= 8` reutiliza `eight_range` (simetria de mitades). Con
-/// `total < 8` usa techo para que octavos bajos sigan siendo visibles.
-fn eighth_span(total: usize, n: usize) -> usize {
+/// Pixeles de las primeras `n` bandas (inferior / derecha).
+/// Si las bandas suman 0 pero `n > 0`, fuerza 1px para no perder el octavo bajo.
+fn eighth_span_low(total: usize, n: usize) -> usize {
     let n = n.min(8);
     if n == 0 || total == 0 {
         return 0;
@@ -32,30 +30,28 @@ fn eighth_span(total: usize, n: usize) -> usize {
     if n >= 8 {
         return total;
     }
-    if total < 8 {
-        (n * total).div_ceil(8).max(1).min(total)
+    let sum: usize = eight_range(total).iter().take(n).sum();
+    if sum == 0 {
+        1.min(total)
     } else {
-        eight_range(total).iter().take(n).sum()
+        sum
     }
 }
 
-/// Rangos Y [y0, y1) por banda (indice 0 = abajo).
-fn band_y_ranges(h: usize) -> [(usize, usize); 8] {
-    let bands = eight_range(h);
-    let mut ranges = [(0usize, 0usize); 8];
-    let mut y = h;
-    for (i, &bh) in bands.iter().enumerate() {
-        y = y.saturating_sub(bh);
-        ranges[i] = (y, y + bh);
+/// Pixeles de las ultimas `n` bandas (superior / izquierda).
+fn eighth_span_high(total: usize, n: usize) -> usize {
+    let n = n.min(8);
+    if n == 0 || total == 0 {
+        return 0;
     }
-    ranges
-}
-
-fn paint_bands(mask: &mut [u8], w: usize, h: usize, indices: &[usize]) {
-    let ranges = band_y_ranges(h);
-    for &i in indices {
-        let (y0, y1) = ranges[i];
-        fill(mask, w, 0, y0, w, y1.min(h));
+    if n >= 8 {
+        return total;
+    }
+    let sum: usize = eight_range(total).iter().rev().take(n).sum();
+    if sum == 0 {
+        1.min(total)
+    } else {
+        sum
     }
 }
 
@@ -63,62 +59,33 @@ pub fn paint_eight_block_bottom(mask: &mut [u8], w: usize, h: usize, bands_fille
     if bands_filled == 0 || h == 0 || w == 0 {
         return;
     }
-    if h < 8 {
-        let fill_h = eighth_span(h, bands_filled);
-        let y0 = h.saturating_sub(fill_h);
-        fill(mask, w, 0, y0, w, h);
-        return;
-    }
-    let indices: Vec<usize> = (0..bands_filled.min(8)).collect();
-    paint_bands(mask, w, h, &indices);
+    let fill_h = eighth_span_low(h, bands_filled).min(h);
+    let y0 = h.saturating_sub(fill_h);
+    fill(mask, w, 0, y0, w, h);
 }
 
 pub fn paint_eight_block_top(mask: &mut [u8], w: usize, h: usize, bands_filled: usize) {
     if bands_filled == 0 || h == 0 || w == 0 {
         return;
     }
-    if h < 8 {
-        let fill_h = eighth_span(h, bands_filled);
-        fill(mask, w, 0, 0, w, fill_h.min(h));
-        return;
-    }
-    let start = 8usize.saturating_sub(bands_filled);
-    let indices: Vec<usize> = (start..8).collect();
-    paint_bands(mask, w, h, &indices);
+    let fill_h = eighth_span_high(h, bands_filled).min(h);
+    fill(mask, w, 0, 0, w, fill_h);
 }
 
 pub fn paint_left_eighth(mask: &mut [u8], w: usize, h: usize, eighths: usize) {
     if eighths == 0 || w == 0 || h == 0 {
         return;
     }
-    let x_end = if w < 8 {
-        eighth_span(w, eighths)
-    } else {
-        let bands = eight_range(w);
-        let mut x_end = 0usize;
-        for &bw in bands.iter().skip(8usize.saturating_sub(eighths)) {
-            x_end += bw;
-        }
-        x_end
-    };
-    fill(mask, w, 0, 0, x_end.min(w), h);
+    let x_end = eighth_span_high(w, eighths).min(w);
+    fill(mask, w, 0, 0, x_end, h);
 }
 
 pub fn paint_right_eighth(mask: &mut [u8], w: usize, h: usize, eighths: usize) {
     if eighths == 0 || w == 0 || h == 0 {
         return;
     }
-    let fill_w = if w < 8 {
-        eighth_span(w, eighths)
-    } else {
-        let bands = eight_range(w);
-        let mut fill_w = 0usize;
-        for &bw in bands.iter().take(eighths.min(8)) {
-            fill_w += bw;
-        }
-        fill_w
-    };
-    let x_start = w.saturating_sub(fill_w.min(w));
+    let fill_w = eighth_span_low(w, eighths).min(w);
+    let x_start = w.saturating_sub(fill_w);
     fill(mask, w, x_start, 0, w, h);
 }
 
@@ -255,6 +222,23 @@ mod tests {
                 m.iter().any(|&b| b > 0),
                 "U+2581 debe pintar al menos 1px en h={h}"
             );
+        }
+    }
+
+    #[test]
+    fn half_blocks_do_not_overlap_when_cell_shorter_than_eight() {
+        let w = 6usize;
+        // h=1 no admite mitades disjuntas (un solo pixel).
+        for h in 2..=7 {
+            let top = render_block('\u{2580}', w, h).expect("upper");
+            let bottom = render_block('\u{2584}', w, h).expect("lower");
+            for i in 0..(w * h) {
+                assert!(!(top[i] > 0 && bottom[i] > 0), "solape ▀/▄ en h={h} px={i}");
+            }
+            let covered = (0..h)
+                .filter(|&y| top[y * w] > 0 || bottom[y * w] > 0)
+                .count();
+            assert_eq!(covered, h, "hueco ▀∪▄ en h={h}");
         }
     }
 
