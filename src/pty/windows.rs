@@ -141,12 +141,37 @@ impl SessionBackend for Pty {
     }
 
     fn read_output(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // Solo leer lo disponible: ReadFile bloqueante en un pipe vacío
+        // colgaría el hilo PTY y congelaría input/resize/shutdown.
+        let mut avail = 0u32;
+        let peek_ok = unsafe {
+            PeekNamedPipe(
+                self.conout,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                &mut avail,
+                ptr::null_mut(),
+            )
+        };
+        if peek_ok == FALSE {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(109) {
+                return Ok(0);
+            }
+            return Err(err);
+        }
+        if avail == 0 {
+            return Err(io::Error::new(ErrorKind::WouldBlock, "conout sin datos"));
+        }
+
+        let to_read = (avail as usize).min(buf.len()) as u32;
         let mut read = 0u32;
         let ok = unsafe {
             ReadFile(
                 self.conout,
                 buf.as_mut_ptr() as *mut _,
-                buf.len() as u32,
+                to_read,
                 &mut read,
                 ptr::null_mut(),
             )
@@ -165,6 +190,7 @@ impl SessionBackend for Pty {
     }
 
     fn set_nonblocking(&mut self) -> io::Result<()> {
+        // La lectura acota con PeekNamedPipe; no hace falta cambiar el modo del pipe.
         Ok(())
     }
 }
@@ -352,15 +378,9 @@ pub fn spawn_with(cfg: &ProcessConfig) -> io::Result<Pty> {
     startup.lpAttributeList = attr_list;
 
     let mut proc_info: PROCESS_INFORMATION = unsafe { mem::zeroed() };
-    let mut creation_flags = EXTENDED_STARTUPINFO_PRESENT;
-
     let env_block = build_env_block(&cfg.env);
-    let env_ptr = if let Some(ref block) = env_block {
-        creation_flags |= CREATE_UNICODE_ENVIRONMENT;
-        block.as_ptr() as *mut _
-    } else {
-        ptr::null_mut()
-    };
+    let creation_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT;
+    let env_ptr = env_block.as_ptr() as *mut _;
 
     let ok = unsafe {
         CreateProcessW(
@@ -465,13 +485,16 @@ fn quote_arg(out: &mut String, arg: &str) {
     }
 }
 
-fn build_env_block(extra: &[(String, String)]) -> Option<Vec<u16>> {
-    if extra.is_empty() {
-        return None;
-    }
+fn build_env_block(extra: &[(String, String)]) -> Vec<u16> {
     let mut block = Vec::new();
     let mut seen = std::collections::HashSet::<std::ffi::OsString>::new();
+    // TERM/COLORTERM se fuerzan al final (misma política que Unix).
+    let forced = ["TERM", "COLORTERM"];
+
     for (k, v) in extra {
+        if forced.iter().any(|f| k.eq_ignore_ascii_case(f)) {
+            continue;
+        }
         let key_up = OsStr::new(k).to_ascii_uppercase();
         if seen.insert(key_up) {
             block.extend(OsStr::new(k).encode_wide());
@@ -481,6 +504,9 @@ fn build_env_block(extra: &[(String, String)]) -> Option<Vec<u16>> {
         }
     }
     for (k, v) in std::env::vars_os() {
+        if forced.iter().any(|f| k.eq_ignore_ascii_case(OsStr::new(f))) {
+            continue;
+        }
         let key_up = k.to_ascii_uppercase();
         if seen.insert(key_up) {
             block.extend(k.encode_wide());
@@ -490,16 +516,13 @@ fn build_env_block(extra: &[(String, String)]) -> Option<Vec<u16>> {
         }
     }
     for (k, v) in [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")] {
-        let key_up = OsStr::new(k).to_ascii_uppercase();
-        if seen.insert(key_up) {
-            block.extend(OsStr::new(k).encode_wide());
-            block.push(u16::from(b'='));
-            block.extend(OsStr::new(v).encode_wide());
-            block.push(0);
-        }
+        block.extend(OsStr::new(k).encode_wide());
+        block.push(u16::from(b'='));
+        block.extend(OsStr::new(v).encode_wide());
+        block.push(0);
     }
     block.push(0);
-    Some(block)
+    block
 }
 
 #[cfg(test)]

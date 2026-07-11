@@ -128,7 +128,7 @@ fn conformance_double_shutdown_safe() {
 #[cfg(windows)]
 fn windows_shell_cfg(args: Vec<String>) -> ProcessConfig {
     ProcessConfig {
-        shell: std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into()),
+        shell: std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()),
         args,
         working_directory: None,
         env: Vec::new(),

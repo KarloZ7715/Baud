@@ -4,14 +4,25 @@
 //! Gate: sin regresión frente a esta bench tras cambios en el inbound;
 //! la ruta de producción no debe hacer `to_vec` por cada chunk leído.
 
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("pty_hot_path: benches solo disponibles en Unix");
+}
+
+#[cfg(unix)]
 use std::hint::black_box;
+#[cfg(unix)]
 use std::time::Duration;
 
+#[cfg(unix)]
 use baud::pty::{spawn_with, ProcessConfig, SessionBackend};
+#[cfg(unix)]
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 
+#[cfg(unix)]
 const PAYLOAD: usize = 256 * 1024;
 
+#[cfg(unix)]
 fn spawn_writer() -> baud::pty::Pty {
     let cfg = ProcessConfig {
         shell: "bash".into(),
@@ -26,6 +37,7 @@ fn spawn_writer() -> baud::pty::Pty {
 
 /// Réplica del coalesce de inbound del event_loop: llena `out` reutilizable
 /// y toma ownership una sola vez.
+#[cfg(unix)]
 fn drain_coalesced(master: &mut baud::pty::Pty) -> usize {
     let mut scratch = [0u8; 4096];
     let mut out = Vec::with_capacity(4096);
@@ -56,6 +68,7 @@ fn drain_coalesced(master: &mut baud::pty::Pty) -> usize {
     total
 }
 
+#[cfg(unix)]
 fn bench_pty_inbound_coalesced(c: &mut Criterion) {
     let mut group = c.benchmark_group("pty_hot_path");
     group.throughput(Throughput::Bytes(PAYLOAD as u64));
@@ -71,6 +84,7 @@ fn bench_pty_inbound_coalesced(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(unix)]
 fn bench_pty_write_echo(c: &mut Criterion) {
     c.bench_function("pty_write_echo_line", |b| {
         b.iter(|| {
@@ -104,5 +118,7 @@ fn bench_pty_write_echo(c: &mut Criterion) {
     });
 }
 
+#[cfg(unix)]
 criterion_group!(benches, bench_pty_inbound_coalesced, bench_pty_write_echo);
+#[cfg(unix)]
 criterion_main!(benches);

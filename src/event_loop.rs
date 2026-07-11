@@ -236,6 +236,15 @@ fn read_master_available(
                     &scratch[..n.min(40)]
                 );
                 out.extend_from_slice(&scratch[..n]);
+                // Tope alineado con el drain para no acumular ráfagas gigantes.
+                if out.len() >= DRAIN_MAX_BYTES_PER_PASS {
+                    let chunk = std::mem::take(out);
+                    out.reserve(scratch.len());
+                    if tx_pty_to_gui.send(PtyEvent::Output(chunk)).is_err() {
+                        return ReadMasterOutcome::DrainClosed;
+                    }
+                    return ReadMasterOutcome::Done;
+                }
             }
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 if out.is_empty() {
