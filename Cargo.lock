@@ -155,6 +155,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-script",
+ "unicode-segmentation",
  "unicode-width",
  "vte",
  "wgpu",

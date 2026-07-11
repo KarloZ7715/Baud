@@ -13,6 +13,7 @@ vte = "0.15"
 wgpu = "29"
 glyphon = "0.11"
 unicode-script = "0.5"
+unicode-segmentation = "1.13"
 unicode-width = "0.2"
 serde = { version = "1", features = ["derive"] }
 toml = "1"

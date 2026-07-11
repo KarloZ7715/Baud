@@ -6,6 +6,7 @@ pub mod config;
 pub mod copy_mode;
 pub mod cursor;
 pub mod event_loop;
+pub mod grapheme;
 pub mod grid;
 pub mod input;
 pub mod layout;
