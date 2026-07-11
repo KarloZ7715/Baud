@@ -158,6 +158,10 @@ pub struct Term {
     pub saved_cursor: Option<(usize, usize)>,
     // DEC 2004: bracketed paste mode
     pub bracketed_paste: bool,
+    /// DEC 2026: frame sincronizado activo (BSU/ESU).
+    pub sync_update_active: bool,
+    /// Instant en que se activo el frame sincronizado actual.
+    sync_update_started_at: Option<Instant>,
     // Desplazamiento de scrollback para navegacion (pagina arriba/abajo)
     pub scrollback_offset: isize,
     // Seleccion activa del terminal (mouse)
@@ -276,6 +280,8 @@ impl Term {
             cursor_visible: true,
             saved_cursor: None,
             bracketed_paste: false,
+            sync_update_active: false,
+            sync_update_started_at: None,
             scrollback_offset: 0,
             selection: None,
             dirty: true,
@@ -623,6 +629,7 @@ impl Term {
             1003 => self.mouse_reporting.any_motion,
             1006 => self.mouse_reporting.sgr,
             2004 => self.bracketed_paste,
+            2026 => self.sync_update_active,
             _ => return 0,
         };
         if set {
@@ -1584,6 +1591,16 @@ impl vte::Perform for Term {
                 // DEC 2004: bracketed paste mode
                 ('h', 2004) => self.bracketed_paste = true,
                 ('l', 2004) => self.bracketed_paste = false,
+                // DEC 2026: synchronized output (BSU/ESU)
+                ('h', 2026) => {
+                    self.sync_update_active = true;
+                    self.sync_update_started_at = Some(Instant::now());
+                }
+                ('l', 2026) => {
+                    self.sync_update_active = false;
+                    self.sync_update_started_at = None;
+                    self.dirty = true;
+                }
                 ('n', 6) => {
                     let row = (self.cursor.row + 1) as u16;
                     let col = (self.cursor.col + 1) as u16;
@@ -2353,6 +2370,36 @@ mod tests {
         feed(&mut term, b"\x1b[?2027l");
         feed(&mut term, b"\x1b[?2027$p");
         assert_eq!(term.take_pty_response(), b"\x1b[?2027;3$y");
+    }
+
+    #[test]
+    fn test_decset_2026_activa_sync_update() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?2026h");
+        assert!(term.sync_update_active);
+    }
+
+    #[test]
+    fn test_decrst_2026_desactiva_y_fuerza_dirty() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?2026h");
+        term.take_dirty();
+        feed(&mut term, b"\x1b[?2026l");
+        assert!(!term.sync_update_active);
+        assert!(
+            term.take_dirty(),
+            "cerrar el frame debe forzar un redraw final"
+        );
+    }
+
+    #[test]
+    fn test_decrqm_2026_refleja_estado_actual() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?2026$p");
+        assert_eq!(term.take_pty_response(), b"\x1b[?2026;2$y");
+
+        feed(&mut term, b"\x1b[?2026h\x1b[?2026$p");
+        assert_eq!(term.take_pty_response(), b"\x1b[?2026;1$y");
     }
 
     #[test]
