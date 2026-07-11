@@ -238,9 +238,11 @@ fn read_master_available(
 
 /// Lanza el hilo periodico de parpadeo y de recuperacion de sync.
 ///
-/// Cada `blink_interval/2` (o ~50ms si el parpadeo esta desactivado) consulta
-/// el term: si hay cursor/celdas SGR 5 que parpadean, o un frame sincronizado
-/// cuyo timeout de seguridad ya vencio, marca dirty y envia `RedrawNeeded`.
+/// Cada `blink_interval/2` (o ~50ms si hay sync activo o el parpadeo esta
+/// desactivado) consulta el term: si hay cursor/celdas SGR 5 que parpadean, o
+/// un frame sincronizado cuyo timeout de seguridad ya vencio, marca dirty y
+/// envia `RedrawNeeded`. El wake de sync no exige foco, para que panes en
+/// segundo plano tambien salgan del deferral tras el timeout.
 pub(crate) fn spawn_blink_timer(
     term: Arc<Mutex<Term>>,
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
@@ -248,30 +250,25 @@ pub(crate) fn spawn_blink_timer(
     focus: Arc<BlinkFocus>,
 ) {
     thread::spawn(move || loop {
-        let interval_ms = match term.try_lock() {
-            Ok(g) => g.blink_interval_ms,
+        let (interval_ms, sync_active) = match term.try_lock() {
+            Ok(g) => (g.blink_interval_ms, g.sync_update_active),
             Err(_) => {
                 thread::sleep(Duration::from_millis(50));
                 continue;
             }
         };
-        // Con blink desactivado seguimos sondeando el timeout de sync (~50ms).
-        let sleep_for = if interval_ms == 0 {
+        // Con sync activo o blink desactivado, sondear al menos cada ~50ms.
+        let sleep_for = if sync_active || interval_ms == 0 {
             Duration::from_millis(50)
         } else {
             Duration::from_millis(interval_ms) / 2
         };
         thread::sleep(sleep_for);
-        if !focus.is_active(session_id) {
-            continue;
-        }
         let need_redraw = match term.try_lock() {
             Ok(mut g) => {
-                if g.has_blink_stuff() {
-                    g.mark_dirty();
-                    true
-                } else if g.sync_update_active && !g.should_defer_redraw() {
-                    // Sync activo pero ya vencio el timeout: forzar oportunidad de paint.
+                let sync_wake = g.sync_update_active && !g.should_defer_redraw();
+                let blink_wake = focus.is_active(session_id) && g.has_blink_stuff();
+                if sync_wake || blink_wake {
                     g.mark_dirty();
                     true
                 } else {

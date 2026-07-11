@@ -2774,7 +2774,7 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
-                let pane_jobs: Vec<(SessionId, LayoutRect, usize, bool)> = pane_rects
+                let pane_jobs: Vec<(SessionId, LayoutRect, usize, bool, bool)> = pane_rects
                     .iter()
                     .filter_map(|(id, rect)| {
                         let idx = self.session_by_id(*id)?;
@@ -2788,8 +2788,17 @@ impl ApplicationHandler<UserEvent> for App {
                         // Durante sync, reutilizar el frame cacheado; no reconstruir a medias.
                         let rebuild =
                             !deferred && (self.pane_is_dirty(*id) || !renderer.has_pane_cache(*id));
-                        Some((*id, *rect, idx, rebuild))
+                        Some((*id, *rect, idx, rebuild, deferred))
                     })
+                    .collect();
+
+                // Snapshot del deferral al armar el frame: el post-render no debe
+                // re-consultar should_defer_redraw (ESU/timeout a mitad de frame
+                // limpiaria dirty tras haber pintado solo la cache).
+                let deferred_at_schedule: Vec<SessionId> = pane_jobs
+                    .iter()
+                    .filter(|(_, _, _, _, deferred)| *deferred)
+                    .map(|(id, _, _, _, _)| *id)
                     .collect();
 
                 let Some(renderer) = &mut self.renderer else {
@@ -2797,7 +2806,7 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 let panes: Vec<PaneRender> = pane_jobs
                     .into_iter()
-                    .map(|(id, rect, idx, rebuild)| PaneRender {
+                    .map(|(id, rect, idx, rebuild, _deferred)| PaneRender {
                         session_id: id,
                         term: Arc::clone(&self.sessions[idx].session.term),
                         rect,
@@ -2832,13 +2841,7 @@ impl ApplicationHandler<UserEvent> for App {
                     Ok(updated) => {
                         for id in updated {
                             if let Some(idx) = self.session_by_id(id) {
-                                let deferred = self.sessions[idx]
-                                    .session
-                                    .term
-                                    .try_lock()
-                                    .map(|t| t.should_defer_redraw())
-                                    .unwrap_or(false);
-                                if deferred {
+                                if deferred_at_schedule.contains(&id) {
                                     // Frame diferido: no limpiar dirty; reintentar al cerrar sync.
                                     self.sessions[idx].session.dirty = true;
                                     continue;
@@ -3590,6 +3593,47 @@ mod tests {
         assert!(
             app.sessions[0].session.dirty,
             "sync activo debe diferir el redraw y dejar dirty"
+        );
+    }
+
+    #[test]
+    fn redraw_needed_tras_esu_limpia_dirty() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        {
+            let mut guard = term.lock().expect("term mutex");
+            feed_term(&mut guard, b"\x1b[?2026h");
+            feed_term(&mut guard, b"\x1b[?2026l");
+            assert!(!guard.should_defer_redraw());
+        }
+        let mut app = test_app(term);
+        let id = app.sessions[0].session.id;
+        app.sessions[0].session.dirty = true;
+        app.dispatch_user_event(UserEvent::RedrawNeeded(id));
+        assert!(
+            !app.sessions[0].session.dirty,
+            "tras ESU el redraw final debe limpiar dirty"
+        );
+    }
+
+    #[test]
+    fn redraw_needed_tras_timeout_no_difiere() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        {
+            let mut guard = term.lock().expect("term mutex");
+            feed_term(&mut guard, b"\x1b[?2026h");
+            guard.set_sync_update_started_at_for_test(Some(
+                std::time::Instant::now() - std::time::Duration::from_millis(200),
+            ));
+            assert!(!guard.should_defer_redraw());
+            assert!(guard.sync_update_active);
+        }
+        let mut app = test_app(term);
+        let id = app.sessions[0].session.id;
+        app.sessions[0].session.dirty = true;
+        app.dispatch_user_event(UserEvent::RedrawNeeded(id));
+        assert!(
+            !app.sessions[0].session.dirty,
+            "tras timeout el modo sigue activo pero ya no se difiere"
         );
     }
 

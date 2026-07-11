@@ -693,6 +693,12 @@ impl Term {
         }
     }
 
+    /// Solo para tests: fija el instante de inicio del frame sincronizado.
+    #[cfg(test)]
+    pub(crate) fn set_sync_update_started_at_for_test(&mut self, at: Option<Instant>) {
+        self.sync_update_started_at = at;
+    }
+
     /// Resetea la fase de parpadeo a "on". Llamar en cada input del usuario y
     /// tras procesar salida del PTY, para que el cursor quede solido mientras
     /// se escribe (comportamiento xterm).
@@ -1608,8 +1614,12 @@ impl vte::Perform for Term {
                 ('l', 2004) => self.bracketed_paste = false,
                 // DEC 2026: synchronized output (BSU/ESU)
                 ('h', 2026) => {
+                    // No reiniciar el reloj si ya hay un frame abierto: un BSU
+                    // repetido no debe alargar el timeout de seguridad.
+                    if !self.sync_update_active {
+                        self.sync_update_started_at = Some(Instant::now());
+                    }
                     self.sync_update_active = true;
-                    self.sync_update_started_at = Some(Instant::now());
                 }
                 ('l', 2026) => {
                     self.sync_update_active = false;
@@ -2451,6 +2461,24 @@ mod tests {
         feed(&mut term, b"\x1b[?2026l");
         assert!(!term.should_defer_redraw());
         assert!(!term.sync_update_active);
+    }
+
+    #[test]
+    fn test_bsu_repetido_no_reinicia_timeout() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?2026h");
+        term.sync_update_started_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(200));
+        assert!(!term.should_defer_redraw());
+        feed(&mut term, b"\x1b[?2026h");
+        assert!(
+            term.sync_update_active,
+            "BSU repetido mantiene el modo activo"
+        );
+        assert!(
+            !term.should_defer_redraw(),
+            "BSU repetido no debe reiniciar el timeout de seguridad"
+        );
     }
 
     #[test]
