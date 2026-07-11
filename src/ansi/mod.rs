@@ -2338,6 +2338,26 @@ mod tests {
     }
 
     #[test]
+    fn test_decrqm_2027_ignora_reset() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?2027l");
+        feed(&mut term, b"\x1b[?2027$p");
+        assert_eq!(term.take_pty_response(), b"\x1b[?2027;3$y");
+    }
+
+    #[test]
+    fn test_multiples_marcas_combinantes_en_una_celda() {
+        let mut term = Term::new();
+        // e + acute + combining diaeresis below (still one grapheme with base e)
+        feed(&mut term, "e\u{0301}\u{0324}".as_bytes());
+        let cell = term.active_grid().get(0, 0);
+        assert_eq!(cell.ch, 'e');
+        let extra_idx = cell.extra_codepoints.expect("extras");
+        assert_eq!(term.grapheme_extras[extra_idx as usize], "\u{0301}\u{0324}");
+        assert_eq!(term.cursor.col, 1);
+    }
+
+    #[test]
     fn test_decrqm_reporta_modo_conocido() {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[?1h");
