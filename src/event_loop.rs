@@ -391,7 +391,7 @@ pub fn spawn_session(
             let (chunks, deferred) =
                 coalesce_output_chunks(first, &rx_pty_to_gui, DRAIN_MAX_BYTES_PER_PASS);
 
-            let (response, title, clipboard_pending, total_bytes) = {
+            let (response, title, clipboard_pending, clipboard_writes, total_bytes) = {
                 let mut term_guard = term_drain.lock().expect("term mutex poisoned en drain");
                 let mut total_bytes = 0usize;
                 for bytes in &chunks {
@@ -404,9 +404,20 @@ pub fn spawn_session(
                 let response = term_guard.take_pty_response();
                 let title = term_guard.take_title_if_dirty();
                 let clipboard_pending = term_guard.take_clipboard_read_pending();
-                (response, title, clipboard_pending, total_bytes)
+                let clipboard_writes = term_guard.take_clipboard_writes();
+                (
+                    response,
+                    title,
+                    clipboard_pending,
+                    clipboard_writes,
+                    total_bytes,
+                )
             };
             metrics.record_bytes(total_bytes);
+
+            for (text, primary) in clipboard_writes {
+                crate::clipboard::set_detached(text, primary);
+            }
 
             if !response.is_empty() {
                 if let Err(e) = tx_response.send(PtyCommand::Input(response)) {
@@ -562,8 +573,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let watchdog = EventLoopWatchdog::spawn();
     tracing::info!(
-        "watchdog de event loop activo (intervalo {:?})",
-        Duration::from_secs(2)
+        "watchdog de event loop activo (telemetría de handlers, stall={}s)",
+        2
     );
 
     let mut app = App::new(

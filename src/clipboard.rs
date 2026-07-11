@@ -5,6 +5,7 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+use std::thread;
 
 /// Copia `text` al clipboard o a la primary selection.
 pub fn set(text: &str, primary: bool) {
@@ -29,6 +30,15 @@ pub fn set(text: &str, primary: bool) {
         drop(stdin);
     }
     let _ = child.wait();
+}
+
+/// Encola `wl-copy` en un hilo dedicado para no bloquear drain/GUI.
+///
+/// Usar desde el hilo drain tras liberar `Mutex<Term>` (OSC 52 write).
+pub fn set_detached(text: String, primary: bool) {
+    let _ = thread::Builder::new()
+        .name("baud-clipboard".into())
+        .spawn(move || set(&text, primary));
 }
 
 /// Lee texto del clipboard o de la primary selection. Vacío si falla.

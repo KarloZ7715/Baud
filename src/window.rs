@@ -30,7 +30,7 @@ use crate::selection::{Selection, SelectionMode, SelectionPoint};
 use crate::session::{Session, SessionId};
 use crate::smart_select;
 use crate::theme_picker::ThemePickerState;
-use crate::watchdog::EventLoopWatchdog;
+use crate::watchdog::{self, EventLoopWatchdog};
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
 use winit::event::Ime;
@@ -2268,20 +2268,21 @@ impl App {
             self.clear_link_hover_state();
             return false;
         }
-        let mut link_changed = false;
-        let mut has_link = false;
-        if let Ok(mut guard) = self.focused_term().lock() {
-            let logical_row = guard.visible_to_logical_row(visible_row);
-            let new_hovered = guard
-                .resolve_link_at(logical_row, col)
-                .map(|(_, range)| range);
-            link_changed = guard.hovered_link != new_hovered;
-            has_link = new_hovered.is_some();
-            if link_changed {
-                guard.hovered_link = new_hovered;
-                guard.mark_dirty();
-            }
+        let Ok(mut guard) = self.focused_term().try_lock() else {
+            self.watchdog.note_term_lock_busy();
+            return false;
+        };
+        let logical_row = guard.visible_to_logical_row(visible_row);
+        let new_hovered = guard
+            .resolve_link_at(logical_row, col)
+            .map(|(_, range)| range);
+        let link_changed = guard.hovered_link != new_hovered;
+        let has_link = new_hovered.is_some();
+        if link_changed {
+            guard.hovered_link = new_hovered;
+            guard.mark_dirty();
         }
+        drop(guard);
         if let Some(window) = &self.window {
             window.set_cursor(if has_link {
                 CursorIcon::Pointer
@@ -2296,11 +2297,13 @@ impl App {
     }
 
     fn clear_link_hover_state(&mut self) {
-        let cleared = self
-            .focused_term()
-            .lock()
-            .ok()
-            .is_some_and(|mut guard| guard.clear_hovered_link());
+        let cleared = match self.focused_term().try_lock() {
+            Ok(mut guard) => guard.clear_hovered_link(),
+            Err(_) => {
+                self.watchdog.note_term_lock_busy();
+                false
+            }
+        };
         if cleared {
             if let Some(window) = &self.window {
                 window.set_cursor(CursorIcon::Default);
@@ -2330,12 +2333,15 @@ impl App {
     }
 
     /// Solo reenviar eventos de mouse a la app (no seleccion local).
-    fn should_forward_mouse_to_app(&self) -> bool {
-        if let Ok(guard) = self.focused_term().lock() {
-            return guard.mouse_reporting.is_active()
-                && !self.local_selection_active(&guard.mouse_reporting);
-        }
-        false
+    ///
+    /// `None` = no se pudo tomar el Term (contención); el caller debe
+    /// descartar el evento en lugar de caer a selección local.
+    fn try_should_forward_mouse_to_app(&self) -> Option<bool> {
+        let guard = self.focused_term().try_lock().ok()?;
+        Some(
+            guard.mouse_reporting.is_active()
+                && !self.local_selection_active(&guard.mouse_reporting),
+        )
     }
 
     fn clamp_mouse_to_grid(
@@ -2374,24 +2380,26 @@ impl App {
             return;
         };
         let (row, col) = self.mouse_cell_coords(renderer);
-        if let Ok(guard) = self.focused_term().lock() {
-            if !guard.mouse_reporting.is_active() {
-                return;
-            }
-            let active = guard.active_grid();
-            let Some((row, col)) =
-                Self::clamp_mouse_to_grid(row, col, active.rows_count, active.cols_count)
-            else {
-                return;
-            };
-            let Some(bytes) =
-                Self::encode_mouse_report(&guard.mouse_reporting, button, col, row, release)
-            else {
-                return;
-            };
-            drop(guard);
-            self.send_pty_bytes(bytes);
+        let Ok(guard) = self.focused_term().try_lock() else {
+            self.watchdog.note_term_lock_busy();
+            return;
+        };
+        if !guard.mouse_reporting.is_active() {
+            return;
         }
+        let active = guard.active_grid();
+        let Some((row, col)) =
+            Self::clamp_mouse_to_grid(row, col, active.rows_count, active.cols_count)
+        else {
+            return;
+        };
+        let Some(bytes) =
+            Self::encode_mouse_report(&guard.mouse_reporting, button, col, row, release)
+        else {
+            return;
+        };
+        drop(guard);
+        self.send_pty_bytes(bytes);
     }
 
     fn forward_mouse_motion(&self, button: u8) {
@@ -2399,24 +2407,26 @@ impl App {
             return;
         };
         let (row, col) = self.mouse_cell_coords(renderer);
-        if let Ok(guard) = self.focused_term().lock() {
-            if !guard.mouse_reporting.is_active() {
-                return;
-            }
-            let active = guard.active_grid();
-            let Some((row, col)) =
-                Self::clamp_mouse_to_grid(row, col, active.rows_count, active.cols_count)
-            else {
-                return;
-            };
-            let Some(bytes) =
-                Self::encode_mouse_report(&guard.mouse_reporting, button, col, row, false)
-            else {
-                return;
-            };
-            drop(guard);
-            self.send_pty_bytes(bytes);
+        let Ok(guard) = self.focused_term().try_lock() else {
+            self.watchdog.note_term_lock_busy();
+            return;
+        };
+        if !guard.mouse_reporting.is_active() {
+            return;
         }
+        let active = guard.active_grid();
+        let Some((row, col)) =
+            Self::clamp_mouse_to_grid(row, col, active.rows_count, active.cols_count)
+        else {
+            return;
+        };
+        let Some(bytes) =
+            Self::encode_mouse_report(&guard.mouse_reporting, button, col, row, false)
+        else {
+            return;
+        };
+        drop(guard);
+        self.send_pty_bytes(bytes);
     }
 }
 
@@ -2625,6 +2635,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let _phase = self.watchdog.enter(watchdog::window_event_phase(&event));
         match event {
             WindowEvent::CloseRequested => {
                 for host in &self.sessions {
@@ -2930,13 +2941,21 @@ impl ApplicationHandler<UserEvent> for App {
                     self.update_link_hover_at(position.x, position.y);
                 }
 
-                if self.should_forward_mouse_to_app() {
-                    let mouse_down = self.mouse_down.load(Ordering::Relaxed);
-                    let term = Arc::clone(self.focused_term());
-                    let Some(renderer) = &self.renderer else {
+                match self.try_should_forward_mouse_to_app() {
+                    None => {
+                        self.watchdog.note_term_lock_busy();
                         return;
-                    };
-                    if let Ok(guard) = term.lock() {
+                    }
+                    Some(true) => {
+                        let mouse_down = self.mouse_down.load(Ordering::Relaxed);
+                        let term = Arc::clone(self.focused_term());
+                        let Some(renderer) = &self.renderer else {
+                            return;
+                        };
+                        let Ok(guard) = term.try_lock() else {
+                            self.watchdog.note_term_lock_busy();
+                            return;
+                        };
                         let reporting = guard.mouse_reporting;
                         if reporting.reports_motion() {
                             let (row, col) = self.mouse_cell_coords(renderer);
@@ -2955,8 +2974,9 @@ impl ApplicationHandler<UserEvent> for App {
                                 }
                             }
                         }
+                        return;
                     }
-                    return;
+                    Some(false) => {}
                 }
 
                 if self.mouse_down.load(Ordering::Relaxed) {
@@ -2978,35 +2998,36 @@ impl ApplicationHandler<UserEvent> for App {
                         };
 
                     let scroll_changed = needs_scroll_up || needs_scroll_down;
-                    if let Ok(mut guard) = self.focused_term().lock() {
-                        if !guard.alt_screen {
-                            if needs_scroll_up {
-                                let max_offset = guard.scrollback_len();
-                                guard.scrollback_offset =
-                                    (guard.scrollback_offset + 1).min(max_offset as isize);
-                            } else if needs_scroll_down {
-                                guard.scrollback_offset = (guard.scrollback_offset - 1).max(0);
-                            }
+                    let Ok(mut guard) = self.focused_term().try_lock() else {
+                        self.watchdog.note_term_lock_busy();
+                        return;
+                    };
+                    if !guard.alt_screen {
+                        if needs_scroll_up {
+                            let max_offset = guard.scrollback_len();
+                            guard.scrollback_offset =
+                                (guard.scrollback_offset + 1).min(max_offset as isize);
+                        } else if needs_scroll_down {
+                            guard.scrollback_offset = (guard.scrollback_offset - 1).max(0);
                         }
-                        let abs_row = guard.visible_to_logical_row(visible_row);
-                        if let Some(ref mut sel) = guard.selection {
-                            match sel.mode {
-                                SelectionMode::Word
-                                | SelectionMode::Smart
-                                | SelectionMode::Line => {}
-                                SelectionMode::Normal | SelectionMode::Block => {
-                                    sel.update_end(SelectionPoint { row: abs_row, col });
-                                }
-                            }
-                        }
-                        guard.mark_dirty();
-                        tracing::debug!(
-                            "CursorMoved: mouse_drag visible_row={} col={} scrollback_offset={}",
-                            visible_row,
-                            col,
-                            guard.scrollback_offset
-                        );
                     }
+                    let abs_row = guard.visible_to_logical_row(visible_row);
+                    if let Some(ref mut sel) = guard.selection {
+                        match sel.mode {
+                            SelectionMode::Word | SelectionMode::Smart | SelectionMode::Line => {}
+                            SelectionMode::Normal | SelectionMode::Block => {
+                                sel.update_end(SelectionPoint { row: abs_row, col });
+                            }
+                        }
+                    }
+                    guard.mark_dirty();
+                    tracing::debug!(
+                        "CursorMoved: mouse_drag visible_row={} col={} scrollback_offset={}",
+                        visible_row,
+                        col,
+                        guard.scrollback_offset
+                    );
+                    drop(guard);
                     if scroll_changed {
                         self.clear_link_hover_state();
                     }
@@ -3086,7 +3107,7 @@ impl ApplicationHandler<UserEvent> for App {
                 // copy_on_select diferido: deja completar doble/triple clic antes de copiar.
                 if button == MouseButton::Left && state == ElementState::Pressed {
                     if self.modifiers.state().control_key() {
-                        let opened = if let Ok(guard) = self.focused_term().lock() {
+                        let opened = if let Ok(guard) = self.focused_term().try_lock() {
                             guard.hovered_link.as_ref().is_some_and(|range| {
                                 guard
                                     .resolve_link_at(range.row, range.start_col)
@@ -3096,6 +3117,7 @@ impl ApplicationHandler<UserEvent> for App {
                                     })
                             })
                         } else {
+                            self.watchdog.note_term_lock_busy();
                             false
                         };
                         if opened {
@@ -3114,27 +3136,34 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
 
-                if self.should_forward_mouse_to_app() {
-                    if let Some(renderer) = &self.renderer {
-                        if self.is_in_tab_bar_row(self.mouse_y, renderer) {
-                            return;
-                        }
+                match self.try_should_forward_mouse_to_app() {
+                    None => {
+                        self.watchdog.note_term_lock_busy();
+                        return;
                     }
-                    let btn = match button {
-                        MouseButton::Left => 0,
-                        MouseButton::Middle => 1,
-                        MouseButton::Right => 2,
-                        _ => return,
-                    };
-                    let release = state == ElementState::Released;
-                    self.forward_mouse_button(btn, release);
-                    if button == MouseButton::Left {
-                        self.mouse_down.store(!release, Ordering::Relaxed);
-                        if release {
-                            self.last_reported_cell = None;
+                    Some(true) => {
+                        if let Some(renderer) = &self.renderer {
+                            if self.is_in_tab_bar_row(self.mouse_y, renderer) {
+                                return;
+                            }
                         }
+                        let btn = match button {
+                            MouseButton::Left => 0,
+                            MouseButton::Middle => 1,
+                            MouseButton::Right => 2,
+                            _ => return,
+                        };
+                        let release = state == ElementState::Released;
+                        self.forward_mouse_button(btn, release);
+                        if button == MouseButton::Left {
+                            self.mouse_down.store(!release, Ordering::Relaxed);
+                            if release {
+                                self.last_reported_cell = None;
+                            }
+                        }
+                        return;
                     }
-                    return;
+                    Some(false) => {}
                 }
 
                 // Middle-click: pegar primary selection.
@@ -3178,56 +3207,59 @@ impl ApplicationHandler<UserEvent> for App {
                                 .unwrap_or(false);
 
                             let term = Arc::clone(self.focused_term());
-                            if let Ok(mut guard) = term.lock() {
-                                let abs_row = guard.visible_to_logical_row(visible_row);
-                                let point = SelectionPoint { row: abs_row, col };
-                                if block {
-                                    // Alt+click: seleccion rectangular.
-                                    let mut sel = Selection::new(point);
-                                    sel.mode = SelectionMode::Block;
-                                    guard.selection = Some(sel);
-                                } else if shift && guard.selection.is_some() {
-                                    // Shift+click: extender seleccion existente
-                                    if let Some(ref mut sel) = guard.selection {
-                                        sel.update_end(point);
+                            let Ok(mut guard) = term.try_lock() else {
+                                self.watchdog.note_term_lock_busy();
+                                return;
+                            };
+                            let abs_row = guard.visible_to_logical_row(visible_row);
+                            let point = SelectionPoint { row: abs_row, col };
+                            if block {
+                                // Alt+click: seleccion rectangular.
+                                let mut sel = Selection::new(point);
+                                sel.mode = SelectionMode::Block;
+                                guard.selection = Some(sel);
+                            } else if shift && guard.selection.is_some() {
+                                // Shift+click: extender seleccion existente
+                                if let Some(ref mut sel) = guard.selection {
+                                    sel.update_end(point);
+                                }
+                            } else if is_rapid {
+                                if guard.selection.is_none() {
+                                    guard.selection = Some(Selection::new(point));
+                                }
+                                let cols_count = guard.grid.cols_count;
+                                let row_cells = guard.row_cells_at_logical(abs_row);
+                                let mode = guard
+                                    .selection
+                                    .as_ref()
+                                    .map(|s| s.mode)
+                                    .unwrap_or(SelectionMode::Normal);
+                                match mode {
+                                    SelectionMode::Normal => {
+                                        if let Some(ref mut sel) = guard.selection {
+                                            self.expand_double_click(
+                                                sel, &row_cells, col, abs_row, cols_count,
+                                            );
+                                        }
                                     }
-                                } else if is_rapid {
-                                    if guard.selection.is_none() {
+                                    SelectionMode::Word | SelectionMode::Smart => {
+                                        if let Some(ref mut sel) = guard.selection {
+                                            sel.expand_to_line(abs_row, cols_count);
+                                            sel.mode = SelectionMode::Line;
+                                        }
+                                    }
+                                    SelectionMode::Line | SelectionMode::Block => {
                                         guard.selection = Some(Selection::new(point));
                                     }
-                                    let cols_count = guard.grid.cols_count;
-                                    let row_cells = guard.row_cells_at_logical(abs_row);
-                                    let mode = guard
-                                        .selection
-                                        .as_ref()
-                                        .map(|s| s.mode)
-                                        .unwrap_or(SelectionMode::Normal);
-                                    match mode {
-                                        SelectionMode::Normal => {
-                                            if let Some(ref mut sel) = guard.selection {
-                                                self.expand_double_click(
-                                                    sel, &row_cells, col, abs_row, cols_count,
-                                                );
-                                            }
-                                        }
-                                        SelectionMode::Word | SelectionMode::Smart => {
-                                            if let Some(ref mut sel) = guard.selection {
-                                                sel.expand_to_line(abs_row, cols_count);
-                                                sel.mode = SelectionMode::Line;
-                                            }
-                                        }
-                                        SelectionMode::Line | SelectionMode::Block => {
-                                            guard.selection = Some(Selection::new(point));
-                                        }
-                                    }
-                                } else {
-                                    // Click normal (no rapido): iniciar nueva seleccion
-                                    let sel = Selection::new(point);
-                                    guard.selection = Some(sel);
                                 }
-                                guard.mark_dirty();
-                                self.mouse_start = Some(point);
+                            } else {
+                                // Click normal (no rapido): iniciar nueva seleccion
+                                let sel = Selection::new(point);
+                                guard.selection = Some(sel);
                             }
+                            guard.mark_dirty();
+                            self.mouse_start = Some(point);
+                            drop(guard);
                             self.mouse_down.store(true, Ordering::Relaxed);
                             self.last_click_time = Some(now);
                             if let Some(window) = &self.window {
@@ -3246,8 +3278,11 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => {
-                if self.should_forward_mouse_to_app() {
+            WindowEvent::MouseWheel { delta, .. } => match self.try_should_forward_mouse_to_app() {
+                None => {
+                    self.watchdog.note_term_lock_busy();
+                }
+                Some(true) => {
                     let button = match delta {
                         MouseScrollDelta::LineDelta(_, y) if y > 0.0 => 64,
                         MouseScrollDelta::LineDelta(_, y) if y < 0.0 => 65,
@@ -3257,7 +3292,8 @@ impl ApplicationHandler<UserEvent> for App {
                     };
                     self.forward_mouse_button(button, false);
                 }
-            }
+                Some(false) => {}
+            },
             WindowEvent::Ime(ime) => match ime {
                 Ime::Commit(text) => {
                     self.send_input(text.into_bytes());
@@ -3472,6 +3508,16 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+        let phase = match &event {
+            UserEvent::RedrawNeeded(_) => "UserEvent::RedrawNeeded",
+            UserEvent::PtyExited(_, _) => "UserEvent::PtyExited",
+            UserEvent::PtyError(_, _) => "UserEvent::PtyError",
+            UserEvent::SetTitle(_, _) => "UserEvent::SetTitle",
+            UserEvent::ReadClipboard(_, _, _) => "UserEvent::ReadClipboard",
+            UserEvent::ConfigReloaded(_) => "UserEvent::ConfigReloaded",
+            UserEvent::ConfigReloadFailed(_) => "UserEvent::ConfigReloadFailed",
+        };
+        let _guard = self.watchdog.enter(phase);
         self.dispatch_user_event(event);
     }
 }
@@ -3870,8 +3916,9 @@ mod tests {
 
         let term = Arc::new(Mutex::new(Term::new()));
         let app = test_app(Arc::clone(&term));
-        assert!(
-            !app.should_forward_mouse_to_app(),
+        assert_eq!(
+            app.try_should_forward_mouse_to_app(),
+            Some(false),
             "shell: no reenviar mouse al PTY (seleccion local)"
         );
 
@@ -3882,10 +3929,38 @@ mod tests {
             sgr: true,
         };
         let app_vim = test_app(term);
-        assert!(
-            app_vim.should_forward_mouse_to_app(),
+        assert_eq!(
+            app_vim.try_should_forward_mouse_to_app(),
+            Some(true),
             "vim: app captura mouse sin modificadores"
         );
+    }
+
+    #[test]
+    fn try_should_forward_mouse_none_cuando_term_ocupado() {
+        use crate::ansi::MouseReporting;
+
+        let term = Arc::new(Mutex::new(Term::new()));
+        {
+            let mut guard = term.lock().expect("term lock");
+            guard.mouse_reporting = MouseReporting {
+                click: true,
+                drag: true,
+                any_motion: false,
+                sgr: true,
+            };
+        }
+        let app = test_app(Arc::clone(&term));
+        let _hold = term.lock().expect("hold term");
+        assert_eq!(
+            app.try_should_forward_mouse_to_app(),
+            None,
+            "con Term ocupado no debe bloquear ni fingir seleccion local"
+        );
+        assert_eq!(app.watchdog.snapshot().term_lock_busy, 0);
+        // El contador solo sube cuando el hot path anota busy.
+        app.watchdog.note_term_lock_busy();
+        assert_eq!(app.watchdog.snapshot().term_lock_busy, 1);
     }
 
     #[test]

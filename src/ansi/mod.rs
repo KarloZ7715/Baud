@@ -183,6 +183,8 @@ pub struct Term {
     pub hovered_link: Option<LinkRange>,
     /// OSC 52 query pendiente: target (`c`/`p`/`s`) y terminador del request.
     pub(crate) clipboard_read_pending: Option<(u8, bool)>,
+    /// OSC 52 writes pendientes: `(texto, primary)`. Se vacian fuera del mutex.
+    pub(crate) clipboard_write_pending: Vec<(String, bool)>,
     /// Si false, ignora peticiones de lectura OSC 52 (`?`).
     pub allow_osc52_read: bool,
     /// Si true, OSC 9 / 777 lanzan notificaciones de escritorio.
@@ -339,6 +341,7 @@ impl Term {
             current_link: None,
             hovered_link: None,
             clipboard_read_pending: None,
+            clipboard_write_pending: Vec::new(),
             allow_osc52_read: true,
             notifications_enabled: false,
             #[cfg(test)]
@@ -629,6 +632,11 @@ impl Term {
 
     pub fn take_clipboard_read_pending(&mut self) -> Option<(u8, bool)> {
         self.clipboard_read_pending.take()
+    }
+
+    /// Extrae writes OSC 52 encolados (para ejecutar fuera del `Mutex<Term>`).
+    pub fn take_clipboard_writes(&mut self) -> Vec<(String, bool)> {
+        std::mem::take(&mut self.clipboard_write_pending)
     }
 
     /// Construye la respuesta OSC 52 a una query de lectura de clipboard.
@@ -2251,7 +2259,10 @@ impl vte::Perform for Term {
                     if let Ok(text) = std::str::from_utf8(slice) {
                         let primary =
                             target.first() == Some(&b'p') || target.first() == Some(&b's');
-                        crate::clipboard::set(text, primary);
+                        // No llamar wl-copy aqui: bloquearia el mutex del Term
+                        // (y potencialmente el event loop GUI esperando el mismo lock).
+                        self.clipboard_write_pending
+                            .push((text.to_owned(), primary));
                     }
                 }
             }
@@ -2727,6 +2738,18 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"\x1b]52;c;dGVzdA==\x07");
         assert!(term.clipboard_read_pending.is_none());
+        let writes = term.take_clipboard_writes();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, "test");
+        assert!(!writes[0].1);
+    }
+
+    #[test]
+    fn test_osc_52_write_primary_encola_sin_io() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]52;p;aGk=\x07");
+        let writes = term.take_clipboard_writes();
+        assert_eq!(writes, vec![("hi".to_owned(), true)]);
     }
 
     #[test]
@@ -2734,6 +2757,7 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"\x1b]52;c;!!!!\x07");
         assert!(term.clipboard_read_pending.is_none());
+        assert!(term.take_clipboard_writes().is_empty());
     }
 
     #[test]
