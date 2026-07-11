@@ -69,16 +69,34 @@ fn builtin_block_range_non_empty() {
 
 #[test]
 fn dashed_box_glyphs_have_gaps() {
-    for ch in ['\u{2504}', '\u{2506}', '\u{254C}', '\u{254E}'] {
+    let cases: &[(char, bool)] = &[
+        ('\u{2504}', true), // horiz
+        ('\u{254C}', true),
+        ('\u{2506}', false), // vert
+        ('\u{254E}', false),
+    ];
+    for &(ch, horiz) in cases {
         let w = 24usize;
         let h = 24usize;
         let m = render_builtin_uncached(ch, w, h).expect("dashed");
-        let mid_row_gaps = (0..w).filter(|&x| m[(h / 2) * w + x] == 0).count();
-        let mid_col_gaps = (0..h).filter(|&y| m[y * w + (w / 2)] == 0).count();
-        assert!(
-            mid_row_gaps > 0 || mid_col_gaps > 0,
-            "U+{:04X} no debe colapsar a trazo solido continuo",
-            ch as u32
-        );
+        if horiz {
+            let midy = h / 2;
+            let solids = (0..w).filter(|&x| m[midy * w + x] > 0).count();
+            let gaps = w - solids;
+            assert!(
+                solids > 0 && gaps > 0,
+                "U+{:04X} horizontal debe ser discontinua en la fila media (solidos={solids} huecos={gaps})",
+                ch as u32
+            );
+        } else {
+            let midx = w / 2;
+            let solids = (0..h).filter(|&y| m[y * w + midx] > 0).count();
+            let gaps = h - solids;
+            assert!(
+                solids > 0 && gaps > 0,
+                "U+{:04X} vertical debe ser discontinua en la columna media (solidos={solids} huecos={gaps})",
+                ch as u32
+            );
+        }
     }
 }

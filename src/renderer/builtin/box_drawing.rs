@@ -258,8 +258,9 @@ mod tests {
 
     #[test]
     fn dashed_horiz_has_gaps_not_full_solid() {
-        // U+2504 light triple dash horizontal, U+254C light double dash horizontal.
-        for ch in ['\u{2504}', '\u{254C}', '\u{2508}'] {
+        for ch in [
+            '\u{2504}', '\u{254C}', '\u{2508}', '\u{2505}', '\u{2509}', '\u{254D}',
+        ] {
             let w = 24usize;
             let h = 20usize;
             let m = render_box(ch, w, h).expect("dashed");
@@ -277,7 +278,9 @@ mod tests {
 
     #[test]
     fn dashed_vert_has_gaps_not_full_solid() {
-        for ch in ['\u{2506}', '\u{254E}', '\u{250A}'] {
+        for ch in [
+            '\u{2506}', '\u{254E}', '\u{250A}', '\u{2507}', '\u{250B}', '\u{254F}',
+        ] {
             let w = 12usize;
             let h = 24usize;
             let m = render_box(ch, w, h).expect("dashed");
@@ -300,35 +303,43 @@ mod tests {
         let midx = w / 2;
         let midy = h / 2;
 
-        let left = render_box('\u{2574}', w, h).expect("left");
-        assert!(left[midy * w] > 0, "LEFT debe pintar borde izquierdo");
-        assert_eq!(
-            left[midy * w + (w - 1)],
-            0,
-            "LEFT no debe llegar al borde derecho"
-        );
+        for ch in ['\u{2574}', '\u{2578}'] {
+            let left = render_box(ch, w, h).expect("left");
+            assert!(left[midy * w] > 0, "LEFT debe pintar borde izquierdo");
+            for x in (3 * w / 4)..w {
+                assert_eq!(left[midy * w + x], 0, "U+{:04X} x={x}", ch as u32);
+            }
+        }
 
-        let right = render_box('\u{2576}', w, h).expect("right");
-        assert_eq!(right[midy * w], 0, "RIGHT no debe pintar borde izquierdo");
-        assert!(
-            right[midy * w + (w - 1)] > 0,
-            "RIGHT debe pintar borde derecho"
-        );
+        for ch in ['\u{2576}', '\u{257A}'] {
+            let right = render_box(ch, w, h).expect("right");
+            assert!(
+                right[midy * w + (w - 1)] > 0,
+                "RIGHT debe pintar borde derecho"
+            );
+            for x in 0..(w / 4) {
+                assert_eq!(right[midy * w + x], 0, "U+{:04X} x={x}", ch as u32);
+            }
+        }
 
-        let up = render_box('\u{2575}', w, h).expect("up");
-        assert!(up[midx] > 0, "UP debe pintar borde superior");
-        assert_eq!(
-            up[(h - 1) * w + midx],
-            0,
-            "UP no debe llegar al borde inferior"
-        );
+        for ch in ['\u{2575}', '\u{2579}'] {
+            let up = render_box(ch, w, h).expect("up");
+            assert!(up[midx] > 0, "UP debe pintar borde superior");
+            for y in (3 * h / 4)..h {
+                assert_eq!(up[y * w + midx], 0, "U+{:04X} y={y}", ch as u32);
+            }
+        }
 
-        let down = render_box('\u{2577}', w, h).expect("down");
-        assert_eq!(down[midx], 0, "DOWN no debe pintar borde superior");
-        assert!(
-            down[(h - 1) * w + midx] > 0,
-            "DOWN debe pintar borde inferior"
-        );
+        for ch in ['\u{2577}', '\u{257B}'] {
+            let down = render_box(ch, w, h).expect("down");
+            assert!(
+                down[(h - 1) * w + midx] > 0,
+                "DOWN debe pintar borde inferior"
+            );
+            for y in 0..(h / 4) {
+                assert_eq!(down[y * w + midx], 0, "U+{:04X} y={y}", ch as u32);
+            }
+        }
     }
 
     #[test]

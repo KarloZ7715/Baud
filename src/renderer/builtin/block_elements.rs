@@ -207,6 +207,20 @@ mod tests {
                 left_cols.abs_diff(right_cols) <= 1,
                 "mitades desiguales en w={w}: left={left_cols} right={right_cols}"
             );
+            assert!(
+                left[0] > 0 && left[w - 1] == 0,
+                "U+258C debe ocupar la izquierda w={w}"
+            );
+            assert!(
+                right[0] == 0 && right[w - 1] > 0,
+                "U+2590 debe ocupar la derecha w={w}"
+            );
+            for x in 0..w {
+                assert!(
+                    !(left[x] > 0 && right[x] > 0),
+                    "solape en columna {x} w={w}"
+                );
+            }
         }
     }
 
