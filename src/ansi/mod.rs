@@ -168,6 +168,8 @@ pub struct Term {
     pub title_dirty: bool,
     pub cwd: Option<String>,
     pub hyperlinks: Vec<String>,
+    /// Codepoints adicionales de grafemas multi-codepoint (indice desde `Cell::extra_codepoints`).
+    pub grapheme_extras: Vec<String>,
     current_link: Option<usize>,
     /// Enlace bajo el cursor del mouse (hover).
     pub hovered_link: Option<LinkRange>,
@@ -274,6 +276,7 @@ impl Term {
             title_dirty: false,
             cwd: None,
             hyperlinks: Vec::new(),
+            grapheme_extras: Vec::new(),
             current_link: None,
             hovered_link: None,
             clipboard_read_pending: None,

@@ -27,6 +27,10 @@ pub struct Cell {
     pub width: u8,
     /// Indice en `Term::hyperlinks` (OSC 8); `None` si la celda no tiene link.
     pub hyperlink: Option<u32>,
+    /// Indice en `Term::grapheme_extras`: codepoints del grafema mas alla
+    /// de `ch` (siempre el primer codepoint del cluster). `None` si la celda
+    /// tiene un solo codepoint.
+    pub extra_codepoints: Option<u32>,
 }
 
 /// Grid virtual con tamaño dinámico que representa el buffer del terminal.
@@ -59,6 +63,7 @@ impl Default for Cell {
             attrs: Attrs::default(),
             width: 1,
             hyperlink: None,
+            extra_codepoints: None,
         }
     }
 }
@@ -644,6 +649,11 @@ impl Grid {
 mod tests {
     use super::*;
 
+    #[test]
+    fn cell_default_no_tiene_extra_codepoints() {
+        let cell = Cell::default();
+        assert_eq!(cell.extra_codepoints, None);
+    }
     #[test]
     fn test_grid_scrollback_zero_no_almacena() {
         let mut grid = Grid::new_sized_with_scrollback(24, 80, 0);
