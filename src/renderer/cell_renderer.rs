@@ -349,26 +349,35 @@ fn cached_text_to_custom(
         return None;
     }
 
-    let width = f32::from(cached.raster.width).max(1.0);
-    let height = f32::from(cached.raster.height).max(1.0);
+    let max_cells_w = u32::from(text.width_cells.clamp(1, 2));
+    let width =
+        limits::clamp_custom_dimension(f32::from(cached.raster.width), metrics.cell_w, max_cells_w);
+    let height = limits::clamp_custom_dimension(f32::from(cached.raster.height), metrics.cell_h, 1);
     if limits::custom_pixels(width, height) > MAX_CUSTOM_GLYPH_PIXELS {
         return None;
     }
 
-    let left = if let Some(x_offset) = text.x_offset {
-        x_offset + metrics.padding_x + cached.shaped.left + cached.raster.placement_left as f32
+    let span_w = metrics.cell_w * max_cells_w as f32;
+    let cell_left = if let Some(x_offset) = text.x_offset {
+        x_offset + metrics.padding_x
     } else {
-        text.col as f32 * metrics.cell_w
-            + metrics.padding_x
-            + cached.shaped.left
-            + cached.raster.placement_left as f32
+        text.col as f32 * metrics.cell_w + metrics.padding_x
     };
-    let top = text.row as f32 * metrics.cell_h
-        + metrics.padding_y
-        + metrics.glyph_offset_y
-        + cached.shaped.line_y
-        + cached.shaped.top
-        - cached.raster.placement_top as f32;
+    let cell_top = text.row as f32 * metrics.cell_h + metrics.padding_y;
+
+    let left = limits::clamp_glyph_origin(
+        cell_left + cached.shaped.left + cached.raster.placement_left as f32,
+        width,
+        cell_left,
+        span_w,
+    );
+    let top = limits::clamp_glyph_origin(
+        cell_top + metrics.glyph_offset_y + cached.shaped.line_y + cached.shaped.top
+            - cached.raster.placement_top as f32,
+        height,
+        cell_top,
+        metrics.cell_h,
+    );
 
     let fg_color = if text.selected {
         selection_fg_glyphon(palette.theme)
@@ -778,6 +787,102 @@ mod tests {
         assert!(cg.width >= 1.0);
         assert!(cg.height >= 1.0);
         assert!(cg.color.is_some(), "glifo mask lleva tinte de foreground");
+    }
+
+    #[test]
+    fn bold_text_glyph_stays_inside_cell_rect() {
+        let (mut font_system, metrics) = test_metrics();
+        let mut swash_cache = glyphon::SwashCache::new();
+        let font_config = FontConfig::default();
+        let mut cache = GlyphCache::new();
+        let theme = crate::config::ThemeConfig::default();
+        let palette = Palette::from_theme(&theme);
+        let bg = crate::config::parse_hex(&theme.background);
+        let mut contrast_cache = ContrastCache::default();
+
+        let col = 3usize;
+        let row = 1usize;
+        let text = TextGlyph {
+            row,
+            col,
+            width_cells: 1,
+            glyph_key: GlyphKey {
+                ch: 'W',
+                extra: String::new(),
+                bold: true,
+                italic: false,
+                dim: false,
+                family: font_config.family.clone(),
+            },
+            fg: Color::Default,
+            bold: true,
+            dim: false,
+            contrast_bg: bg,
+            skip_contrast: false,
+            custom_id: 0,
+            selected: false,
+            box_glyph: false,
+            x_offset: None,
+            run_shaped: None,
+        };
+
+        let cg = text_glyph_to_customs(
+            &text,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &font_config.family,
+            &mut cache,
+            &mut font_system,
+            &mut swash_cache,
+            &mut contrast_cache,
+        )
+        .expect("ok")
+        .into_iter()
+        .next()
+        .expect("bold W");
+
+        let cell_left = col as f32 * metrics.cell_w + metrics.padding_x;
+        let cell_top = row as f32 * metrics.cell_h + metrics.padding_y;
+        let cell_right = cell_left + metrics.cell_w;
+        let cell_bottom = cell_top + metrics.cell_h;
+
+        assert!(
+            cg.width <= metrics.cell_w + f32::EPSILON,
+            "width {} debe caber en cell_w {}",
+            cg.width,
+            metrics.cell_w
+        );
+        assert!(
+            cg.height <= metrics.cell_h + f32::EPSILON,
+            "height {} debe caber en cell_h {}",
+            cg.height,
+            metrics.cell_h
+        );
+        assert!(
+            cg.left + f32::EPSILON >= cell_left,
+            "left {} invade celda izquierda (origen {})",
+            cg.left,
+            cell_left
+        );
+        assert!(
+            cg.left + cg.width <= cell_right + f32::EPSILON,
+            "right {} invade celda derecha ({})",
+            cg.left + cg.width,
+            cell_right
+        );
+        assert!(
+            cg.top + f32::EPSILON >= cell_top,
+            "top {} invade fila superior (origen {})",
+            cg.top,
+            cell_top
+        );
+        assert!(
+            cg.top + cg.height <= cell_bottom + f32::EPSILON,
+            "bottom {} invade fila inferior ({})",
+            cg.top + cg.height,
+            cell_bottom
+        );
     }
 
     #[test]

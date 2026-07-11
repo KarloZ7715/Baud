@@ -29,6 +29,14 @@ pub fn clamp_custom_dimension(value: f32, cell_metric: f32, max_cells: u32) -> f
     value.clamp(1.0, max_px.max(1.0))
 }
 
+/// Mantiene el origen del glifo de modo que `[pos, pos + size]` quede dentro de
+/// `[origin, origin + span]` (rectangulo de celda o run).
+#[inline]
+pub fn clamp_glyph_origin(pos: f32, size: f32, origin: f32, span: f32) -> f32 {
+    let max_pos = (origin + span - size).max(origin);
+    pos.clamp(origin, max_pos)
+}
+
 /// Maximo columnas/filas del grid (evita `cols=usize::MAX` si `cell_w==0`).
 pub const MAX_GRID_DIM: usize = 4096;
 
@@ -161,6 +169,37 @@ mod tests {
     fn clamp_grid_dimension_never_returns_zero() {
         assert_eq!(clamp_grid_dimension(0), 1);
         assert_eq!(clamp_grid_dimension(usize::MAX), MAX_GRID_DIM);
+    }
+
+    #[test]
+    fn clamp_custom_dimension_caps_overflow_raster() {
+        let cell_w = 7.0;
+        let raster_w = 9.0;
+        let width = clamp_custom_dimension(raster_w, cell_w, 1);
+        assert!(width <= cell_w);
+        assert!(width >= 1.0);
+    }
+
+    #[test]
+    fn clamp_glyph_origin_keeps_quad_inside_cell() {
+        let cell_left = 10.0;
+        let cell_w = 7.0;
+        let width = 7.0;
+        // placement negativo empujaria el quad fuera por la izquierda
+        let left = clamp_glyph_origin(cell_left - 1.0, width, cell_left, cell_w);
+        assert_eq!(left, cell_left);
+        assert!(left + width <= cell_left + cell_w);
+        // origen demasiado a la derecha
+        let left_hi = clamp_glyph_origin(cell_left + 3.0, width, cell_left, cell_w);
+        assert_eq!(left_hi, cell_left);
+    }
+
+    #[test]
+    fn clamp_custom_dimension_tiny_cell_does_not_panic() {
+        let w = clamp_custom_dimension(100.0, 0.5, 1);
+        let h = clamp_custom_dimension(100.0, 0.5, 1);
+        assert!(w >= 1.0);
+        assert!(h >= 1.0);
     }
 
     #[test]
