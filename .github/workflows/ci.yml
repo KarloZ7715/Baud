@@ -144,7 +144,7 @@ jobs:
           cache-on-failure: true
 
       - name: Instalar xvfb + deps X11 + Mesa software
-        run: sudo apt-get update && sudo apt-get install -y xvfb libxkbcommon-x11-0 mesa-vulkan-drivers libegl1-mesa
+        run: sudo apt-get update && sudo apt-get install -y xvfb libxkbcommon-x11-0 mesa-vulkan-drivers libegl-mesa0
 
       - name: Smoke X11 (sin Wayland)
         env:
