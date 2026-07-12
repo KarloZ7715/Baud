@@ -187,5 +187,6 @@ jobs:
       - name: Publish verified draft
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.prepare-release.outputs.tag }}
         run: gh release edit "$TAG" --draft=false --latest
