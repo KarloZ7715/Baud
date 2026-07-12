@@ -104,10 +104,12 @@ env APPIMAGE_EXTRACT_AND_RUN=1 "$LINUXDEPLOY" \
     --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/baud.png" \
     --output appimage
 
-APPIMAGE_NAME="baud-${VERSION}-${ARCH}.AppImage"
-if [[ -f "$APPIMAGE_NAME" ]]; then
+shopt -s nullglob
+generated_appimages=(./*-${VERSION}-${ARCH}.AppImage)
+if (( ${#generated_appimages[@]} == 1 )); then
+    APPIMAGE_NAME="baud-${VERSION}-${ARCH}.AppImage"
     mkdir -p "$DIST_DIR"
-    mv -f "$APPIMAGE_NAME" "$DIST_DIR/$APPIMAGE_NAME"
+    mv -f -- "${generated_appimages[0]}" "$DIST_DIR/$APPIMAGE_NAME"
     echo "AppImage created: $DIST_DIR/$APPIMAGE_NAME"
 
     if command -v sha256sum &>/dev/null; then
