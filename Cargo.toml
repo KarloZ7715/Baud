@@ -78,3 +78,21 @@ assets = [
     ["assets/icons/hicolor/256x256/apps/baud.png", "usr/share/icons/hicolor/256x256/apps/baud.png", "644"],
     ["LICENSE", "usr/share/doc/baud/LICENSE", "644"],
 ]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/baud", dest = "/usr/bin/baud", mode = "755" },
+    { source = "assets/packaging/baud.desktop", dest = "/usr/share/applications/baud.desktop", mode = "644" },
+    { source = "assets/icons/hicolor/*/apps/baud.png", dest = "/usr/share/icons/hicolor/", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/doc/baud/LICENSE", mode = "644" },
+]
+
+[package.metadata.generate-rpm.requires]
+# Dependencias dlopen que no detecta el auto-req vía ldd
+libxkbcommon = "*"
+libwayland-client = "*"
+libX11 = "*"
+libXcursor = "*"
+libXi = "*"
+libXrandr = "*"
+fontconfig = "*"
