@@ -143,13 +143,14 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Instalar xvfb + deps X11
-        run: sudo apt-get update && sudo apt-get install -y xvfb libxkbcommon-x11-0
+      - name: Instalar xvfb + deps X11 + Mesa software
+        run: sudo apt-get update && sudo apt-get install -y xvfb libxkbcommon-x11-0 mesa-vulkan-drivers libegl1-mesa
 
       - name: Smoke X11 (sin Wayland)
         env:
           WAYLAND_DISPLAY: ""
           WAYLAND_SOCKET: ""
+          LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
           unset WAYLAND_DISPLAY WAYLAND_SOCKET || true
           chmod +x tools/linux_session_smoke.sh
