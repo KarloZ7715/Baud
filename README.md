@@ -6,7 +6,7 @@ A terminal emulator written from scratch in Rust. GPU-accelerated rendering, PTY
 
 ## Documentacion
 
-*(pendiente)*
+*(in development)*
 
 ## Experimental Installation (Linux x86_64)
 
@@ -24,5 +24,3 @@ Baud is pre-1.0 software. Windows, macOS, and other architectures are not availa
 Baud is released under the [Apache License, Version 2.0](LICENSE).
 
 ---
-
-*Creado: 2026-06-13*

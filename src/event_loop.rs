@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::ansi::Term;
 use crate::config::Config;
+use crate::diagnostics::consent::ConsentState;
 use crate::grid::{DEFAULT_COLS, DEFAULT_ROWS};
 use crate::pty::{self, PtyCommand, PtyCommandSender, SessionBackend, WakeSource};
 use crate::session::{Session, SessionId};
@@ -27,6 +28,38 @@ use std::os::fd::AsFd;
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
 const METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Resuelve el DSN de Sentry: override de config > variable de build > None.
+pub fn resolve_dsn(config: &Config) -> Option<String> {
+    config
+        .diagnostics
+        .reporting
+        .dsn
+        .clone()
+        .or_else(|| option_env!("BAUD_SENTRY_DSN").map(String::from))
+}
+
+/// Crea y registra el reporter si el consentimiento es `Accepted` y hay DSN.
+fn init_reporter_if_accepted(config: &Config) {
+    let consent = ConsentState::from_config(config.diagnostics.reporting.enabled);
+    if consent != ConsentState::Accepted {
+        tracing::info!("reporter: consentimiento = {:?}, sin red", consent);
+        return;
+    }
+
+    let dsn = resolve_dsn(config);
+    let Some(dsn) = dsn else {
+        tracing::info!("reporter: consentimiento aceptado pero sin DSN — modo noop");
+        return;
+    };
+
+    let install_id = crate::diagnostics::install_id::load_or_create_install_id();
+    let transport = crate::diagnostics::transport::UreqTransport::new();
+    let reporter =
+        crate::diagnostics::reporter::Reporter::new(Some(dsn), install_id, Box::new(transport));
+    crate::diagnostics::hooks::set_reporter(reporter.handle());
+    tracing::info!("reporter: activo, enviando a Sentry");
+}
 
 // ponytail: tope de bytes por pasada del drain; suelta el mutex del Term para la GUI.
 const DRAIN_MAX_BYTES_PER_PASS: usize = 256 * 1024;
@@ -659,11 +692,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let watchdog = EventLoopWatchdog::spawn();
-    tracing::info!(
-        "watchdog de event loop activo (telemetría de handlers, stall={}s)",
-        2
-    );
+    let watchdog = EventLoopWatchdog::spawn_if(app_config.diagnostics.watchdog);
+    if app_config.diagnostics.watchdog {
+        tracing::info!(
+            "watchdog de event loop activo (telemetría de handlers, stall={}s)",
+            2
+        );
+    }
+
+    // Inicializar reporter de errores si el consentimiento ya está aceptado.
+    init_reporter_if_accepted(&app_config);
 
     let mut app = App::new(
         vec![SessionHost::from_spawned(spawned)],

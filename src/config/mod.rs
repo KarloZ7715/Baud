@@ -66,6 +66,8 @@ pub struct Config {
     #[serde(default)]
     pub status: StatusConfig,
     #[serde(default)]
+    pub diagnostics: DiagnosticsConfig,
+    #[serde(default)]
     pub debug: DebugConfig,
     #[serde(default)]
     pub render: RenderConfig,
@@ -79,6 +81,31 @@ pub struct DebugConfig {
     /// Permite activar el contador de FPS con el atajo de teclado.
     #[serde(default)]
     pub fps_counter_enabled: bool,
+}
+
+/// Diagnósticos locales: watchdog y logging.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DiagnosticsConfig {
+    /// Activa el hilo watchdog del event loop. Requiere reinicio.
+    #[serde(default)]
+    pub watchdog: bool,
+    /// Nivel de log por defecto del target `baud`. Solo aplica si no hay
+    /// `RUST_LOG` en el entorno.
+    #[serde(default)]
+    pub log_level: Option<String>,
+    #[serde(default)]
+    pub reporting: ReportingConfig,
+}
+
+/// Configuración de reporte remoto de errores (Sentry).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ReportingConfig {
+    /// `None` = no se ha decidido aún; `Some(true)` = aceptado; `Some(false)` = rechazado.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// DSN opcional. Si no se define, se usa `BAUD_SENTRY_DSN` de build.
+    #[serde(default)]
+    pub dsn: Option<String>,
 }
 
 /// Configuración de render de la GUI.
@@ -344,6 +371,8 @@ struct RawConfig {
     #[serde(default)]
     status: StatusConfig,
     #[serde(default)]
+    diagnostics: DiagnosticsConfig,
+    #[serde(default)]
     debug: DebugConfig,
     #[serde(default)]
     render: RenderConfig,
@@ -400,6 +429,7 @@ impl From<RawConfig> for Config {
             panes: raw.panes,
             status: raw.status,
             debug: raw.debug,
+            diagnostics: raw.diagnostics,
             render: raw.render,
             keys: raw.keys,
         }
@@ -1622,5 +1652,46 @@ dim_alpha = true
         cfg.apply_to_term(&mut term);
         assert_eq!(term.cursor_style, CursorStyle::Bar);
         assert_eq!(term.cursor_color_override, None);
+    }
+
+    #[test]
+    fn test_diagnostics_defaults() {
+        let cfg = Config::default();
+        assert!(!cfg.diagnostics.watchdog);
+        assert!(cfg.diagnostics.log_level.is_none());
+        assert!(cfg.diagnostics.reporting.enabled.is_none());
+        assert!(cfg.diagnostics.reporting.dsn.is_none());
+    }
+
+    #[test]
+    fn test_diagnostics_parse() {
+        let toml = r#"
+[diagnostics]
+watchdog = true
+log_level = "info"
+
+[diagnostics.reporting]
+enabled = true
+dsn = "https://key@o0.ingest.sentry.io/123"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.diagnostics.watchdog);
+        assert_eq!(cfg.diagnostics.log_level.as_deref(), Some("info"));
+        assert_eq!(cfg.diagnostics.reporting.enabled, Some(true));
+        assert_eq!(
+            cfg.diagnostics.reporting.dsn.as_deref(),
+            Some("https://key@o0.ingest.sentry.io/123")
+        );
+    }
+
+    #[test]
+    fn test_diagnostics_reporting_disabled() {
+        let toml = r#"
+[diagnostics.reporting]
+enabled = false
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.diagnostics.reporting.enabled, Some(false));
+        assert!(cfg.diagnostics.reporting.dsn.is_none());
     }
 }

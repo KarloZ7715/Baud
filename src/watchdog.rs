@@ -190,6 +190,15 @@ pub struct EventLoopWatchdog {
 impl EventLoopWatchdog {
     /// Lanza el hilo de vigilancia. Debe llamarse una vez al arrancar la app.
     pub fn spawn() -> Self {
+        Self::spawn_if(true)
+    }
+
+    /// Lanza el hilo de vigilancia solo si `enabled` es `true`.
+    /// Si es `false`, devuelve una instancia noop sin hilo ni logs.
+    pub fn spawn_if(enabled: bool) -> Self {
+        if !enabled {
+            return Self::noop();
+        }
         let telemetry = Arc::new(LoopTelemetry::new());
         telemetry.ping();
         let tel = Arc::clone(&telemetry);

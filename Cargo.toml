@@ -14,7 +14,7 @@ categories = ["command-line-utilities"]
 [dependencies]
 winit = "0.30"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 vte = "0.15"
 wgpu = "29"
 glyphon = "0.11"
@@ -27,6 +27,8 @@ toml_edit = "0.22"
 dirs = "6"
 oklab = "1.1.2"
 arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+serde_json = "1"
+ureq = "3"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["term", "fs", "signal", "event", "poll"] }

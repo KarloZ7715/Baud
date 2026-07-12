@@ -252,6 +252,8 @@ pub struct App {
     copy_on_select_deadline: Option<Instant>,
     /// Selector interactivo de temas (exclusivo con copy mode).
     theme_picker: Option<ThemePickerState>,
+    /// Modal de consentimiento de primer arranque activo.
+    consent_prompt_active: bool,
     /// Estado del watcher de config (sync mtime tras persistir tema).
     config_watch: Arc<Mutex<WatchState>>,
     /// Texto provisional del IME (preedit) antes del commit.
@@ -359,6 +361,7 @@ impl App {
             gui_redraw_metrics: GuiRedrawMetrics::new(),
             copy_on_select_deadline: None,
             theme_picker: None,
+            consent_prompt_active: false,
             config_watch,
             preedit: String::new(),
             preedit_cursor: None,
@@ -1793,6 +1796,79 @@ impl App {
         }
     }
 
+    /// Verifica si debe mostrarse el modal de consentimiento de primer arranque.
+    fn check_first_run_consent(&mut self) {
+        // Saltar si la variable de entorno lo pide.
+        if std::env::var_os("BAUD_SKIP_CONSENT_UI").is_some_and(|v| v == "1") {
+            return;
+        }
+
+        // Si ya decidió, no mostrar modal.
+        if self.config.diagnostics.reporting.enabled.is_some() {
+            return;
+        }
+
+        self.consent_prompt_active = true;
+        if let Some(ref mut renderer) = self.renderer {
+            renderer.set_consent_active(true);
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Maneja teclas del modal de consentimiento.
+    /// Retorna `true` si la tecla fue consumida (Y/S/N).
+    fn handle_consent_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+        let key = match &event.logical_key {
+            winit::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("y") => Some(true),
+            winit::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("s") => Some(true),
+            winit::keyboard::Key::Character(c) if c.eq_ignore_ascii_case("n") => Some(false),
+            _ => None,
+        };
+
+        let accepted = match key {
+            Some(v) => v,
+            None => return false,
+        };
+
+        self.consent_prompt_active = false;
+        if let Some(ref mut renderer) = self.renderer {
+            renderer.set_consent_active(false);
+        }
+
+        // Persistir la decisión en config.toml
+        match crate::diagnostics::consent::persist_reporting_enabled(accepted) {
+            Ok(_) => {
+                tracing::info!("consentimiento persistido: enabled = {accepted}");
+            }
+            Err(e) => {
+                tracing::warn!("no se pudo persistir el consentimiento: {e}");
+            }
+        }
+
+        // Actualizar la config en memoria
+        self.config.diagnostics.reporting.enabled = Some(accepted);
+
+        // Si aceptó, crear y registrar el reporter
+        if accepted {
+            let dsn = crate::event_loop::resolve_dsn(&self.config);
+            if dsn.is_some() {
+                let install_id = crate::diagnostics::install_id::load_or_create_install_id();
+                let transport = crate::diagnostics::transport::UreqTransport::new();
+                let reporter = crate::diagnostics::reporter::Reporter::new(
+                    dsn,
+                    install_id,
+                    Box::new(transport),
+                );
+                crate::diagnostics::hooks::set_reporter(reporter.handle());
+                tracing::info!("reporter: activo tras consentimiento");
+            }
+        }
+
+        true
+    }
+
     fn toggle_theme_picker(&mut self) {
         if let Some(picker) = self.theme_picker.take() {
             self.cancel_theme_picker(picker);
@@ -2688,6 +2764,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         tracing::info!("renderer inicializado");
+
+        // Verificar si hay que mostrar el modal de consentimiento de primer arranque.
+        self.check_first_run_consent();
+
         clipboard::warm_up();
 
         let size = window.inner_size();
@@ -2854,10 +2934,15 @@ impl ApplicationHandler<UserEvent> for App {
                     .renderer
                     .as_ref()
                     .is_some_and(|r| r.theme_picker_active(picker));
+                let consent_active = self
+                    .renderer
+                    .as_ref()
+                    .is_some_and(|r| r.is_consent_active());
 
                 if !any_pane_dirty
                     && !status_needs_present
                     && !picker_active
+                    && !consent_active
                     && !search_active
                     && !self.fps_overlay_visible
                     && preedit_empty
@@ -3514,6 +3599,16 @@ impl ApplicationHandler<UserEvent> for App {
                     ctrl: self.modifiers.state().control_key(),
                     sup: self.modifiers.state().super_key(),
                 };
+
+                if self.consent_prompt_active {
+                    if self.handle_consent_key(&event) {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                        return;
+                    }
+                    return;
+                }
 
                 if self.theme_picker.is_some() {
                     if let Some(k) = winit_to_key(&event.logical_key) {

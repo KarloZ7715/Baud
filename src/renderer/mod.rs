@@ -165,6 +165,10 @@ pub struct Renderer {
     picker_footer_buffer: glyphon::Buffer,
     /// Buffer vacio solo para custom_glyphs de fondo (evita doble dibujo de fila 0).
     bg_buffer: glyphon::Buffer,
+    /// Buffer para el overlay de consentimiento de primer arranque.
+    consent_buffer: glyphon::Buffer,
+    /// Modal de consentimiento activo (bloquea el terminal hasta Sí/No).
+    consent_active: bool,
     // ponytail: cell_w y cell_h se calculan en new() y se actualizan en resize().
     // El renderer los usa para posicionar cada TextArea.
     pub cell_w: f32,
@@ -394,6 +398,9 @@ impl Renderer {
         let mut tab_close_buffer = glyphon::Buffer::new(&mut font_system, metrics);
         Self::configure_tab_buffer(&mut font_system, &mut tab_close_buffer, cell_w);
 
+        let mut consent_buffer = glyphon::Buffer::new(&mut font_system, metrics);
+        Self::configure_buffer(&mut font_system, &mut consent_buffer, cell_w);
+
         Self {
             device,
             queue,
@@ -411,6 +418,8 @@ impl Renderer {
             picker_detail_buffer,
             picker_footer_buffer,
             bg_buffer,
+            consent_buffer,
+            consent_active: false,
             cell_w,
             cell_h,
             status_active: false,
@@ -614,6 +623,11 @@ impl Renderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+
+        if self.consent_active {
+            self.render_consent_only(theme, frame, &view, encoder, t0, get_frame_us)?;
+            return Ok(Vec::new());
+        }
 
         if let Some(picker_state) = picker {
             self.render_picker_only(
@@ -1277,6 +1291,115 @@ impl Renderer {
         Ok(())
     }
 
+    /// Render exclusivo del modal de consentimiento (bloquea el terminal).
+    fn render_consent_only(
+        &mut self,
+        theme: &ThemeConfig,
+        frame: wgpu::SurfaceTexture,
+        view: &wgpu::TextureView,
+        mut encoder: wgpu::CommandEncoder,
+        t0: Instant,
+        get_frame_us: f64,
+    ) -> Result<(), String> {
+        let t_build = Instant::now();
+        self.contrast_cache.clear();
+        let metrics = glyphon::Metrics::new(self.font_size, self.cell_h);
+        self.consent_buffer
+            .set_metrics(&mut self.font_system, metrics);
+        Self::configure_buffer(&mut self.font_system, &mut self.consent_buffer, self.cell_w);
+
+        crate::diagnostics::consent_overlay::fill_consent_buffer(
+            &mut self.consent_buffer,
+            &mut self.font_system,
+            &self.font_family,
+            self.config.width as f32,
+            self.config.height as f32,
+        );
+
+        let (fr, fg, fb) = crate::config::parse_hex(&theme.foreground);
+        let default_fg = glyphon::Color::rgb(fr, fg, fb);
+
+        let consent_area = glyphon::TextArea {
+            buffer: &self.consent_buffer,
+            left: 40.0,
+            top: 100.0,
+            scale: 1.0,
+            bounds: glyphon::TextBounds {
+                left: 0,
+                top: 0,
+                right: self.config.width as i32,
+                bottom: self.config.height as i32,
+            },
+            default_color: default_fg,
+            custom_glyphs: &[],
+        };
+
+        let build_us = t_build.elapsed().as_secs_f64() * 1_000_000.0;
+
+        let t_prepare = Instant::now();
+        CellRenderer::prepare(
+            &[],
+            &mut self.font_system,
+            &mut self.swash_cache,
+            &self.glyph_cache,
+            &mut self.text_renderer,
+            &self.device,
+            &self.queue,
+            &mut self.atlas,
+            &self.viewport,
+            &self.bg_buffer,
+            self.config.width,
+            self.config.height,
+            default_fg,
+            &[consent_area],
+        )?;
+        let prepare_us = t_prepare.elapsed().as_secs_f64() * 1_000_000.0;
+
+        let t_gpu = Instant::now();
+        let (bg_r, bg_g, bg_b) = crate::config::parse_hex(&theme.background);
+        let clear_color = frame_clear_color((bg_r, bg_g, bg_b), 1.0);
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("consent pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut render_pass)
+                .map_err(|e| format!("error al renderizar consentimiento: {e}"))?;
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+        frame.present();
+        let gpu_us = t_gpu.elapsed().as_secs_f64() * 1_000_000.0;
+
+        let total_us = t0.elapsed().as_secs_f64() * 1_000_000.0;
+        self.frame_count += 1;
+        if self.frame_count.is_multiple_of(30) {
+            tracing::info!(
+                "[RENDER_PERF] frame={} mode=consent total={:.0}us get_frame={:.0}us build={:.0}us prepare={:.0}us gpu={:.0}us",
+                self.frame_count,
+                total_us,
+                get_frame_us,
+                build_us,
+                prepare_us,
+                gpu_us,
+            );
+        }
+
+        Ok(())
+    }
+
     /// El overlay de status esta activo (se compone si hay frame por otra razón).
     pub fn status_overlay_active(&self) -> bool {
         self.status_active
@@ -1304,6 +1427,16 @@ impl Renderer {
     /// Requiere redraw continuo mientras el theme picker esta activo.
     pub fn theme_picker_active(&self, picker: Option<&ThemePickerState>) -> bool {
         picker.is_some()
+    }
+
+    /// Activa o desactiva el modal de consentimiento.
+    pub fn set_consent_active(&mut self, active: bool) {
+        self.consent_active = active;
+    }
+
+    /// Modal de consentimiento activo (requiere redraw continuo).
+    pub fn is_consent_active(&self) -> bool {
+        self.consent_active
     }
 
     pub fn search_overlay_active(&self, term: &Term) -> bool {
