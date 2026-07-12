@@ -184,6 +184,8 @@ pub struct Renderer {
     /// Texto e icono activos para rellenar el buffer tras resize.
     status_message: Option<String>,
     status_icon: String,
+    /// True si el overlay_buffer debe re-shapearse (mensaje/icono/resize).
+    status_overlay_dirty: bool,
     frame_count: u64,
     /// Rango normalizado de seleccion del frame anterior (start_row, start_col,
     /// end_row, end_col). Cuando cambia, invalida damage en filas afectadas.
@@ -304,7 +306,7 @@ impl Renderer {
             self.cell_w,
         );
         if self.status_active {
-            self.refill_status_overlay_buffer();
+            self.status_overlay_dirty = true;
         }
     }
 
@@ -418,6 +420,7 @@ impl Renderer {
             status_pill_cols: 0,
             status_message: None,
             status_icon: String::new(),
+            status_overlay_dirty: false,
             frame_count: 0,
             prev_selection_bounds: None,
             prev_scrollback_offset: 0,
@@ -715,14 +718,18 @@ impl Renderer {
                 if start.elapsed() > std::time::Duration::from_millis(self.duration_ms) {
                     self.status_active = false;
                     self.status_start = None;
+                    self.status_message = None;
+                    self.status_icon.clear();
+                    self.status_overlay_dirty = false;
                 }
             }
         }
 
         let cell_w = self.cell_w;
         let cell_h = self.cell_h;
-        if self.status_active {
+        if self.status_active && self.status_overlay_dirty {
             self.refill_status_overlay_buffer();
+            self.status_overlay_dirty = false;
         }
         let mut extra_areas: Vec<glyphon::TextArea<'_>> = Vec::with_capacity(8);
         if let Some(tab_layout) = tabs.filter(|l| !l.segments.is_empty()) {
@@ -1271,6 +1278,15 @@ impl Renderer {
         self.status_active
     }
 
+    /// Instant en que el status debe ocultarse (`None` si inactivo o sin auto-dismiss).
+    pub fn status_expiry(&self) -> Option<Instant> {
+        if !self.status_active || self.duration_ms == 0 {
+            return None;
+        }
+        self.status_start
+            .map(|start| start + std::time::Duration::from_millis(self.duration_ms))
+    }
+
     /// Requiere redraw continuo mientras el theme picker esta activo.
     pub fn theme_picker_active(&self, picker: Option<&ThemePickerState>) -> bool {
         picker.is_some()
@@ -1293,6 +1309,7 @@ impl Renderer {
             self.status_start = None;
             self.status_message = None;
             self.status_icon.clear();
+            self.status_overlay_dirty = false;
             return;
         }
 
@@ -1304,7 +1321,8 @@ impl Renderer {
         self.duration_ms = status_cfg.duration_ms;
         self.status_start = Some(Instant::now());
         self.status_active = true;
-        self.refill_status_overlay_buffer();
+        // Shape en el próximo render, no en el hilo de input (copy/paste).
+        self.status_overlay_dirty = true;
     }
 
     fn refill_status_overlay_buffer(&mut self) {

@@ -8,6 +8,7 @@ mod caps;
 mod cli_fallback;
 mod select;
 
+use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::thread;
 
@@ -194,14 +195,27 @@ pub fn set(text: &str, primary: bool) {
     }
 }
 
-/// Encola el set en un hilo dedicado para no bloquear drain/GUI.
+/// Encola el set en un worker dedicado (sin crear un hilo por operación).
 ///
-/// Usar desde el hilo drain tras liberar `Mutex<Term>` (OSC 52 write).
+/// Usar desde el hilo GUI/drain para no bloquear el event loop.
 pub fn set_detached(text: String, primary: bool) {
-    let _ = thread::Builder::new()
-        .name("baud-clipboard".into())
-        .spawn(move || set(&text, primary));
+    let tx = SET_WORKER.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<(String, bool)>();
+        let _ = thread::Builder::new()
+            .name("baud-clipboard".into())
+            .spawn(move || {
+                while let Ok((text, primary)) = rx.recv() {
+                    set(&text, primary);
+                }
+            });
+        tx
+    });
+    if let Err(e) = tx.send((text, primary)) {
+        tracing::warn!("clipboard::set_detached: worker caído: {e}");
+    }
 }
+
+static SET_WORKER: OnceLock<mpsc::Sender<(String, bool)>> = OnceLock::new();
 
 /// Lee texto del clipboard o de la primary selection. Vacío si falla.
 pub fn get(primary: bool) -> String {

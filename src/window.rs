@@ -2498,6 +2498,21 @@ impl ApplicationHandler<UserEvent> for App {
             ));
             return;
         }
+        // Despertar al expirar el status para ocultarlo sin esperar input.
+        let mut wake_at: Option<Instant> = None;
+        if let Some(deadline) = self.renderer.as_ref().and_then(|r| r.status_expiry()) {
+            let now = Instant::now();
+            if now >= deadline {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_status("");
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            } else {
+                wake_at = Some(deadline);
+            }
+        }
         if self.fps_overlay_visible && self.config.debug.fps_counter_enabled {
             let now = Instant::now();
             if let Some(window) = &self.window {
@@ -2517,13 +2532,18 @@ impl ApplicationHandler<UserEvent> for App {
                 return;
             }
         }
-        let Some(deadline) = self.copy_on_select_deadline else {
-            return;
-        };
-        if Instant::now() >= deadline {
-            self.copy_on_select_deadline = None;
-            self.finish_copy_on_select();
-        } else {
+        if let Some(deadline) = self.copy_on_select_deadline {
+            if Instant::now() >= deadline {
+                self.copy_on_select_deadline = None;
+                self.finish_copy_on_select();
+            } else {
+                wake_at = Some(match wake_at {
+                    Some(existing) => existing.min(deadline),
+                    None => deadline,
+                });
+            }
+        }
+        if let Some(deadline) = wake_at {
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
     }
