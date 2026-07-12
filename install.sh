@@ -56,9 +56,14 @@ detect_os() {
 }
 
 get_latest_version() {
-    curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null \
-        | grep '"tag_name":' \
-        | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/'
+    json=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest") || {
+        print_error "Failed to fetch latest release info from GitHub"
+    }
+    version=$(echo "$json" | grep '"tag_name":' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
+    if [ -z "$version" ]; then
+        print_error "Could not determine latest version from GitHub API"
+    fi
+    echo "$version"
 }
 
 ensure_in_path() {
@@ -88,7 +93,7 @@ download_and_install() {
 
     print_message "Downloading Baud ${version} (${os}/${arch})..."
     tmpdir=$(mktemp -d)
-    trap 'rm -rf -- "$tmpdir"' EXIT
+    trap 'rm -rf -- "$tmpdir"' EXIT INT TERM HUP
 
     if ! curl -fsSL --retry 3 -o "${tmpdir}/${tarball}" "$download_url"; then
         print_error "Failed to download ${tarball} from ${download_url}"
@@ -97,8 +102,12 @@ download_and_install() {
     print_message "Extracting to ${INSTALL_DIR}..."
     mkdir -p "$INSTALL_DIR"
     tar xzf "${tmpdir}/${tarball}" -C "$INSTALL_DIR"
-    chmod +x "${INSTALL_DIR}/${PROGRAM_NAME}"
 
+    if [ ! -f "${INSTALL_DIR}/${PROGRAM_NAME}" ]; then
+        print_error "Binary not found after extraction. The tarball may have an unexpected structure."
+    fi
+
+    chmod +x "${INSTALL_DIR}/${PROGRAM_NAME}"
     print_message "Baud ${version} installed to ${INSTALL_DIR}/${PROGRAM_NAME}"
 }
 

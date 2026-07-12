@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Construye un AppImage de Baud usando linuxdeploy.
-# Requisitos: cargo build --release previo, linuxdeploy descargable.
-# Uso: ./tools/packaging/build_appimage.sh [--version X.Y.Z]
+# Builds a Baud AppImage using linuxdeploy.
+# Prerequisites: cargo build --release, linuxdeploy (auto-downloaded if missing).
+# Usage: ./tools/packaging/build_appimage.sh [--version X.Y.Z]
 
 set -Eeuo pipefail
 
@@ -25,25 +25,38 @@ if [[ -z "$VERSION" ]]; then
 fi
 
 if [[ ! -f "$BINARY" ]]; then
-    echo "Error: binario no encontrado en $BINARY" >&2
-    echo "Ejecuta 'cargo build --release' primero." >&2
+    echo "Error: release binary not found at $BINARY" >&2
+    echo "Run 'cargo build --release' first." >&2
     exit 1
 fi
 
 if [[ ! -f "$DESKTOP_FILE" ]]; then
-    echo "Error: archivo .desktop no encontrado en $DESKTOP_FILE" >&2
+    echo "Error: .desktop file not found at $DESKTOP_FILE" >&2
     exit 1
 fi
 
 if [[ ! -f "$ICON_256" ]]; then
-    echo "Error: icono 256x256 no encontrado en $ICON_256" >&2
+    echo "Error: 256x256 icon not found at $ICON_256" >&2
     exit 1
 fi
 
 APPDIR="$(mktemp -d)"
-trap 'rm -rf "$APPDIR"' EXIT
+trap 'rm -rf -- "$APPDIR"' EXIT
 
-echo "Creando AppDir en $APPDIR..."
+ICON_48="$REPO_ROOT/assets/icons/hicolor/48x48/apps/baud.png"
+LICENSE_FILE="$REPO_ROOT/LICENSE"
+
+if [[ ! -f "$ICON_48" ]]; then
+    echo "Error: 48x48 icon not found at $ICON_48" >&2
+    exit 1
+fi
+
+if [[ ! -f "$LICENSE_FILE" ]]; then
+    echo "Error: LICENSE file not found at $LICENSE_FILE" >&2
+    exit 1
+fi
+
+echo "Creating AppDir at $APPDIR..."
 
 mkdir -p "$APPDIR/usr/bin"
 mkdir -p "$APPDIR/usr/share/applications"
@@ -53,23 +66,37 @@ mkdir -p "$APPDIR/usr/share/doc/baud"
 
 cp "$BINARY" "$APPDIR/usr/bin/baud"
 cp "$DESKTOP_FILE" "$APPDIR/usr/share/applications/baud.desktop"
-cp "$REPO_ROOT/assets/icons/hicolor/48x48/apps/baud.png" "$APPDIR/usr/share/icons/hicolor/48x48/apps/baud.png"
+cp "$ICON_48" "$APPDIR/usr/share/icons/hicolor/48x48/apps/baud.png"
 cp "$ICON_256" "$APPDIR/usr/share/icons/hicolor/256x256/apps/baud.png"
-cp "$REPO_ROOT/LICENSE" "$APPDIR/usr/share/doc/baud/LICENSE"
+cp "$LICENSE_FILE" "$APPDIR/usr/share/doc/baud/LICENSE"
 
 LINUXDEPLOY="$REPO_ROOT/tools/packaging/.cache/linuxdeploy-x86_64.AppImage"
 if [[ ! -f "$LINUXDEPLOY" ]]; then
-    echo "Descargando linuxdeploy..."
+    echo "Downloading linuxdeploy..."
     mkdir -p "$(dirname "$LINUXDEPLOY")"
     curl -fSL --retry 3 -o "$LINUXDEPLOY" "$LINUXDEPLOY_URL"
+    if ! echo "${LINUXDEPLOY_CHECKSUM#sha256:}  $LINUXDEPLOY" | sha256sum -c --status; then
+        echo "Error: linuxdeploy checksum mismatch" >&2
+        rm -f "$LINUXDEPLOY"
+        exit 1
+    fi
     chmod +x "$LINUXDEPLOY"
 fi
 
-export ARCH=x86_64
+ARCH="$(uname -m)"
+case "$ARCH" in
+    x86_64|amd64) ARCH="x86_64" ;;
+    aarch64|arm64) ARCH="aarch64" ;;
+    *)
+        echo "Error: unsupported architecture for AppImage: $ARCH" >&2
+        exit 1
+        ;;
+esac
+export ARCH="$ARCH"
 export LINUXDEPLOY_OUTPUT_PREFIX="baud"
 export LINUXDEPLOY_OUTPUT_VERSION="$VERSION"
 
-echo "Ejecutando linuxdeploy..."
+echo "Running linuxdeploy..."
 env APPIMAGE_EXTRACT_AND_RUN=1 "$LINUXDEPLOY" \
     --appdir "$APPDIR" \
     --executable "$APPDIR/usr/bin/baud" \
@@ -77,24 +104,24 @@ env APPIMAGE_EXTRACT_AND_RUN=1 "$LINUXDEPLOY" \
     --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/baud.png" \
     --output appimage
 
-APPIMAGE_NAME="baud-${VERSION}-x86_64.AppImage"
+APPIMAGE_NAME="baud-${VERSION}-${ARCH}.AppImage"
 if [[ -f "$APPIMAGE_NAME" ]]; then
     mkdir -p "$DIST_DIR"
     mv -f "$APPIMAGE_NAME" "$DIST_DIR/$APPIMAGE_NAME"
-    echo "AppImage generado: $DIST_DIR/$APPIMAGE_NAME"
+    echo "AppImage created: $DIST_DIR/$APPIMAGE_NAME"
 
     if command -v sha256sum &>/dev/null; then
-        (cd "$DIST_DIR" && sha256sum "$APPIMAGE_NAME" >> SHA256SUMS)
+        (cd "$DIST_DIR" && sha256sum "$APPIMAGE_NAME" > SHA256SUMS)
     fi
 
-    echo "Verificando ausencia de libGL/libEGL/libvulkan en AppDir..."
+    echo "Checking for bundled GPU libraries in AppDir..."
     if find "$APPDIR" \( -name 'libGL*' -o -name 'libEGL*' -o -name 'libvulkan*' \) | grep -q .; then
-        echo "ADVERTENCIA: se encontraron bibliotecas GPU en AppDir que no deberían estar empaquetadas:" >&2
+        echo "WARNING: GPU libraries found in AppDir that should not be bundled:" >&2
         find "$APPDIR" \( -name 'libGL*' -o -name 'libEGL*' -o -name 'libvulkan*' \) >&2
     else
-        echo "OK: sin bibliotecas GL/Vulkan empaquetadas."
+        echo "OK: no GL/Vulkan libraries bundled."
     fi
 else
-    echo "Error: no se generó el AppImage." >&2
+    echo "Error: AppImage was not created." >&2
     exit 1
 fi
