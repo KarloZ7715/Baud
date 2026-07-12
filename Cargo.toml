@@ -3,7 +3,7 @@ name = "baud"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.87.0"
-description = "A fast, GPU-accelerated, cross-platform terminal emulator"
+description = "A fast, feature-rich, GPU-accelerated, cross-platform terminal emulator"
 license = "Apache-2.0"
 repository = "https://github.com/KarloZ7715/Baud"
 readme = "README.md"
@@ -68,7 +68,7 @@ depends = "$auto, libxkbcommon0, libwayland-client0, libx11-6, libxcursor1, libx
 section = "utils"
 priority = "optional"
 extended-description = """\
-A fast, GPU-accelerated, cross-platform terminal emulator \
+A fast, feature-rich, GPU-accelerated, cross-platform terminal emulator \
 with multi-session support, tabs, split panes, themes, and clipboard integration.\
 """
 assets = [
