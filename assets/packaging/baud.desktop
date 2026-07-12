@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Baud
+Comment=Emulador de terminal moderno escrito en Rust
+Exec=baud
+Icon=baud
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;emulator;console;shell;

@@ -28,7 +28,9 @@ Emulador de terminal escrito en Rust desde cero. Proyecto personal para aprender
 
 ## Licencia
 
-*(pendiente)*
+Baud se distribuye bajo la [Licencia Apache 2.0](LICENSE).
+
+Copyright 2026 Carlos Canabal Cordero.
 
 ---
 

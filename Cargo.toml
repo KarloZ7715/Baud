@@ -1,8 +1,15 @@
 [package]
 name = "baud"
-version = "0.0.5"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.87.0"
+description = "Emulador de terminal moderno escrito en Rust con renderizado por GPU"
+license = "Apache-2.0"
+repository = "https://github.com/KarloZ7715/Baud"
+readme = "README.md"
+authors = ["Carlos Canabal Cordero <carloscc@protonmail.com>"]
+keywords = ["terminal", "emulator", "gpu", "wgpu"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 winit = "0.30"
