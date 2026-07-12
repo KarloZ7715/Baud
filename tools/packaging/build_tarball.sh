@@ -39,7 +39,7 @@ TARBALL_NAME="baud_${OS}_${ARCH}.tar.gz"
 echo "Creating tarball ${TARBALL_NAME}..."
 
 mkdir -p "$DIST_DIR"
-tar czf "$DIST_DIR/$TARBALL_NAME" -C "$(dirname "$BINARY")" "$(basename "$BINARY")"
+tar czf "$DIST_DIR/$TARBALL_NAME" -C "$(dirname "$BINARY")" -- "$(basename "$BINARY")"
 
 echo "Tarball created: $DIST_DIR/$TARBALL_NAME"
 

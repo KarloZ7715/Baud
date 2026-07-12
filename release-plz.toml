@@ -1,0 +1,30 @@
+[workspace]
+git_only = true
+publish = false
+release_always = false
+git_release_enable = false
+git_tag_name = "v{{ version }}"
+pr_branch_prefix = "release-plz-"
+release_commits = "^(feat|fix|perf|security)(\\([^)]+\\))?:"
+features_always_increment_minor = false
+
+[changelog]
+header = """# Changelog
+
+All user-facing changes are documented in this file.
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and Baud follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+"""
+trim = true
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+sort_commits = "oldest"
+commit_parsers = [
+  { message = "^(feat|fix)\\(packaging\\):", group = "Packaging" },
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^perf", group = "Performance" },
+  { message = "^security", group = "Security" },
+  { message = "^(docs|test|ci|build|chore|refactor)(\\([^)]+\\))?:", skip = true },
+  { message = "^.*", skip = true },
+]

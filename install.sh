@@ -28,14 +28,8 @@ detect_architecture() {
         x86_64|amd64)
             echo "x86_64"
             ;;
-        aarch64|arm64)
-            echo "arm64"
-            ;;
-        i386|i686)
-            echo "i386"
-            ;;
         *)
-            print_error "Unsupported architecture: $arch"
+            print_error "Unsupported architecture: $arch (Baud currently supports Linux x86_64 only)"
             ;;
     esac
 }
@@ -46,11 +40,8 @@ detect_os() {
         Linux)
             echo "Linux"
             ;;
-        Darwin)
-            echo "Darwin"
-            ;;
         *)
-            print_error "Unsupported operating system: $os"
+            print_error "Unsupported operating system: $os (Baud currently supports Linux x86_64 only)"
             ;;
     esac
 }
@@ -90,24 +81,63 @@ download_and_install() {
 
     tarball="baud_${os}_${arch}.tar.gz"
     download_url="https://github.com/${GITHUB_REPO}/releases/download/${version}/${tarball}"
+    checksum_url="https://github.com/${GITHUB_REPO}/releases/download/${version}/SHA256SUMS"
 
     print_message "Downloading Baud ${version} (${os}/${arch})..."
     tmpdir=$(mktemp -d)
-    trap 'rm -rf -- "$tmpdir"' EXIT INT TERM HUP
+    staged_binary=""
+    cleanup() {
+        rm -rf -- "$tmpdir"
+        if [ -n "$staged_binary" ]; then
+            rm -f -- "$staged_binary"
+        fi
+    }
+    trap cleanup EXIT INT TERM HUP
 
     if ! curl -fsSL --retry 3 -o "${tmpdir}/${tarball}" "$download_url"; then
         print_error "Failed to download ${tarball} from ${download_url}"
     fi
 
-    print_message "Extracting to ${INSTALL_DIR}..."
-    mkdir -p "$INSTALL_DIR"
-    tar xzf "${tmpdir}/${tarball}" -C "$INSTALL_DIR"
+    if ! curl -fsSL --retry 3 -o "${tmpdir}/SHA256SUMS" "$checksum_url"; then
+        print_error "Failed to download SHA256SUMS from ${checksum_url}"
+    fi
 
-    if [ ! -f "${INSTALL_DIR}/${PROGRAM_NAME}" ]; then
+    checksum_count=$(awk -v asset="$tarball" '$2 == asset { count++ } END { print count + 0 }' "${tmpdir}/SHA256SUMS")
+    if [ "$checksum_count" -ne 1 ]; then
+        print_error "SHA256SUMS must contain exactly one checksum for ${tarball}"
+    fi
+
+    expected_checksum=$(awk -v asset="$tarball" '$2 == asset { print $1 }' "${tmpdir}/SHA256SUMS")
+    print_message "Verifying checksum..."
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        print_error "sha256sum is required for checksum verification"
+    fi
+
+    if ! (cd "$tmpdir" && printf '%s  %s\n' "$expected_checksum" "$tarball" | sha256sum -c - >/dev/null); then
+        print_error "Checksum verification failed for ${tarball}"
+    fi
+
+    tar_entries=$(tar tzf "${tmpdir}/${tarball}")
+    if [ "$tar_entries" != "$PROGRAM_NAME" ]; then
+        print_error "Unexpected tarball layout. Expected only ${PROGRAM_NAME} at the archive root."
+    fi
+
+    mkdir -p "${tmpdir}/extract"
+    if ! tar xzf "${tmpdir}/${tarball}" -C "${tmpdir}/extract"; then
+        print_error "Failed to extract ${tarball}"
+    fi
+
+    if [ ! -f "${tmpdir}/extract/${PROGRAM_NAME}" ]; then
         print_error "Binary not found after extraction. The tarball may have an unexpected structure."
     fi
 
-    chmod +x "${INSTALL_DIR}/${PROGRAM_NAME}"
+    print_message "Installing to ${INSTALL_DIR}..."
+    mkdir -p "$INSTALL_DIR"
+    staged_binary="${INSTALL_DIR}/.${PROGRAM_NAME}.tmp.$$"
+    cp "${tmpdir}/extract/${PROGRAM_NAME}" "$staged_binary"
+    chmod 755 "$staged_binary"
+    mv -f "$staged_binary" "${INSTALL_DIR}/${PROGRAM_NAME}"
+    staged_binary=""
     print_message "Baud ${version} installed to ${INSTALL_DIR}/${PROGRAM_NAME}"
 }
 
