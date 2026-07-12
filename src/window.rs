@@ -21,6 +21,7 @@ use crate::event_loop::BlinkFocus;
 use crate::grid::Cell;
 use crate::input::actions::{normalize_binding_key, Action, Keybindings};
 use crate::input::keymap::{self, Key as KKey, KeyEventKind, KeyModes, Mods};
+use crate::input::wheel::{self, WheelIntent, WheelOwnerHint};
 use crate::layout::{Rect as LayoutRect, TabLayout};
 use crate::pty::PtyCommand;
 use crate::renderer::{
@@ -36,7 +37,6 @@ use winit::application::ApplicationHandler;
 use winit::event::ElementState;
 use winit::event::Ime;
 use winit::event::MouseButton;
-use winit::event::MouseScrollDelta;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::event_loop::ControlFlow;
@@ -286,6 +286,8 @@ pub struct App {
     blink_focus: Arc<BlinkFocus>,
     /// Quirks de display resueltos una vez en `resumed`.
     display_quirks: DisplayQuirks,
+    /// Acumulador residual para eventos de rueda (PixelDelta fraccionarios).
+    wheel_residual: f32,
 }
 
 fn allowed_open_url(url: &str) -> bool {
@@ -374,6 +376,7 @@ impl App {
             fps_overlay_visible: false,
             blink_focus,
             display_quirks: DisplayQuirks::DEFAULT,
+            wheel_residual: 0.0,
         }
     }
 
@@ -3365,22 +3368,66 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => match self.try_should_forward_mouse_to_app() {
-                None => {
-                    self.watchdog.note_term_lock_busy();
+            WindowEvent::MouseWheel { delta, .. } => {
+                let owner_hint = match self.try_should_forward_mouse_to_app() {
+                    None => {
+                        self.watchdog.note_term_lock_busy();
+                        return;
+                    }
+                    Some(true) => WheelOwnerHint::App,
+                    Some(false) => WheelOwnerHint::Host,
+                };
+
+                let cell_h = self.renderer.as_ref().map(|r| r.cell_h).unwrap_or(0.0);
+                let lines = wheel::lines_from_delta(&delta, cell_h, &mut self.wheel_residual);
+
+                let Ok(guard) = self.focused_term().try_lock() else {
+                    return;
+                };
+                let alt_screen = guard.alt_screen;
+                let app_cursor_keys = guard.app_cursor_keys;
+                drop(guard);
+
+                let intent = wheel::resolve(
+                    owner_hint,
+                    alt_screen,
+                    lines,
+                    self.config.scrollback.multiplier,
+                    self.config.scrollback.faux_multiplier,
+                );
+
+                match intent {
+                    WheelIntent::None => {}
+                    WheelIntent::ForwardReport { button } => {
+                        self.forward_mouse_button(button, false);
+                    }
+                    WheelIntent::LocalLines(n) => {
+                        self.scroll_lines(n);
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
+                    WheelIntent::FauxLines { up, count } => {
+                        let modes = if app_cursor_keys {
+                            KeyModes {
+                                app_cursor_keys: true,
+                                ..Default::default()
+                            }
+                        } else {
+                            KeyModes::default()
+                        };
+                        let key = if up { KKey::Up } else { KKey::Down };
+                        if let Some(bytes) = keymap::encode_key(key, Mods::NONE, modes) {
+                            for _ in 0..count {
+                                self.send_pty_bytes(bytes.clone());
+                            }
+                        }
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                    }
                 }
-                Some(true) => {
-                    let button = match delta {
-                        MouseScrollDelta::LineDelta(_, y) if y > 0.0 => 64,
-                        MouseScrollDelta::LineDelta(_, y) if y < 0.0 => 65,
-                        MouseScrollDelta::PixelDelta(pos) if pos.y > 0.0 => 64,
-                        MouseScrollDelta::PixelDelta(pos) if pos.y < 0.0 => 65,
-                        _ => return,
-                    };
-                    self.forward_mouse_button(button, false);
-                }
-                Some(false) => {}
-            },
+            }
             WindowEvent::Ime(ime) => match ime {
                 Ime::Commit(text) => {
                     self.send_input(text.into_bytes());

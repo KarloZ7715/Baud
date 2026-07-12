@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod keymap;
+pub mod wheel;
 
 /// Filtra bytes problematicos (ESC 0x1B, ETX 0x03) del texto pegado.
 /// Retorna Vec<u8> con los bytes filtrados, listos para enviar al PTY.

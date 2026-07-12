@@ -528,10 +528,26 @@ pub struct ScrollbackConfig {
     pub lines: usize,
     #[serde(default)]
     pub unlimited: bool,
+    /// Multiplicador de velocidad para scroll local con rueda (líneas por tick).
+    /// Por defecto 3.0.
+    #[serde(default = "default_multiplier")]
+    pub multiplier: f32,
+    /// Multiplicador para scroll sintético en pantalla alterna (flechas por tick).
+    /// Por defecto 3.0.
+    #[serde(default = "default_faux_multiplier")]
+    pub faux_multiplier: f32,
 }
 
 fn default_scrollback_lines() -> usize {
     10_000
+}
+
+fn default_multiplier() -> f32 {
+    3.0
+}
+
+fn default_faux_multiplier() -> f32 {
+    3.0
 }
 
 impl Default for ScrollbackConfig {
@@ -539,6 +555,8 @@ impl Default for ScrollbackConfig {
         Self {
             lines: default_scrollback_lines(),
             unlimited: false,
+            multiplier: default_multiplier(),
+            faux_multiplier: default_faux_multiplier(),
         }
     }
 }
@@ -1350,11 +1368,24 @@ login = true
         let cfg = Config::default();
         assert_eq!(cfg.scrollback.lines, 10000);
         assert!(!cfg.scrollback.unlimited);
+        assert!((cfg.scrollback.multiplier - 3.0).abs() < f32::EPSILON);
+        assert!((cfg.scrollback.faux_multiplier - 3.0).abs() < f32::EPSILON);
 
         let toml = "[scrollback]\nlines = 5000\nunlimited = true\n";
         let parsed: Config = toml::from_str(toml).unwrap();
         assert_eq!(parsed.scrollback.lines, 5000);
         assert!(parsed.scrollback.unlimited);
+        // Valores por defecto se mantienen si no se sobreescriben
+        assert!((parsed.scrollback.multiplier - 3.0).abs() < f32::EPSILON);
+        assert!((parsed.scrollback.faux_multiplier - 3.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_scrollback_multipliers_from_toml() {
+        let toml = "[scrollback]\nmultiplier = 5.0\nfaux_multiplier = 2.5\n";
+        let parsed: Config = toml::from_str(toml).unwrap();
+        assert!((parsed.scrollback.multiplier - 5.0).abs() < f32::EPSILON);
+        assert!((parsed.scrollback.faux_multiplier - 2.5).abs() < f32::EPSILON);
     }
 
     #[test]
