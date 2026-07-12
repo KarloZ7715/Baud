@@ -12,8 +12,8 @@ BINARY="$REPO_ROOT/target/release/baud"
 DESKTOP_FILE="$REPO_ROOT/assets/packaging/baud.desktop"
 ICON_256="$REPO_ROOT/assets/icons/hicolor/256x256/apps/baud.png"
 
-LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/2.0.0-alpha-1-20241106/linuxdeploy-x86_64.AppImage"
-LINUXDEPLOY_CHECKSUM="sha256:93be974999444d69b27f37bb81a38033acf2e4e0b28b15210ff8a7e4c96a05c8"
+LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage"
+LINUXDEPLOY_CHECKSUM="sha256:c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d"
 
 VERSION="${BAUD_VERSION:-}"
 if [[ -z "$VERSION" ]]; then
