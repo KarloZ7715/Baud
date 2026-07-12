@@ -1,23 +1,33 @@
 //! First-run consent blocking overlay.
 //!
-//! Shows a centered modal with explanation and Yes/No buttons. PTY input
-//! is blocked until the user chooses. Keys: Y/S = Yes, N = No, Esc/others = ignored.
+//! Shows a centered modal with explanation and Yes/No options. PTY input
+//! is blocked until the user chooses. Keys: Y = Yes, N = No. Others ignored.
 
-/// Consent modal text.
-pub const CONSENT_TITLE: &str = "Error Reporting (optional)";
+/// Consent modal text. Follows informed-consent best practices:
+/// transparent about what is sent, explicit about what is not, simple language.
+pub const CONSENT_TITLE: &str = "Help Improve Baud";
 
 pub const CONSENT_BODY: &str = concat!(
-    "Baud can send crash data from the emulator to the developers (Sentry):\n",
-    "crashes, panics, errors, and technical warnings, plus the version\n",
-    "and OS. What you type and your command output are never sent.\n",
+    "Baud can automatically send crash and error reports when something\n",
+    "goes wrong. These reports help the developers identify and fix bugs\n",
+    "faster, making the terminal more reliable for everyone.\n",
     "\n",
-    "You must choose an option to continue."
+    "Reports include: the type of error, a technical stack trace, and\n",
+    "basic system information such as your OS version.\n",
+    "\n",
+    "Reports do NOT include: anything you type in the terminal, the\n",
+    "output of your commands, or any personal data.\n",
+    "\n",
+    "Reports are sent to Sentry, an industry-standard error tracking\n",
+    "service used by the Baud project.\n",
+    "\n",
+    "You can change this decision at any time in the configuration file."
 );
 
-pub const CONSENT_BUTTONS: &str = "[ Yes, send reports ]    [ No, thanks ]";
+pub const CONSENT_BUTTONS: &str = "[ Yes, send crash reports ]    [ No, thanks ]";
 
 pub const CONSENT_HINT: &str =
-    "(You can change this later in config.toml → diagnostics.reporting.enabled)";
+    "You can change this later: config.toml → [diagnostics.reporting] enabled = true/false";
 
 /// Fills the consent buffer with the modal text.
 pub fn fill_consent_buffer(
