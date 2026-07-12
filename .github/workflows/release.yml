@@ -71,6 +71,9 @@ jobs:
       - name: Construir AppImage
         run: ./tools/packaging/build_appimage.sh
 
+      - name: Construir tarball (binario)
+        run: ./tools/packaging/build_tarball.sh
+
       - name: Verificar contenido del .deb
         run: |
           for deb in dist/*.deb; do
@@ -81,7 +84,7 @@ jobs:
       - name: Generar SHA256SUMS
         run: |
           cd dist
-          sha256sum *.AppImage *.deb *.rpm > SHA256SUMS
+          sha256sum *.AppImage *.deb *.rpm *.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
       - name: Subir artefactos (workflow_dispatch)
@@ -93,6 +96,7 @@ jobs:
             dist/*.AppImage
             dist/*.deb
             dist/*.rpm
+            dist/*.tar.gz
             dist/SHA256SUMS
           if-no-files-found: error
 
@@ -104,6 +108,7 @@ jobs:
             dist/*.AppImage
             dist/*.deb
             dist/*.rpm
+            dist/*.tar.gz
             dist/SHA256SUMS
           generate_release_notes: true
           fail_on_unmatched_files: true
