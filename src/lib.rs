@@ -5,6 +5,7 @@ pub mod color;
 pub mod config;
 pub mod copy_mode;
 pub mod cursor;
+pub mod display_quirks;
 pub mod event_loop;
 pub mod grapheme;
 pub mod grid;
