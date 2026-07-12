@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Baud
-Comment=A GPU-accelerated terminal emulator
+Comment=A fast, GPU-accelerated, cross-platform terminal emulator
 Exec=baud
 Icon=baud
 Terminal=false
