@@ -10,7 +10,7 @@ permissions:
 jobs:
   release:
     name: Create release tag
-    if: github.repository == 'KarloZ7715/Baud'
+    if: github.repository == 'KarloZ7715/Baud' && vars.BAUD_RELEASE_APP_CLIENT_ID != ''
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -41,7 +41,7 @@ jobs:
 
   release-pr:
     name: Prepare release pull request
-    if: github.repository == 'KarloZ7715/Baud'
+    if: github.repository == 'KarloZ7715/Baud' && vars.BAUD_RELEASE_APP_CLIENT_ID != ''
     runs-on: ubuntu-latest
     permissions:
       contents: write
