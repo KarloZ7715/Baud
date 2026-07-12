@@ -1,6 +1,6 @@
 [package]
 name = "baud"
-version = "0.1.0"
+version = "0.0.6"
 edition = "2021"
 rust-version = "1.87.0"
 description = "A fast, feature-rich, GPU-accelerated, cross-platform terminal emulator"
