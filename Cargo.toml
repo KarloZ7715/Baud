@@ -59,3 +59,22 @@ harness = false
 
 [lints.rust]
 unused = "warn"
+
+[package.metadata.deb]
+maintainer = "Carlos Canabal Cordero <carloscc@protonmail.com>"
+copyright = "2026, Carlos Canabal Cordero"
+license-file = ["LICENSE", "4"]
+depends = "$auto, libxkbcommon0, libwayland-client0, libx11-6, libxcursor1, libxi6, libxrandr2, libvulkan1, libfontconfig1"
+section = "utils"
+priority = "optional"
+extended-description = """\
+Emulador de terminal moderno escrito en Rust con renderizado por GPU.
+Soporta Wayland, X11, sesiones múltiples, pestañas, temas y portapapeles.\
+"""
+assets = [
+    ["target/release/baud", "usr/bin/baud", "755"],
+    ["assets/packaging/baud.desktop", "usr/share/applications/baud.desktop", "644"],
+    ["assets/icons/hicolor/48x48/apps/baud.png", "usr/share/icons/hicolor/48x48/apps/baud.png", "644"],
+    ["assets/icons/hicolor/256x256/apps/baud.png", "usr/share/icons/hicolor/256x256/apps/baud.png", "644"],
+    ["LICENSE", "usr/share/doc/baud/LICENSE", "644"],
+]

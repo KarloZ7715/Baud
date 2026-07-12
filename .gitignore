@@ -35,3 +35,8 @@ skills-lock.json
 
 # Scratch local
 .context/
+
+# Empaquetado
+tools/packaging/.cache/
+dist/*
+!dist/.gitkeep
