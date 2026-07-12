@@ -88,3 +88,32 @@ jobs:
 
       - name: cargo build (Windows)
         run: cargo build --locked
+
+  # Job 5: smoke X11 bajo xvfb. NO cubre Wayland ni compositors reales.
+  # Ver docs/standards/linux-session-matrix.md. allow-fail hasta estabilizar.
+  xvfb-smoke:
+    name: xvfb X11 smoke
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cachear target/
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Instalar xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      - name: Smoke X11 (sin Wayland)
+        env:
+          WAYLAND_DISPLAY: ""
+          WAYLAND_SOCKET: ""
+        run: |
+          unset WAYLAND_DISPLAY WAYLAND_SOCKET || true
+          chmod +x tools/linux_session_smoke.sh
+          tools/linux_session_smoke.sh --xvfb --build
