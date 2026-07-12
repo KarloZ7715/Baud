@@ -143,8 +143,8 @@ jobs:
         with:
           cache-on-failure: true
 
-      - name: Instalar xvfb
-        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Instalar xvfb + deps X11
+        run: sudo apt-get update && sudo apt-get install -y xvfb libxkbcommon-x11-0
 
       - name: Smoke X11 (sin Wayland)
         env:
