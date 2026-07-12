@@ -91,7 +91,7 @@ if [[ "$USE_XVFB" -eq 1 ]]; then
   # Solo X11: no afirmar cobertura Wayland.
   exec env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
     xvfb-run -a env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET \
-    bash -c "BIN='$BIN' LOG='$LOG'; $(declare -f run_baud_smoke); run_baud_smoke"
+    bash -c "set -euo pipefail; BIN='$BIN' LOG='$LOG'; $(declare -f run_baud_smoke); run_baud_smoke"
 fi
 
 run_baud_smoke
