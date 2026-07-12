@@ -19,6 +19,7 @@ toml = "1"
 toml_edit = "0.22"
 dirs = "6"
 oklab = "1.1.2"
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["term", "fs", "signal", "event", "poll"] }

@@ -2338,8 +2338,7 @@ impl vte::Perform for Term {
                     if let Ok(text) = std::str::from_utf8(slice) {
                         let primary =
                             target.first() == Some(&b'p') || target.first() == Some(&b's');
-                        // No llamar wl-copy aqui: bloquearia el mutex del Term
-                        // (y potencialmente el event loop GUI esperando el mismo lock).
+                        // No tocar el clipboard del host aqui: bloquearia el mutex del Term.
                         self.clipboard_write_pending
                             .push((text.to_owned(), primary));
                     }

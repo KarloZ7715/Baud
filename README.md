@@ -9,7 +9,6 @@ Emulador de terminal escrito en Rust desde cero. Proyecto personal para aprender
 *(pendiente)*
 
 
-
 ## Stack (resumen)
 
 
