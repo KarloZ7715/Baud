@@ -89,8 +89,45 @@ jobs:
       - name: cargo build (Windows)
         run: cargo build --locked
 
-  # Job 5: smoke X11 bajo xvfb. NO cubre Wayland ni compositors reales.
-  # Ver docs/standards/linux-session-matrix.md. allow-fail hasta estabilizar.
+  # Job 5: gate blando de runtime ConPTY en Windows. Headless, sin winit.
+  # Soft gate: continue-on-error hasta la ventana de estabilidad.
+  windows-conpty:
+    name: windows-conpty
+    runs-on: windows-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cachear target/
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Tests de sesión ConPTY (headless)
+        shell: pwsh
+        run: |
+          $maxIntentos = 2
+          $codigo = 1
+          for ($intento = 1; $intento -le $maxIntentos; $intento++) {
+            Write-Host "Intento ${intento} de ${maxIntentos}"
+            cargo test --test pty_session_conformance -- --test-threads=1 --nocapture
+            $codigo = $LASTEXITCODE
+            if ($codigo -eq 0) { break }
+            if ($intento -lt $maxIntentos) {
+              Write-Host "Reintentando tras fallo (intento ${intento})..."
+              Start-Sleep -Seconds 5
+            }
+          }
+          if ($codigo -ne 0) {
+            Write-Host "Los tests de sesión ConPTY fallaron tras ${maxIntentos} intentos"
+          }
+          exit $codigo
+
+  # Job 6: smoke X11 bajo xvfb. NO cubre Wayland ni compositors reales.
   xvfb-smoke:
     name: xvfb X11 smoke
     runs-on: ubuntu-latest

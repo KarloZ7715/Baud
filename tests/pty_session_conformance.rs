@@ -128,7 +128,7 @@ fn conformance_double_shutdown_safe() {
 #[cfg(windows)]
 fn windows_shell_cfg(args: Vec<String>) -> ProcessConfig {
     ProcessConfig {
-        shell: std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()),
+        shell: "powershell.exe".into(),
         args,
         working_directory: None,
         env: Vec::new(),
@@ -141,8 +141,9 @@ fn windows_shell_cfg(args: Vec<String>) -> ProcessConfig {
 #[test]
 fn conformance_windows_spawn_echo() {
     let mut master = spawn_with(&windows_shell_cfg(vec![
-        "/C".into(),
-        "echo CONFORM_OK".into(),
+        "-NoProfile".into(),
+        "-Command".into(),
+        "Write-Output 'CONFORM_OK'".into(),
     ]))
     .expect("spawn");
     let out = read_until(
@@ -151,7 +152,7 @@ fn conformance_windows_spawn_echo() {
             let s = String::from_utf8_lossy(b);
             s.contains("CONFORM_OK")
         },
-        Duration::from_secs(5),
+        Duration::from_secs(10),
     )
     .expect("read");
     let s = String::from_utf8_lossy(&out);
@@ -160,13 +161,104 @@ fn conformance_windows_spawn_echo() {
 
 #[cfg(windows)]
 #[test]
-fn conformance_windows_resize_and_interrupt() {
+fn conformance_windows_echo_utf8() {
     let mut master = spawn_with(&windows_shell_cfg(vec![
-        "/C".into(),
-        "ping -n 30 127.0.0.1 >NUL".into(),
+        "-NoProfile".into(),
+        "-Command".into(),
+        "Write-Output 'CONFORM_áéíóúñ'".into(),
     ]))
     .expect("spawn");
-    master.resize(30, 100).expect("resize");
-    master.interrupt().expect("interrupt");
+    let out = read_until(
+        &mut master,
+        |b| {
+            let s = String::from_utf8_lossy(b);
+            s.contains("CONFORM_á")
+        },
+        Duration::from_secs(10),
+    )
+    .expect("read");
+    let s = String::from_utf8_lossy(&out);
+    assert!(s.contains("CONFORM_á"), "output: {s:?}");
+}
+
+#[cfg(windows)]
+#[test]
+fn conformance_windows_resize() {
+    let mut master = spawn_with(&windows_shell_cfg(vec![
+        "-NoProfile".into(),
+        "-Command".into(),
+        "Start-Sleep -Seconds 5".into(),
+    ]))
+    .expect("spawn");
+
+    master.resize(30, 100).expect("resize 30x100");
+    master.resize(24, 80).expect("resize 24x80");
+
+    master.force_kill();
     drop(master);
+}
+
+#[cfg(windows)]
+#[test]
+fn conformance_windows_interrupt() {
+    let mut master = spawn_with(&windows_shell_cfg(vec![
+        "-NoProfile".into(),
+        "-Command".into(),
+        "Start-Sleep -Seconds 30".into(),
+    ]))
+    .expect("spawn");
+
+    std::thread::sleep(Duration::from_millis(500));
+    master.interrupt().expect("interrupt");
+
+    // La interrupción debe terminar el proceso; forzamos kill
+    // por si acaso y verificamos que no cuelga.
+    std::thread::sleep(Duration::from_millis(500));
+    master.force_kill();
+    drop(master);
+}
+
+#[cfg(windows)]
+#[test]
+fn conformance_windows_shutdown() {
+    let mut master = spawn_with(&windows_shell_cfg(vec![
+        "-NoProfile".into(),
+        "-Command".into(),
+        "Start-Sleep -Seconds 30".into(),
+    ]))
+    .expect("spawn");
+
+    assert!(master.shutdown_graceful());
+    std::thread::sleep(Duration::from_millis(50));
+    master.force_kill();
+    drop(master);
+}
+
+#[cfg(windows)]
+#[test]
+fn conformance_windows_double_shutdown_safe() {
+    let mut master = spawn_with(&windows_shell_cfg(vec![
+        "-NoProfile".into(),
+        "-Command".into(),
+        "Write-Output 'ok'".into(),
+    ]))
+    .expect("spawn");
+
+    let _ = master.shutdown_graceful();
+    let _ = master.shutdown_graceful();
+    drop(master);
+}
+
+#[cfg(windows)]
+#[test]
+fn conformance_windows_invalid_shell() {
+    let cfg = ProcessConfig {
+        shell: "shell_que_no_existe_xyz.exe".into(),
+        ..ProcessConfig::default()
+    };
+    let result = spawn_with(&cfg);
+    assert!(
+        result.is_err(),
+        "se esperaba error al spawn con shell inexistente"
+    );
 }

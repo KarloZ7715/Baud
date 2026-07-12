@@ -67,6 +67,11 @@ mod tests {
     #[test]
     fn test_process_config_default_windows_shell() {
         let cfg = ProcessConfig::default();
-        assert!(!cfg.shell.is_empty());
+        let lower = cfg.shell.to_lowercase();
+        assert!(
+            lower.contains("powershell") || lower.contains("pwsh") || lower.contains("cmd"),
+            "shell inesperado: {}",
+            cfg.shell
+        );
     }
 }
