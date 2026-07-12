@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=Baud
-Comment=Emulador de terminal moderno escrito en Rust
+Comment=A GPU-accelerated terminal emulator
 Exec=baud
 Icon=baud
 Terminal=false

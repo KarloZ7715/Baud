@@ -26,11 +26,9 @@ Emulador de terminal escrito en Rust desde cero. Proyecto personal para aprender
 | Lock              | parking_lot | 0.12    |
 
 
-## Licencia
+## License
 
-Baud se distribuye bajo la [Licencia Apache 2.0](LICENSE).
-
-Copyright 2026 Carlos Canabal Cordero.
+Baud is released under the [Apache License, Version 2.0](LICENSE).
 
 ---
 

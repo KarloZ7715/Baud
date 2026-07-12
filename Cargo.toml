@@ -3,11 +3,11 @@ name = "baud"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.87.0"
-description = "Emulador de terminal moderno escrito en Rust con renderizado por GPU"
+description = "A GPU-accelerated terminal emulator with multi-session support, tabs, themes, and clipboard integration"
 license = "Apache-2.0"
 repository = "https://github.com/KarloZ7715/Baud"
 readme = "README.md"
-authors = ["Carlos Canabal Cordero <carloscc@protonmail.com>"]
+authors = ["KarloZ7715"]
 keywords = ["terminal", "emulator", "gpu", "wgpu"]
 categories = ["command-line-utilities"]
 
@@ -61,15 +61,15 @@ harness = false
 unused = "warn"
 
 [package.metadata.deb]
-maintainer = "Carlos Canabal Cordero <carloscc@protonmail.com>"
-copyright = "2026, Carlos Canabal Cordero"
+maintainer = "KarloZ7715"
+copyright = "2026, The Baud Authors"
 license-file = ["LICENSE", "4"]
 depends = "$auto, libxkbcommon0, libwayland-client0, libx11-6, libxcursor1, libxi6, libxrandr2, libvulkan1, libfontconfig1"
 section = "utils"
 priority = "optional"
 extended-description = """\
-Emulador de terminal moderno escrito en Rust con renderizado por GPU.
-Soporta Wayland, X11, sesiones múltiples, pestañas, temas y portapapeles.\
+A GPU-accelerated terminal emulator with multi-session support, \
+tabs, themes, split panes, and clipboard integration.\
 """
 assets = [
     ["target/release/baud", "usr/bin/baud", "755"],
@@ -88,7 +88,6 @@ assets = [
 ]
 
 [package.metadata.generate-rpm.requires]
-# Dependencias dlopen que no detecta el auto-req vía ldd
 libxkbcommon = "*"
 libwayland-client = "*"
 libX11 = "*"
