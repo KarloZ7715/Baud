@@ -2679,6 +2679,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         tracing::info!("renderer inicializado");
+        clipboard::warm_up();
 
         let size = window.inner_size();
         if let Some(renderer) = &self.renderer {
@@ -2837,17 +2838,17 @@ impl ApplicationHandler<UserEvent> for App {
                     .try_lock()
                     .ok()
                     .is_some_and(|t| t.search.is_some());
-                let status_active = self
+                let status_needs_present = self
                     .renderer
                     .as_ref()
-                    .is_some_and(|r| r.status_overlay_active());
+                    .is_some_and(|r| r.status_needs_present());
                 let picker_active = self
                     .renderer
                     .as_ref()
                     .is_some_and(|r| r.theme_picker_active(picker));
 
                 if !any_pane_dirty
-                    && !status_active
+                    && !status_needs_present
                     && !picker_active
                     && !search_active
                     && !self.fps_overlay_visible
@@ -2938,6 +2939,9 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                     Err(e) => tracing::warn!("error al renderizar: {e}"),
                 }
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.clear_status_present();
+                }
                 if self.fps_overlay_visible && self.config.debug.fps_counter_enabled {
                     if let Some(renderer) = &mut self.renderer {
                         let fps = self.gui_redraw_metrics.current_fps();
@@ -2953,10 +2957,10 @@ impl ApplicationHandler<UserEvent> for App {
                 let render_ms = t_render.elapsed().as_millis();
                 if render_ms > 250 {
                     tracing::warn!(
-                        "render lento: {}ms ({} panes, status={}, search={})",
+                        "render lento: {}ms ({} panes, status_present={}, search={})",
                         render_ms,
                         panes.len(),
-                        status_active,
+                        status_needs_present,
                         search_active
                     );
                 }

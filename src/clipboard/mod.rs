@@ -195,11 +195,8 @@ pub fn set(text: &str, primary: bool) {
     }
 }
 
-/// Encola el set en un worker dedicado (sin crear un hilo por operación).
-///
-/// Usar desde el hilo GUI/drain para no bloquear el event loop.
-pub fn set_detached(text: String, primary: bool) {
-    let tx = SET_WORKER.get_or_init(|| {
+fn set_worker_tx() -> &'static mpsc::Sender<(String, bool)> {
+    SET_WORKER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<(String, bool)>();
         let _ = thread::Builder::new()
             .name("baud-clipboard".into())
@@ -209,8 +206,24 @@ pub fn set_detached(text: String, primary: bool) {
                 }
             });
         tx
-    });
-    if let Err(e) = tx.send((text, primary)) {
+    })
+}
+
+/// Inicializa backend y worker en segundo plano (evita el coste en el primer copy).
+pub fn warm_up() {
+    let _ = thread::Builder::new()
+        .name("baud-clipboard-warm".into())
+        .spawn(|| {
+            let _ = host().capabilities();
+            let _ = set_worker_tx();
+        });
+}
+
+/// Encola el set en un worker dedicado (sin crear un hilo por operación).
+///
+/// Usar desde el hilo GUI/drain para no bloquear el event loop.
+pub fn set_detached(text: String, primary: bool) {
+    if let Err(e) = set_worker_tx().send((text, primary)) {
         tracing::warn!("clipboard::set_detached: worker caído: {e}");
     }
 }

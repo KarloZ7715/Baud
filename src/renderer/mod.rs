@@ -186,6 +186,8 @@ pub struct Renderer {
     status_icon: String,
     /// True si el overlay_buffer debe re-shapearse (mensaje/icono/resize).
     status_overlay_dirty: bool,
+    /// True si hace falta un frame para mostrar/ocultar el status (no continuamente).
+    status_needs_present: bool,
     frame_count: u64,
     /// Rango normalizado de seleccion del frame anterior (start_row, start_col,
     /// end_row, end_col). Cuando cambia, invalida damage en filas afectadas.
@@ -421,6 +423,7 @@ impl Renderer {
             status_message: None,
             status_icon: String::new(),
             status_overlay_dirty: false,
+            status_needs_present: false,
             frame_count: 0,
             prev_selection_bounds: None,
             prev_scrollback_offset: 0,
@@ -721,6 +724,7 @@ impl Renderer {
                     self.status_message = None;
                     self.status_icon.clear();
                     self.status_overlay_dirty = false;
+                    self.status_needs_present = true;
                 }
             }
         }
@@ -1273,9 +1277,19 @@ impl Renderer {
         Ok(())
     }
 
-    /// El overlay de status esta activo (requiere frame aunque el term no cambie).
+    /// El overlay de status esta activo (se compone si hay frame por otra razón).
     pub fn status_overlay_active(&self) -> bool {
         self.status_active
+    }
+
+    /// Hay que presentar un frame para mostrar u ocultar el status (one-shot).
+    pub fn status_needs_present(&self) -> bool {
+        self.status_needs_present
+    }
+
+    /// Tras pintar un frame, el present forzado del status ya no es necesario.
+    pub fn clear_status_present(&mut self) {
+        self.status_needs_present = false;
     }
 
     /// Instant en que el status debe ocultarse (`None` si inactivo o sin auto-dismiss).
@@ -1305,11 +1319,14 @@ impl Renderer {
         status_cfg: &StatusConfig,
     ) {
         if text.is_empty() {
+            let was_active = self.status_active;
             self.status_active = false;
             self.status_start = None;
             self.status_message = None;
             self.status_icon.clear();
             self.status_overlay_dirty = false;
+            // Un frame para quitar el pill de pantalla.
+            self.status_needs_present = was_active;
             return;
         }
 
@@ -1323,6 +1340,7 @@ impl Renderer {
         self.status_active = true;
         // Shape en el próximo render, no en el hilo de input (copy/paste).
         self.status_overlay_dirty = true;
+        self.status_needs_present = true;
     }
 
     fn refill_status_overlay_buffer(&mut self) {
