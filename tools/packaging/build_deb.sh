@@ -3,10 +3,10 @@
 # Requisitos: cargo-deb instalado (cargo install cargo-deb).
 # Uso: ./tools/packaging/build_deb.sh
 
-set -euo pipefail
+set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 DIST_DIR="$REPO_ROOT/dist"
 
 if ! command -v cargo-deb &>/dev/null && ! cargo deb --version &>/dev/null 2>&1; then

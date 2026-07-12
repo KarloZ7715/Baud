@@ -3,10 +3,10 @@
 # Requisitos: cargo-generate-rpm instalado (cargo install cargo-generate-rpm).
 # Uso: ./tools/packaging/build_rpm.sh
 
-set -euo pipefail
+set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 DIST_DIR="$REPO_ROOT/dist"
 
 if ! cargo generate-rpm --version &>/dev/null 2>&1; then

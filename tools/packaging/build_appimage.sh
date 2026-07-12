@@ -3,10 +3,10 @@
 # Requisitos: cargo build --release previo, linuxdeploy descargable.
 # Uso: ./tools/packaging/build_appimage.sh [--version X.Y.Z]
 
-set -euo pipefail
+set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 DIST_DIR="$REPO_ROOT/dist"
 BINARY="$REPO_ROOT/target/release/baud"
 DESKTOP_FILE="$REPO_ROOT/assets/packaging/baud.desktop"

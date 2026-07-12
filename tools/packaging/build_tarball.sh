@@ -2,10 +2,10 @@
 # Empaqueta el binario release de Baud en un tarball para el install script.
 # Uso: ./tools/packaging/build_tarball.sh
 
-set -euo pipefail
+set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 DIST_DIR="$REPO_ROOT/dist"
 BINARY="$REPO_ROOT/target/release/baud"
 
