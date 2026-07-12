@@ -240,7 +240,8 @@ impl CopyTarget {
     pub fn write(self, text: &str) {
         let caps = host().capabilities();
         for primary in write_lanes(self, caps) {
-            set(text, primary);
+            // Desacoplado del hilo GUI/drain: set síncrono congela el event loop.
+            set_detached(text.to_owned(), primary);
         }
     }
 
@@ -292,6 +293,16 @@ mod tests {
             write_lanes(CopyTarget::Primary, Capabilities::CLIPBOARD_ONLY),
             vec![false]
         );
+    }
+
+    #[test]
+    fn copy_target_write_usa_carriles_sin_duplicar_sin_primary() {
+        // Contrato: Both sin primary → un solo carril clipboard (el set va detached).
+        assert_eq!(
+            write_lanes(CopyTarget::Both, Capabilities::CLIPBOARD_ONLY).len(),
+            1
+        );
+        assert_eq!(write_lanes(CopyTarget::Both, Capabilities::FULL).len(), 2);
     }
 
     #[test]

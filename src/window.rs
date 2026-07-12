@@ -56,6 +56,12 @@ pub enum UserEvent {
     SetTitle(SessionId, String),
     /// OSC 52 query: leer clipboard y responder al PTY (target, bell_terminated).
     ReadClipboard(SessionId, u8, bool),
+    /// OSC 52: texto ya leído fuera del hilo GUI.
+    Osc52ReadReady(SessionId, u8, bool, String),
+    /// Pegar en PTY: texto ya leído fuera del hilo GUI.
+    PasteReady(String),
+    /// Pegar en el buscador: texto ya leído fuera del hilo GUI.
+    PasteSearchReady(String),
     /// Config recargada desde disco.
     ConfigReloaded(Box<Config>),
     /// Fallo al recargar config; se conserva la config en memoria.
@@ -544,10 +550,32 @@ impl App {
                     return;
                 }
                 let primary = target == b'p' || target == b's';
-                let text = clipboard::get(primary);
+                self.spawn_clipboard_get(primary, move |text| {
+                    UserEvent::Osc52ReadReady(id, target, bell_terminated, text)
+                });
+            }
+            UserEvent::Osc52ReadReady(id, target, bell_terminated, text) => {
+                if !self.is_focused_session(id) {
+                    return;
+                }
                 let encoded = crate::base64::encode(text.as_bytes());
                 let response = Term::format_osc52_read_response(target, &encoded, bell_terminated);
                 self.send_input(response);
+            }
+            UserEvent::PasteReady(text) => {
+                self.paste_text(&text);
+            }
+            UserEvent::PasteSearchReady(text) => {
+                if text.is_empty() {
+                    return;
+                }
+                let text = text.replace(['\n', '\r'], "");
+                if let Ok(mut guard) = self.focused_term().lock() {
+                    guard.search_append_query(&text);
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
             }
             UserEvent::ConfigReloaded(cfg) => {
                 if self.theme_picker.is_some() {
@@ -742,10 +770,28 @@ impl App {
         }
     }
 
-    /// Copia texto al clipboard del sistema (delegado a clipboard.rs).
+    /// Copia texto al clipboard del sistema sin bloquear el hilo GUI.
     fn set_clipboard(&self, text: &str) {
-        tracing::info!("set_clipboard: {} bytes", text.len());
-        clipboard::set(text, false);
+        tracing::info!("set_clipboard: {} bytes (detached)", text.len());
+        clipboard::set_detached(text.to_owned(), false);
+    }
+
+    /// Lee el clipboard en un hilo worker y reinyecta el resultado vía `UserEvent`.
+    fn spawn_clipboard_get(
+        &self,
+        primary: bool,
+        map: impl FnOnce(String) -> UserEvent + Send + 'static,
+    ) {
+        let Some(proxy) = self.proxy.clone() else {
+            tracing::warn!("clipboard get: sin EventLoopProxy; omitiendo lectura");
+            return;
+        };
+        let _ = std::thread::Builder::new()
+            .name("baud-clipboard-get".into())
+            .spawn(move || {
+                let text = clipboard::get(primary);
+                let _ = proxy.send_event(map(text));
+            });
     }
 
     /// Sincroniza grid emulado y PTY con el tamano de ventana en pixeles.
@@ -1523,34 +1569,22 @@ impl App {
     }
 
     fn paste_to_search(&mut self, primary: bool) {
-        let text = clipboard::get(primary);
-        if text.is_empty() {
-            return;
-        }
-        let text = text.replace(['\n', '\r'], "");
-        if let Ok(mut guard) = self.focused_term().lock() {
-            guard.search_append_query(&text);
-        }
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
+        tracing::debug!("paste_to_search: lectura detached (primary={primary})");
+        self.spawn_clipboard_get(primary, UserEvent::PasteSearchReady);
     }
 
-    /// Obtiene texto del clipboard del sistema, lo filtra y lo envia al PTY.
-    /// Usa wl-paste (Wayland nativo).
+    /// Encola lectura del clipboard y pega en el PTY cuando el worker responde.
     /// Si bracketed paste mode (DEC 2004) esta activo, envuelve el texto en
     /// \x1b[200~...\x1b[201~ para que readline no ejecute comandos al pegar.
     fn handle_paste(&mut self) {
-        tracing::debug!("handle_paste: iniciando");
-        let text = clipboard::get(false);
-        self.paste_text(&text);
+        tracing::debug!("handle_paste: lectura detached");
+        self.spawn_clipboard_get(false, UserEvent::PasteReady);
     }
 
     /// Pega desde la primary selection (botón medio del mouse).
     fn handle_paste_primary(&mut self) {
-        tracing::debug!("handle_paste_primary: iniciando");
-        let text = clipboard::get(true);
-        self.paste_text(&text);
+        tracing::debug!("handle_paste_primary: lectura detached");
+        self.spawn_clipboard_get(true, UserEvent::PasteReady);
     }
 
     /// Filtra y envía texto pegado al PTY (con bracketing si aplica).
@@ -2050,7 +2084,7 @@ impl App {
                 let text = guard.selected_text();
                 if !text.is_empty() {
                     drop(guard);
-                    clipboard::set(&text, false);
+                    clipboard::set_detached(text, false);
                     if let Ok(mut g2) = self.focused_term().lock() {
                         CopyModeState::exit(&mut g2);
                     }
@@ -3532,6 +3566,9 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::PtyError(_, _) => "UserEvent::PtyError",
             UserEvent::SetTitle(_, _) => "UserEvent::SetTitle",
             UserEvent::ReadClipboard(_, _, _) => "UserEvent::ReadClipboard",
+            UserEvent::Osc52ReadReady(_, _, _, _) => "UserEvent::Osc52ReadReady",
+            UserEvent::PasteReady(_) => "UserEvent::PasteReady",
+            UserEvent::PasteSearchReady(_) => "UserEvent::PasteSearchReady",
             UserEvent::ConfigReloaded(_) => "UserEvent::ConfigReloaded",
             UserEvent::ConfigReloadFailed(_) => "UserEvent::ConfigReloadFailed",
         };
