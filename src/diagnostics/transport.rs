@@ -48,7 +48,7 @@ impl Transport for UreqTransport {
                 ),
             )
             .send(envelope)
-            .map_err(|e| format!("error de red: {e}"))?;
+            .map_err(|e| format!("network error: {e}"))?;
 
         let status = response.status();
         if status == 200 || status == 202 {

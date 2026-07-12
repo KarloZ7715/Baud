@@ -43,13 +43,13 @@ pub fn resolve_dsn(config: &Config) -> Option<String> {
 fn init_reporter_if_accepted(config: &Config) {
     let consent = ConsentState::from_config(config.diagnostics.reporting.enabled);
     if consent != ConsentState::Accepted {
-        tracing::info!("reporter: consentimiento = {:?}, sin red", consent);
+        tracing::info!("reporter: consent = {:?}, no network", consent);
         return;
     }
 
     let dsn = resolve_dsn(config);
     let Some(dsn) = dsn else {
-        tracing::info!("reporter: consentimiento aceptado pero sin DSN — modo noop");
+        tracing::info!("reporter: consent accepted but no DSN — noop mode");
         return;
     };
 
@@ -58,7 +58,7 @@ fn init_reporter_if_accepted(config: &Config) {
     let reporter =
         crate::diagnostics::reporter::Reporter::new(Some(dsn), install_id, Box::new(transport));
     crate::diagnostics::hooks::set_reporter(reporter.handle());
-    tracing::info!("reporter: activo, enviando a Sentry");
+    tracing::info!("reporter: active, sending to Sentry");
 }
 
 // ponytail: tope de bytes por pasada del drain; suelta el mutex del Term para la GUI.
@@ -207,12 +207,12 @@ fn process_pty_commands(master: &mut pty::Pty, rx_gui_to_pty: &mpsc::Receiver<Pt
             }
             PtyCommand::Resize { rows, cols } => {
                 if let Err(e) = master.resize(rows, cols) {
-                    tracing::warn!("error al setear winsize: {e}");
+                    tracing::warn!("error setting winsize: {e}");
                 }
             }
             PtyCommand::Interrupt => {
                 if let Err(e) = master.interrupt() {
-                    tracing::warn!("error al interrumpir sesion: {e}");
+                    tracing::warn!("error interrupting session: {e}");
                 }
             }
             PtyCommand::Shutdown => {
@@ -489,9 +489,7 @@ pub fn spawn_session(
 
             if !response.is_empty() {
                 if let Err(e) = tx_response.send(PtyCommand::Input(response)) {
-                    tracing::warn!(
-                        "drain: no se pudo reenviar respuesta PTY ({e}); query descartada"
-                    );
+                    tracing::warn!("drain: could not forward PTY response ({e}); query discarded");
                 }
             }
             send_title_and_clipboard(&proxy_for_drain, session_id, title, clipboard_pending);
@@ -548,7 +546,7 @@ fn pty_thread_main(
     let mut out_buf = Vec::with_capacity(4096);
 
     if let Err(e) = master.set_nonblocking() {
-        tracing::warn!("no se pudo poner PTY en non-blocking: {e}");
+        tracing::warn!("could not set PTY to non-blocking: {e}");
     }
 
     loop {
@@ -606,7 +604,7 @@ fn pty_thread_main(
     let mut out_buf = Vec::with_capacity(4096);
 
     if let Err(e) = master.set_nonblocking() {
-        tracing::warn!("no se pudo poner PTY en non-blocking: {e}");
+        tracing::warn!("could not set PTY to non-blocking: {e}");
     }
 
     loop {
@@ -695,7 +693,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let watchdog = EventLoopWatchdog::spawn_if(app_config.diagnostics.watchdog);
     if app_config.diagnostics.watchdog {
         tracing::info!(
-            "watchdog de event loop activo (telemetría de handlers, stall={}s)",
+            "event loop watchdog active (handler telemetry, stall={}s)",
             2
         );
     }
@@ -718,7 +716,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         app.send_startup_input(format!("{cmd}\n").into_bytes());
     }
 
-    tracing::info!("event loop iniciado, shell corriendo en PTY");
+    tracing::info!("event loop started, shell running in PTY");
 
     event_loop.run_app(&mut app)?;
 

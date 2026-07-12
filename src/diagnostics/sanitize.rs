@@ -2,7 +2,6 @@
 //!
 //! Reglas:
 //! - Reemplaza rutas del home del usuario por `<HOME>`.
-//! - Heurística básica de secretos (claves API, tokens en texto plano).
 //! - Truncado duro de bytes para eventos muy largos.
 
 const MAX_EVENT_BYTES: usize = 4096;
@@ -48,7 +47,7 @@ fn truncate_bytes(s: &str, max_bytes: usize) -> String {
     }
 
     let truncated = &s[..end];
-    format!("{truncated}…[truncado]")
+    format!("{truncated}…[truncated]")
 }
 
 #[cfg(test)]
@@ -70,8 +69,8 @@ mod tests {
     fn trunca_mensaje_largo() {
         let long = "a".repeat(5000);
         let truncated = sanitize_message(&long);
-        assert!(truncated.len() <= MAX_EVENT_BYTES + "[truncado]".len() + 3);
-        assert!(truncated.ends_with("…[truncado]"));
+        assert!(truncated.len() <= MAX_EVENT_BYTES + "[truncated]".len() + 3);
+        assert!(truncated.ends_with("…[truncated]"));
     }
 
     #[test]
@@ -85,6 +84,6 @@ mod tests {
     fn backtrace_tiene_limite_mayor() {
         let long = "a".repeat(10000);
         let truncated = sanitize_backtrace(&long);
-        assert!(truncated.len() <= MAX_BACKTRACE_BYTES + "[truncado]".len() + 3);
+        assert!(truncated.len() <= MAX_BACKTRACE_BYTES + "[truncated]".len() + 3);
     }
 }

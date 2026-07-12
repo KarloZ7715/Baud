@@ -82,14 +82,18 @@ impl Reporter {
 
         if let Some(dsn) = dsn {
             let enabled_clone = Arc::clone(&enabled);
-            thread::Builder::new()
+            match thread::Builder::new()
                 .name("baud-reporter".into())
                 .spawn(move || {
                     reporter_worker(rx, dsn, install_id, transport, enabled_clone);
-                })
-                .expect("no se pudo iniciar el hilo reporter");
+                }) {
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("reporter: could not start reporter thread: {e}");
+                }
+            }
         } else {
-            tracing::info!("reporter: sin DSN, modo noop (sin red)");
+            tracing::info!("reporter: no DSN, noop mode (no network)");
         }
 
         Self { handle }
@@ -178,80 +182,74 @@ fn process_event(
         tracing::warn!(
             target: "baud::reporter",
             error = %e,
-            "falló el envío a Sentry"
+            "Sentry send failed"
         );
     }
 }
 
-/// Normaliza un mensaje para deduplicación: trunca a 200 chars y quita
-/// números y timestamps variables.
+/// Normaliza un mensaje para deduplicación: trunca a 200 bytes seguros.
 fn normalize_message(msg: &str) -> String {
     let trimmed = msg.trim();
     if trimmed.len() <= 200 {
         trimmed.to_string()
     } else {
-        trimmed[..200].to_string()
+        let end = find_char_boundary(trimmed, 200);
+        trimmed[..end].to_string()
     }
 }
 
-/// Genera un ID de evento aleatorio (32 hex chars).
+fn find_char_boundary(s: &str, max: usize) -> usize {
+    if s.is_char_boundary(max) {
+        return max;
+    }
+    (0..max).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0)
+}
+
+/// Genera un ID de evento con 32 hex chars.
 fn generate_event_id() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let hash = RandomState::new().build_hasher().finish();
-    let nanos = std::time::SystemTime::now()
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
+        .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    // Mezcla hash + nanos para más entropía
-    let combined = hash.wrapping_add(nanos as u64);
-    format!("{combined:032x}")
+
+    let pid = std::process::id() as u64;
+    let mixed = now
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(pid)
+        .wrapping_add(counter);
+
+    format!("{mixed:016x}{counter:016x}")
 }
 
-/// Formatea un timestamp Unix (segundos) como ISO 8601.
+/// Formatea un timestamp Unix (segundos) para Sentry.
 fn format_timestamp(ts: i64) -> String {
-    // Simple: usar segundos desde epoch y formatear manualmente
-    let secs = ts;
-    let days_since_epoch = secs / 86400;
-    let time_of_day = secs % 86400;
-
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-
-    // Fecha aproximada desde epoch (no es exacta pero suficiente para Sentry)
-    let year = 1970 + (days_since_epoch / 365);
-    let mut remaining = days_since_epoch % 365;
-
-    let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let mut month = 1;
-    for &md in &month_days {
-        if remaining < md {
-            break;
-        }
-        remaining -= md;
-        month += 1;
-    }
-    let day = remaining + 1;
-
-    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.000Z")
+    ts.to_string()
 }
 
-/// Genera un ID de instalación aleatorio (UUID-like, 32 hex chars).
+/// Genera un ID de instalación con 32 hex chars.
 pub fn generate_install_id() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    let s = RandomState::new();
-    let h1 = s.build_hasher().finish();
-    let h2 = s.build_hasher().finish();
-    let nanos = std::time::SystemTime::now()
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
+        .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
 
-    let combined = h1.wrapping_add(h2).wrapping_add(nanos as u64);
-    format!("{combined:032x}")
+    let pid = std::process::id() as u64;
+    let mixed = now
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(pid)
+        .wrapping_add(counter);
+
+    format!("{mixed:016x}{counter:016x}")
 }
 
 #[cfg(test)]
@@ -298,11 +296,11 @@ mod tests {
     }
 
     #[test]
-    fn format_timestamp_produce_iso() {
-        let ts = format_timestamp(0); // epoch
-        assert!(ts.contains("1970"));
-        assert!(ts.contains("T"));
-        assert!(ts.ends_with("Z"));
+    fn format_timestamp_produce_epoch_seconds() {
+        let ts = format_timestamp(0);
+        assert_eq!(ts, "0");
+        let ts2 = format_timestamp(1718123456);
+        assert_eq!(ts2, "1718123456");
     }
 
     #[test]

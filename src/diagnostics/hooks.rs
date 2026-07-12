@@ -12,7 +12,9 @@ static REPORTER: OnceLock<ReporterHandle> = OnceLock::new();
 
 /// Registra el handle del reporter para que el panic hook pueda usarlo.
 pub fn set_reporter(handle: ReporterHandle) {
-    let _ = REPORTER.set(handle);
+    if REPORTER.set(handle).is_err() {
+        tracing::warn!("reporter: handler already registered — ignoring duplicate");
+    }
 }
 
 /// Instala el panic hook personalizado que envía panics al reporter.

@@ -240,7 +240,7 @@ impl EventLoopWatchdog {
                     );
                 }
             })
-            .expect("no se pudo iniciar watchdog");
+            .expect("could not start watchdog");
         Self { telemetry }
     }
 

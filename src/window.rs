@@ -1840,10 +1840,10 @@ impl App {
         // Persistir la decisión en config.toml
         match crate::diagnostics::consent::persist_reporting_enabled(accepted) {
             Ok(_) => {
-                tracing::info!("consentimiento persistido: enabled = {accepted}");
+                tracing::info!("consent persisted: enabled = {accepted}");
             }
             Err(e) => {
-                tracing::warn!("no se pudo persistir el consentimiento: {e}");
+                tracing::warn!("could not persist consent: {e}");
             }
         }
 
@@ -1862,7 +1862,7 @@ impl App {
                     Box::new(transport),
                 );
                 crate::diagnostics::hooks::set_reporter(reporter.handle());
-                tracing::info!("reporter: activo tras consentimiento");
+                tracing::info!("reporter: active after consent");
             }
         }
 

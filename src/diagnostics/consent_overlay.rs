@@ -1,26 +1,25 @@
-//! Overlay de consentimiento bloqueante de primer arranque.
+//! First-run consent blocking overlay.
 //!
-//! Muestra un modal centrado con explicación y botones Sí/No. El input del PTY
-//! se bloquea hasta que el usuario elige. Teclas: Y/S = Sí, N = No, Esc/otras = ignoradas.
+//! Shows a centered modal with explanation and Yes/No buttons. PTY input
+//! is blocked until the user chooses. Keys: Y/S = Yes, N = No, Esc/others = ignored.
 
-/// Texto del modal de consentimiento.
-pub const CONSENT_TITLE: &str = "Informes de error (opcional)";
+/// Consent modal text.
+pub const CONSENT_TITLE: &str = "Error Reporting (optional)";
 
 pub const CONSENT_BODY: &str = concat!(
-    "Baud puede enviar a los desarrolladores (Sentry) datos de fallos del\n",
-    "emulador: crashes, panics, errores y avisos técnicos, más versión y\n",
-    "sistema. No se envía lo que escribes ni la salida de tus comandos.\n",
+    "Baud can send crash data from the emulator to the developers (Sentry):\n",
+    "crashes, panics, errors, and technical warnings, plus the version\n",
+    "and OS. What you type and your command output are never sent.\n",
     "\n",
-    "Debes elegir una opción para continuar."
+    "You must choose an option to continue."
 );
 
-pub const CONSENT_BUTTONS: &str = "[ Sí, enviar informes ]    [ No, gracias ]";
+pub const CONSENT_BUTTONS: &str = "[ Yes, send reports ]    [ No, thanks ]";
 
 pub const CONSENT_HINT: &str =
-    "(Puedes cambiarlo después en config.toml → diagnostics.reporting.enabled)";
+    "(You can change this later in config.toml → diagnostics.reporting.enabled)";
 
-/// Configura el buffer de consentimiento con el texto del modal.
-/// El buffer se rellena con el título, cuerpo, botones y hint, centrados.
+/// Fills the consent buffer with the modal text.
 pub fn fill_consent_buffer(
     buffer: &mut glyphon::Buffer,
     font_system: &mut glyphon::FontSystem,

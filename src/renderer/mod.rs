@@ -1376,7 +1376,7 @@ impl Renderer {
 
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut render_pass)
-                .map_err(|e| format!("error al renderizar consentimiento: {e}"))?;
+                .map_err(|e| format!("error rendering consent: {e}"))?;
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
