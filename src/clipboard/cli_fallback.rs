@@ -162,15 +162,6 @@ fn try_xsel_get(primary: bool) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Orden documentado de la cadena: wl → xclip → xsel.
-    #[test]
-    fn cadena_fallback_documentada() {
-        let order = ["wl-copy", "xclip", "xsel"];
-        assert_eq!(order[0], "wl-copy");
-        assert_eq!(order[1], "xclip");
-        assert_eq!(order[2], "xsel");
-    }
-
     #[test]
     fn cli_capabilities_full() {
         let backend = CliFallbackBackend::new();

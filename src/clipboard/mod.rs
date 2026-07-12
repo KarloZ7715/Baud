@@ -61,8 +61,11 @@ impl ClipboardBackend for HybridBackend {
 
     fn set(&self, text: &str, primary: bool) -> Result<(), ClipboardError> {
         if let Some(ref arb) = self.arboard {
-            if arb.set(text, primary).is_ok() {
-                return Ok(());
+            match arb.set(text, primary) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!("clipboard: arboard set falló ({}); probando CLI", e.0);
+                }
             }
         }
         if let Some(ref cli) = self.cli {
@@ -74,13 +77,37 @@ impl ClipboardBackend for HybridBackend {
     }
 
     fn get(&self, primary: bool) -> Result<String, ClipboardError> {
+        let mut arboard_empty = None;
         if let Some(ref arb) = self.arboard {
-            if let Ok(text) = arb.get(primary) {
-                return Ok(text);
+            match arb.get(primary) {
+                Ok(text) if !text.is_empty() => return Ok(text),
+                Ok(empty) => {
+                    // Vacío: el set puede haber caído al CLI; reintentar ahí.
+                    arboard_empty = Some(empty);
+                }
+                Err(e) => {
+                    tracing::warn!("clipboard: arboard get falló ({}); probando CLI", e.0);
+                }
             }
         }
         if let Some(ref cli) = self.cli {
-            return cli.get(primary);
+            match cli.get(primary) {
+                Ok(text) if !text.is_empty() => return Ok(text),
+                Ok(empty) => {
+                    if arboard_empty.is_none() {
+                        return Ok(empty);
+                    }
+                }
+                Err(e) => {
+                    if arboard_empty.is_none() && self.arboard.is_none() {
+                        return Err(e);
+                    }
+                    tracing::debug!("clipboard: CLI get falló ({})", e.0);
+                }
+            }
+        }
+        if let Some(empty) = arboard_empty {
+            return Ok(empty);
         }
         Err(ClipboardError(
             "ningún backend de clipboard disponible".into(),
