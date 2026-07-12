@@ -16,6 +16,7 @@ use crate::clipboard::{self, CopyTarget};
 use crate::config::watch::WatchState;
 use crate::config::{persist, Config, ConfigSource, ProcessSection, StartupState};
 use crate::copy_mode::CopyModeState;
+use crate::display_quirks::{self, DisplayQuirks};
 use crate::event_loop::BlinkFocus;
 use crate::grid::Cell;
 use crate::input::actions::{normalize_binding_key, Action, Keybindings};
@@ -283,6 +284,8 @@ pub struct App {
     fps_overlay_visible: bool,
     /// Pane activo para animacion de parpadeo (solo uno redibuja por blink).
     blink_focus: Arc<BlinkFocus>,
+    /// Quirks de display resueltos una vez en `resumed`.
+    display_quirks: DisplayQuirks,
 }
 
 fn allowed_open_url(url: &str) -> bool {
@@ -370,6 +373,7 @@ impl App {
             redraw_interval_nanos,
             fps_overlay_visible: false,
             blink_focus,
+            display_quirks: DisplayQuirks::DEFAULT,
         }
     }
 
@@ -2554,6 +2558,8 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
+        self.display_quirks = display_quirks::snapshot_for_event_loop(event_loop);
+
         // 1. Crear ventana.
         let wcfg = &self.config.window;
         let mut attrs = Window::default_attributes()
@@ -2694,13 +2700,12 @@ impl ApplicationHandler<UserEvent> for App {
             self.pending_pane_sync = deferred;
         }
 
-        // 5. Forzar el primer redraw para que winit dispare RedrawRequested.
-        // Sin esto, la ventana queda vacia hasta que el drain envie bytes
-        // (lo cual activa el user_event RedrawNeeded -> request_redraw).
-        // Con esto, pintamos el estado inicial del term inmediatamente,
-        // evitando que el compositor (Hyprland) marque la ventana como
-        // "no responde" mientras espera output.
-        window.request_redraw();
+        // 5. Primer present según quirks: en Wayland la superficie no aparece
+        // hasta dibujar; ciertas familias además marcan la ventana como colgada
+        // si no hay redraw temprano.
+        if self.display_quirks.force_initial_redraw {
+            window.request_redraw();
+        }
         self.update_ime_area();
 
         let cfg = self.config.clone();
@@ -2971,10 +2976,13 @@ impl ApplicationHandler<UserEvent> for App {
                 self.modifiers = modifiers;
             }
             // Diagnostico: el cursor entro/salio de la ventana.
-            // En Wayland, winit traduce wl_pointer.enter a CursorEntered + CursorMoved.
-            // Si no se recibe CursorEntered, el compositor quizas no mando wl_pointer.enter.
+            // En backends donde el enter del puntero es fiable, se registra a info.
             WindowEvent::CursorEntered { .. } => {
-                tracing::info!("CursorEntered: el cursor entro a la ventana");
+                tracing::info!(
+                    backend = ?self.display_quirks.backend,
+                    family = ?self.display_quirks.family,
+                    "CursorEntered: el cursor entro a la ventana"
+                );
             }
             // Mouse moved: si estamos arrastrando, actualizar el final de la seleccion.
             // Si el mouse sale del viewport (y<0 o y>=height), hacer scroll automatico.
@@ -3113,9 +3121,12 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             // Mouse left: el cursor salio de la ventana.
-            // En Wayland, winit deja de enviar CursorMoved cuando el mouse sale.
-            // Si estamos arrastrando, iniciamos un thread de auto-scroll.
+            // Si cursor_left_stops_moved, el backend deja de emitir CursorMoved;
+            // con arrastre activo arrancamos auto-scroll en un hilo aparte.
             WindowEvent::CursorLeft { .. } => {
+                if self.display_quirks.cursor_left_stops_moved {
+                    tracing::debug!("CursorLeft: backend deja de emitir CursorMoved tras salir");
+                }
                 if self.mouse_down.load(Ordering::Relaxed) {
                     tracing::info!("CursorLeft: mouse_down=true, auto-scroll thread iniciado");
                     let term_clone = Arc::clone(self.focused_term());
