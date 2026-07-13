@@ -153,6 +153,12 @@ jobs:
             sha256sum -- "${asset#./}"
           done > SHA256SUMS
 
+      - name: Sign update manifest
+        if: needs.prepare-release.outputs.publish == 'true'
+        env:
+          BAUD_UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: ./tools/packaging/sign_update_manifest.sh dist "${{ needs.prepare-release.outputs.tag }}"
+
       - name: Verify release assets
         run: ./tools/packaging/verify_release_assets.sh dist
 
@@ -167,6 +173,8 @@ jobs:
             dist/*.rpm
             dist/*.tar.gz
             dist/SHA256SUMS
+            dist/update-manifest.json
+            dist/update-manifest.sig
           if-no-files-found: error
 
       - name: Upload release assets to draft
@@ -174,7 +182,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.prepare-release.outputs.tag }}
-        run: gh release upload "$TAG" dist/*.AppImage dist/*.deb dist/*.rpm dist/*.tar.gz dist/SHA256SUMS --clobber
+        run: gh release upload "$TAG" dist/*.AppImage dist/*.deb dist/*.rpm dist/*.tar.gz dist/SHA256SUMS dist/update-manifest.json dist/update-manifest.sig --clobber
 
   publish-release:
     name: Publish release

@@ -41,6 +41,16 @@ if [[ ! -s "$manifest" ]]; then
     exit 1
 fi
 
+if [[ ! -f "$dist_dir/update-manifest.json" ]]; then
+    echo "Error: missing update-manifest.json" >&2
+    exit 1
+fi
+
+if [[ ! -f "$dist_dir/update-manifest.sig" ]]; then
+    echo "Error: missing update-manifest.sig" >&2
+    exit 1
+fi
+
 if ! awk 'NF != 2 || ++seen[$2] > 1 { exit 1 }' "$manifest"; then
     echo "Error: SHA256SUMS must contain one checksum per asset" >&2
     exit 1

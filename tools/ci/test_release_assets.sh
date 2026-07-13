@@ -30,14 +30,24 @@ make_manifest() {
     (cd "$dist" && sha256sum *.AppImage *.deb *.rpm *.tar.gz > SHA256SUMS)
 }
 
+# Clave fija de fixture para firmar el manifiesto en tests.
+FIXTURE_KEY="$(openssl rand -hex 32)"
+
+sign_manifest() {
+    env BAUD_UPDATE_SIGNING_KEY="$FIXTURE_KEY" \
+        "$repo_root/tools/packaging/sign_update_manifest.sh" "$dist" "v0.0.0-test" >/dev/null
+}
+
 # ── positive: full desktop bundle passes ──
 setup_staging
 make_bundle
 touch "$dist/baud-0.0.6-x86_64.AppImage" "$dist/baud_0.0.6_amd64.deb" "$dist/baud-0.0.6-1.x86_64.rpm"
 make_manifest
+sign_manifest
 "$repo_root/tools/packaging/verify_release_assets.sh" "$dist"
 
 # ── negative: invalid manifest ──
+rm -f "$dist/update-manifest.json" "$dist/update-manifest.sig"
 printf '0%.0s' {1..64} > "$dist/SHA256SUMS"
 printf '  baud_Linux_x86_64.tar.gz\n' >> "$dist/SHA256SUMS"
 if "$repo_root/tools/packaging/verify_release_assets.sh" "$dist"; then
@@ -50,6 +60,7 @@ setup_staging
 rm -f "$tmpdir/staging/share/applications/baud.desktop"
 make_bundle
 make_manifest
+sign_manifest
 if "$repo_root/tools/packaging/verify_release_assets.sh" "$dist"; then
     echo "Error: missing desktop entry unexpectedly passed" >&2
     exit 1
@@ -60,6 +71,7 @@ setup_staging
 rm -f "$tmpdir/staging/share/icons/hicolor/48x48/apps/baud.png"
 make_bundle
 make_manifest
+sign_manifest
 if "$repo_root/tools/packaging/verify_release_assets.sh" "$dist"; then
     echo "Error: missing 48 px icon unexpectedly passed" >&2
     exit 1
@@ -70,6 +82,7 @@ setup_staging
 rm -f "$tmpdir/staging/share/icons/hicolor/256x256/apps/baud.png"
 make_bundle
 make_manifest
+sign_manifest
 if "$repo_root/tools/packaging/verify_release_assets.sh" "$dist"; then
     echo "Error: missing 256 px icon unexpectedly passed" >&2
     exit 1
@@ -80,6 +93,7 @@ setup_staging
 printf 'extra' > "$tmpdir/staging/share/extra.txt"
 make_bundle
 make_manifest
+sign_manifest
 if "$repo_root/tools/packaging/verify_release_assets.sh" "$dist"; then
     echo "Error: extra file in bundle unexpectedly passed" >&2
     exit 1
@@ -94,6 +108,7 @@ tar czf "$dist/baud_Linux_x86_64.tar.gz" \
     --transform 's|^trav$|../outside|' \
     -C "$tmpdir/staging" trav 2>/dev/null || true
 make_manifest
+sign_manifest
 if "$repo_root/tools/packaging/verify_release_assets.sh" "$dist"; then
     echo "Error: traversal path in bundle unexpectedly passed" >&2
     exit 1
@@ -104,6 +119,7 @@ setup_staging
 ln -sf /etc/passwd "$tmpdir/staging/share/applications/link.desktop"
 make_bundle
 make_manifest
+sign_manifest
 if "$repo_root/tools/packaging/verify_release_assets.sh" "$dist"; then
     echo "Error: symlink in bundle unexpectedly passed" >&2
     exit 1
@@ -129,6 +145,7 @@ tar czf "$dist/baud_Linux_x86_64.tar.gz" \
     -C "$tmpdir/staging" baud share \
     -C "$tmpdir/staging2" share/applications/baud.desktop 2>/dev/null || true
 make_manifest
+sign_manifest
 if "$repo_root/tools/packaging/verify_release_assets.sh" "$dist"; then
     echo "Error: duplicate file in bundle unexpectedly passed" >&2
     exit 1
