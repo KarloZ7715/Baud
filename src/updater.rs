@@ -19,7 +19,7 @@ use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tar::Archive;
-use tempfile::Builder;
+use tempfile::{Builder, TempDir};
 
 use crate::base64;
 use crate::installation::Installation;
@@ -188,7 +188,7 @@ impl Updater {
         let staging = self.stage_archive(&archive, &manifest)?;
 
         self.println_phase(&format!("Installing Baud v{installed} -> v{release}..."));
-        commit_update(&self.installation, &staging)?;
+        commit_update(&self.installation, staging.path())?;
 
         self.println_phase(&format!("Updated Baud v{installed} -> v{release}."));
         Ok(())
@@ -214,12 +214,12 @@ impl Updater {
             "https://github.com/{GITHUB_REPO}/releases/download/{release_tag}/update-manifest.sig"
         );
 
-        let manifest_json = self
+        // Descargamos el manifiesto como bytes brutos para verificar la firma
+        // sobre el payload exacto publicado; despues lo parseamos como JSON.
+        let manifest_bytes = self
             .client
-            .get_json(&manifest_url, MAX_MANIFEST_BYTES)
+            .get_bytes(&manifest_url, MAX_MANIFEST_BYTES)
             .map_err(|e| UpdateError::ManifestFetch(e.to_string()))?;
-        let manifest_bytes = serde_json::to_vec(&manifest_json)
-            .map_err(|e| UpdateError::ManifestInvalid(e.to_string()))?;
 
         let sig_b64 = self
             .client
@@ -233,7 +233,7 @@ impl Updater {
             .verify_strict(&manifest_bytes, &signature)
             .map_err(|_| UpdateError::SignatureInvalid)?;
 
-        let manifest: UpdateManifest = serde_json::from_value(manifest_json)
+        let manifest: UpdateManifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|e| UpdateError::ManifestInvalid(e.to_string()))?;
 
         if manifest.version != 1
@@ -294,25 +294,29 @@ impl Updater {
         &self,
         archive: &[u8],
         _manifest: &UpdateManifest,
-    ) -> Result<PathBuf, UpdateError> {
+    ) -> Result<TempDir, UpdateError> {
         let binary_parent = self
             .installation
             .binary_path
             .parent()
             .ok_or_else(|| UpdateError::InstallPathInvalid("missing binary parent".into()))?;
 
-        let perms = std::fs::Permissions::from_mode(0o700);
+        // Los permisos restrictivos solo aplican en sistemas Unix; en Windows
+        // el directorio temporal hereda la ACL del directorio padre.
+        #[cfg(unix)]
         let staging = Builder::new()
             .prefix(".baud-update-")
-            .permissions(perms)
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir_in(binary_parent)
+            .map_err(UpdateError::Io)?;
+        #[cfg(not(unix))]
+        let staging = Builder::new()
+            .prefix(".baud-update-")
             .tempdir_in(binary_parent)
             .map_err(UpdateError::Io)?;
 
         validate_and_extract(archive, staging.path())?;
-        // Conservamos el directorio para que `commit_update` pueda usarlo.
-        #[allow(deprecated)]
-        let path = staging.into_path();
-        Ok(path)
+        Ok(staging)
     }
 
     fn println_phase(&self, message: &str) {
@@ -824,7 +828,6 @@ mod tests {
     use super::*;
     use crate::installation::Installation;
     use ed25519_dalek::{Signer, SigningKey};
-    use rand_core::OsRng;
     use std::collections::HashMap;
     use std::sync::Mutex;
 
@@ -884,10 +887,27 @@ mod tests {
         }
     }
 
+    /// Semillas de vectores de prueba RFC 8032 conocidos.
+    /// No son secretos reales; solo se usan para tests deterministicos.
+    const TEST_SEED: [u8; 32] = [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60, 0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c,
+        0xc4, 0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19, 0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae,
+        0x7f, 0x60,
+    ];
+    const TEST_BAD_SEED: [u8; 32] = [
+        0x4c, 0xcd, 0x08, 0x9b, 0x28, 0xff, 0x96, 0xda, 0x9d, 0xb6, 0xc3, 0x46, 0xec, 0x11, 0x4e,
+        0x0f, 0x5b, 0x8a, 0x31, 0x9f, 0x35, 0xab, 0xa6, 0x24, 0xda, 0x8c, 0xf6, 0xed, 0x4f, 0xb8,
+        0xa6, 0xfb,
+    ];
+
     fn generate_keypair() -> (SigningKey, VerifyingKey) {
-        let signing = SigningKey::generate(&mut OsRng);
+        let signing = SigningKey::from_bytes(&TEST_SEED);
         let verifying = signing.verifying_key();
         (signing, verifying)
+    }
+
+    fn bad_verifying_key() -> VerifyingKey {
+        SigningKey::from_bytes(&TEST_BAD_SEED).verifying_key()
     }
 
     fn make_archive(new_version: &str) -> Vec<u8> {
@@ -944,10 +964,9 @@ mod tests {
             asset: ASSET_NAME.into(),
             sha256: digest.clone(),
         };
-        let manifest_json = serde_json::to_value(&manifest).unwrap();
-        // Firmamos la serializacion del Value para que coincida exactamente
-        // con lo que el updater reconstruye tras recibir el JSON.
-        let manifest_bytes = serde_json::to_vec(&manifest_json).unwrap();
+        // Firmamos el JSON exacto tal como se publica; el updater verifica la
+        // firma sobre los bytes brutos antes de parsearlos.
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
         let signature = signing.sign(&manifest_bytes);
         let sig_b64 = base64::encode(&signature.to_bytes());
 
@@ -955,11 +974,11 @@ mod tests {
             &format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest"),
             serde_json::json!({"tag_name": format!("v{new_version}")}),
         );
-        client.set_json(
+        client.set_bytes(
             &format!(
                 "https://github.com/{GITHUB_REPO}/releases/download/v{new_version}/update-manifest.json"
             ),
-            manifest_json,
+            manifest_bytes,
         );
         client.set_bytes(
             &format!(
@@ -1069,7 +1088,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let installation = make_installation(&tmp);
         let (signing, _key) = generate_keypair();
-        let (_, key_bad) = generate_keypair();
+        let key_bad = bad_verifying_key();
         let (client, _archive, _digest) = build_release_fixture(&signing, "0.0.7");
 
         assert!(matches!(
