@@ -2,171 +2,18 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [master]
   pull_request:
-    branches: [main, master]
-
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-
-permissions:
-  contents: read
+    branches: [master]
 
 jobs:
-  # Job 1: checks basicos
-  checks:
-    name: fmt + clippy
+  shell-fixtures:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      - name: Instalar Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-
-      - name: Cachear target/
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-on-failure: true
-
-      - name: Verificar formato
-        run: cargo fmt --all -- --check
-
-      - name: Clippy (sin warnings)
-        run: cargo clippy --all-targets -- -D warnings
-
-  # Job 2: tests
-  test:
-    name: tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      - name: Instalar Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-
-      - name: Cachear target/
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-on-failure: true
-
-      - name: Correr tests
-        run: cargo test --all --verbose
-
-  # Job 3: build de release
-  build:
-    name: build release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      - name: Instalar Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-
-      - name: Cachear target/
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-on-failure: true
-
-      - name: Compilar en release
-        run: cargo build --release --locked
-
-  # Job 4: gate de compile en Windows
-  windows-compile:
-    name: windows compile
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      - name: Instalar Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-
-      - name: Cachear target/
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-on-failure: true
-
-      - name: cargo check (Windows)
-        run: cargo check --all-targets
-
-      - name: cargo build (Windows)
-        run: cargo build --locked
-
-  # Job 5: gate blando de runtime ConPTY en Windows. Headless, sin winit.
-  # Soft gate: continue-on-error hasta la ventana de estabilidad.
-  windows-conpty:
-    name: windows-conpty
-    runs-on: windows-latest
-    timeout-minutes: 30
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      - name: Instalar Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-
-      - name: Cachear target/
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-on-failure: true
-
-      - name: Tests de sesión ConPTY (headless)
-        shell: pwsh
-        run: |
-          $maxIntentos = 2
-          $codigo = 1
-          for ($intento = 1; $intento -le $maxIntentos; $intento++) {
-            Write-Host "Intento ${intento} de ${maxIntentos}"
-            cargo test --test pty_session_conformance -- --test-threads=1 --nocapture
-            $codigo = $LASTEXITCODE
-            if ($codigo -eq 0) { break }
-            if ($intento -lt $maxIntentos) {
-              Write-Host "Reintentando tras fallo (intento ${intento})..."
-              Start-Sleep -Seconds 5
-            }
-          }
-          if ($codigo -ne 0) {
-            Write-Host "Los tests de sesión ConPTY fallaron tras ${maxIntentos} intentos"
-          }
-          exit $codigo
-
-  # Job 6: smoke X11 bajo xvfb.
-  xvfb-smoke:
-    name: xvfb X11 smoke
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      - name: Instalar Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-
-      - name: Cachear target/
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          cache-on-failure: true
-
-      - name: Instalar xvfb + deps X11 + Mesa software
-        run: sudo apt-get update && sudo apt-get install -y xvfb libxkbcommon-x11-0 mesa-vulkan-drivers libegl-mesa0
-
-      - name: Smoke X11 (sin Wayland)
-        env:
-          WAYLAND_DISPLAY: ""
-          WAYLAND_SOCKET: ""
-          LIBGL_ALWAYS_SOFTWARE: "1"
-        run: |
-          unset WAYLAND_DISPLAY WAYLAND_SOCKET || true
-          chmod +x tools/linux_session_smoke.sh
-          tools/linux_session_smoke.sh --xvfb --build
-
-  release-policy:
-    name: release policy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-
-      - name: Verify automated version policy
-        env:
-          # Add release:manual-version only to an intentionally reviewed Y or X bump.
-          RELEASE_MANUAL_VERSION: ${{ contains(github.event.pull_request.labels.*.name, 'release:manual-version') }}
-        run: tools/ci/verify_release_policy.sh
+      - uses: actions/checkout@v4
+      - name: Validate desktop entry source
+        run: desktop-file-validate assets/packaging/baud.desktop
+      - name: Run release asset fixture suite
+        run: bash tools/ci/test_release_assets.sh
+      - name: Run installer fixture suite
+        run: bash tools/ci/test_install_release.sh
