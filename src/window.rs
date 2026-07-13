@@ -1853,11 +1853,11 @@ impl App {
         // Si aceptó, crear y registrar el reporter
         if accepted {
             let dsn = crate::event_loop::resolve_dsn(&self.config);
-            if dsn.is_some() {
+            if let Some(dsn) = dsn {
                 let install_id = crate::diagnostics::install_id::load_or_create_install_id();
                 let transport = crate::diagnostics::transport::UreqTransport::new();
                 let reporter = crate::diagnostics::reporter::Reporter::new(
-                    dsn,
+                    Some(dsn),
                     install_id,
                     Box::new(transport),
                 );

@@ -226,9 +226,28 @@ fn generate_event_id() -> String {
     format!("{mixed:016x}{counter:016x}")
 }
 
-/// Formatea un timestamp Unix (segundos) para Sentry.
+/// Convierte epoch seconds a ISO 8601 UTC: `2026-07-13T01:55:05.000Z`.
 fn format_timestamp(ts: i64) -> String {
-    ts.to_string()
+    let secs = ts;
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+
+    let h = time_of_day / 3600;
+    let m = (time_of_day % 3600) / 60;
+    let s = time_of_day % 60;
+
+    // Algoritmo de Conway para fecha gregoriana desde días julianos.
+    // https://en.wikipedia.org/wiki/Julian_day#Gregorian_calendar_from_Julian_day_number
+    let jd = days + 2440588; // 1970-01-01 = JD 2440587.5 → floor = 2440588
+    let f = jd + 1401 + (((4 * jd + 274277) / 146097) * 3) / 4 - 38;
+    let e = 4 * f + 3;
+    let g = (e % 1461) / 4;
+    let h2 = 5 * g + 2;
+    let day = (h2 % 153) / 5 + 1;
+    let month = ((h2 / 153 + 2) % 12) + 1;
+    let year = (e / 1461) - 4716 + ((14 - month) / 12);
+
+    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}.000Z")
 }
 
 /// Genera un ID de instalación con 32 hex chars.
@@ -296,11 +315,11 @@ mod tests {
     }
 
     #[test]
-    fn format_timestamp_produce_epoch_seconds() {
+    fn format_timestamp_produce_iso() {
         let ts = format_timestamp(0);
-        assert_eq!(ts, "0");
+        assert_eq!(ts, "1970-01-01T00:00:00.000Z");
         let ts2 = format_timestamp(1718123456);
-        assert_eq!(ts2, "1718123456");
+        assert!(ts2.starts_with("2024-06-11"));
     }
 
     #[test]
