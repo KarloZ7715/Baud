@@ -117,9 +117,10 @@ install_desktop_resources() {
     chmod 755 "$app_dir" "$icon48_dir" "$icon256_dir" 2>/dev/null || true
 
     escaped_exec=$(escape_desktop_exec "$exec_path")
-    cp "${extract_dir}/share/applications/baud.desktop" "${app_dir}/baud.desktop.tmp."$$
-    sed "s|^Exec=.*|Exec=${escaped_exec}|" \
-        < "${extract_dir}/share/applications/baud.desktop" \
+    awk -v exec="$escaped_exec" '
+        /^Exec=/ { print "Exec=" exec; next }
+        { print }
+    ' "${extract_dir}/share/applications/baud.desktop" \
         > "${app_dir}/baud.desktop.tmp.$$"
     mv -f "${app_dir}/baud.desktop.tmp.$$" "${app_dir}/baud.desktop"
 
@@ -130,8 +131,6 @@ install_desktop_resources() {
 }
 
 validate_archive_layout() {
-    extract_dir="$1"
-
     tar_entries=$(tar tzf "${tmpdir}/${tarball}" 2>/dev/null || true)
     if [ -z "$tar_entries" ]; then
         print_error "Cannot read tarball contents"
