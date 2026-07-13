@@ -8,8 +8,8 @@ GITHUB_REPO="KarloZ7715/Baud"
 PROGRAM_NAME="baud"
 
 if [ "$(id -u)" -eq 0 ]; then
-    INSTALL_DIR="/usr/local/bin"
     PREFIX="${BAUD_INSTALL_PREFIX:-/usr/local}"
+    INSTALL_DIR="${PREFIX}/bin"
 else
     INSTALL_DIR="${HOME}/.local/bin"
 fi
