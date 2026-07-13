@@ -23,6 +23,54 @@ print_error() {
     exit 1
 }
 
+validate_root_prefix() {
+    prefix=$1
+    case "$prefix" in
+        /*) ;;
+        *) print_error "Root installation prefix must be absolute: $prefix" ;;
+    esac
+
+    # uid real del proceso, sin tener en cuenta un posible `id` falso en tests.
+    real_uid=$(/usr/bin/id -u)
+
+    for dir in "$prefix" "$prefix/bin" "$prefix/share"; do
+        [ -e "$dir" ] || continue
+        if [ -L "$dir" ]; then
+            print_error "Rejected: $dir is a symbolic link"
+        fi
+        owner=$(stat -c '%u' "$dir" 2>/dev/null || echo "")
+        if [ "$owner" != "$real_uid" ] && [ "$owner" != "0" ]; then
+            print_error "Rejected: $dir is not owned by the installer"
+        fi
+        perms=$(stat -c '%a' "$dir" 2>/dev/null || echo "")
+        if [ -n "$perms" ]; then
+            group_digit=${perms#?}; group_digit=${group_digit%?}
+            other_digit=${perms#??}
+            case "$group_digit$other_digit" in
+                *[2367]*)
+                    print_error "Rejected: $dir is group or world writable"
+                    ;;
+            esac
+        fi
+    done
+}
+
+write_receipt() {
+    exec_path=$1
+    data_dir=$2
+    receipt_dir=$(dirname "$exec_path")
+    receipt="${receipt_dir}/.baud-install.toml"
+
+    cat > "$receipt" <<EOF
+# Baud official install receipt
+schema_version = 1
+managed_by = "baud-installer"
+binary_path = "$exec_path"
+data_dir = "$data_dir"
+EOF
+    chmod 644 "$receipt"
+}
+
 detect_architecture() {
     arch=$(uname -m)
     case "$arch" in
@@ -154,6 +202,10 @@ download_and_install() {
         print_error "Could not determine latest version"
     fi
 
+    if [ "$(id -u)" -eq 0 ]; then
+        validate_root_prefix "$PREFIX"
+    fi
+
     tarball="baud_${os}_${arch}.tar.gz"
     download_url="https://github.com/${GITHUB_REPO}/releases/download/${version}/${tarball}"
     checksum_url="https://github.com/${GITHUB_REPO}/releases/download/${version}/SHA256SUMS"
@@ -213,8 +265,9 @@ download_and_install() {
     exec_path="${INSTALL_DIR}/${PROGRAM_NAME}"
     print_message "Baud ${version} installed to ${exec_path}"
 
+    data_dir=$(xdg_data_dir)
+
     if has_desktop_bundle "${tmpdir}/extract"; then
-        data_dir=$(xdg_data_dir)
         install_desktop_resources "${tmpdir}/extract" "$data_dir" "$exec_path"
 
         print_message "Baud is now available from your application launcher."
@@ -225,14 +278,16 @@ download_and_install() {
         printf '  Launcher registration requires a newer release with desktop\n'
         printf '  bundle support. The baud command is ready to use.\n'
     fi
+
+    write_receipt "$exec_path" "$data_dir"
+    print_message "Ownership receipt written to $(dirname "$exec_path")/.baud-install.toml"
 }
 
 main() {
     print_message "Installing Baud..."
 
     if command -v baud >/dev/null 2>&1; then
-        current=$(baud --version 2>/dev/null || echo "unknown")
-        print_message "Baud ${current} is already installed. Reinstalling..."
+        print_message "Baud is already installed. Reinstalling..."
     fi
 
     os=$(detect_os)

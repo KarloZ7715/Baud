@@ -107,6 +107,10 @@ test -f "$home/.local/share/applications/baud.desktop"
 test -f "$home/.local/share/icons/hicolor/48x48/apps/baud.png"
 test -f "$home/.local/share/icons/hicolor/256x256/apps/baud.png"
 grep -q "Exec=$home/.local/bin/baud" "$home/.local/share/applications/baud.desktop"
+test -f "$home/.local/bin/.baud-install.toml"
+grep -q "managed_by = \"baud-installer\"" "$home/.local/bin/.baud-install.toml"
+grep -q "binary_path = \"$home/.local/bin/baud\"" "$home/.local/bin/.baud-install.toml"
+grep -q "data_dir = \"$home/.local/share\"" "$home/.local/bin/.baud-install.toml"
 
 echo "PASS: desktop bundle user install"
 
@@ -126,6 +130,8 @@ home="$tmpdir/home-legacy"
 output=$(XDG_DATA_HOME="" run_install "$home" 2>&1) || true
 test -x "$home/.local/bin/baud"
 test ! -f "$home/.local/share/applications/baud.desktop" 2>/dev/null || true
+test -f "$home/.local/bin/.baud-install.toml"
+grep -q "data_dir = \"$home/.local/share\"" "$home/.local/bin/.baud-install.toml"
 echo "$output" | grep -q "does not include desktop launcher files"
 
 echo "PASS: legacy binary-only profile"
@@ -191,6 +197,10 @@ test -f "$prefix/share/applications/baud.desktop"
 test -f "$prefix/share/icons/hicolor/48x48/apps/baud.png"
 test -f "$prefix/share/icons/hicolor/256x256/apps/baud.png"
 grep -q "Exec=$prefix/bin/baud" "$prefix/share/applications/baud.desktop"
+test -f "$prefix/bin/.baud-install.toml"
+grep -q "managed_by = \"baud-installer\"" "$prefix/bin/.baud-install.toml"
+grep -q "binary_path = \"$prefix/bin/baud\"" "$prefix/bin/.baud-install.toml"
+grep -q "data_dir = \"$prefix/share\"" "$prefix/bin/.baud-install.toml"
 
 echo "PASS: root install with BAUD_INSTALL_PREFIX"
 
@@ -203,6 +213,8 @@ XDG_DATA_HOME="$custom_data" run_install "$home"
 test -f "$custom_data/applications/baud.desktop"
 test -f "$custom_data/icons/hicolor/48x48/apps/baud.png"
 test -f "$custom_data/icons/hicolor/256x256/apps/baud.png"
+test -f "$home/.local/bin/.baud-install.toml"
+grep -q "data_dir = \"$custom_data\"" "$home/.local/bin/.baud-install.toml"
 
 echo "PASS: absolute XDG_DATA_HOME"
 
@@ -213,6 +225,8 @@ home="$tmpdir/home-xdg-rel"
 XDG_DATA_HOME="relative/path" run_install "$home"
 test -f "$home/.local/share/applications/baud.desktop"
 test ! -e "$home/relative" 2>/dev/null || true
+test -f "$home/.local/bin/.baud-install.toml"
+grep -q "data_dir = \"$home/.local/share\"" "$home/.local/bin/.baud-install.toml"
 
 echo "PASS: relative XDG_DATA_HOME fallback"
 
