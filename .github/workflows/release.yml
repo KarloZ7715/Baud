@@ -154,7 +154,6 @@ jobs:
           done > SHA256SUMS
 
       - name: Sign update manifest
-        if: needs.prepare-release.outputs.publish == 'true'
         env:
           BAUD_UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
         run: ./tools/packaging/sign_update_manifest.sh dist "${{ needs.prepare-release.outputs.tag }}"
