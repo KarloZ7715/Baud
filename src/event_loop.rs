@@ -29,7 +29,13 @@ use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
 const METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Resuelve el DSN de Sentry: override de config > variable de build > None.
+/// DSN por defecto del proyecto Baud en Sentry. Clave pública de cliente:
+/// solo permite enviar eventos, no leerlos. El usuario puede sobrescribirlo
+/// en config.toml o vía `BAUD_SENTRY_DSN` al compilar.
+const DEFAULT_SENTRY_DSN: &str =
+    "https://8def52da66d47b762219ac50c5f81d07@o4511043905126400.ingest.us.sentry.io/4511725171376128";
+
+/// Resuelve el DSN de Sentry: override de config > variable de build > default del proyecto.
 pub fn resolve_dsn(config: &Config) -> Option<String> {
     config
         .diagnostics
@@ -37,6 +43,7 @@ pub fn resolve_dsn(config: &Config) -> Option<String> {
         .dsn
         .clone()
         .or_else(|| option_env!("BAUD_SENTRY_DSN").map(String::from))
+        .or_else(|| Some(DEFAULT_SENTRY_DSN.to_string()))
 }
 
 /// Crea y registra el reporter si el consentimiento es `Accepted` y hay DSN.
