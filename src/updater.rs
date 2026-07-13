@@ -39,11 +39,10 @@ const MAX_DESKTOP_BYTES: u64 = 64 * 1024;
 const MAX_ICON_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Clave publica embebida para verificar el manifiesto de actualizacion.
-///
-/// Hasta que se aprovisione el par de produccion, esta clave es un
-/// marcador de posicion: el updater rechazara la operacion con un error
-/// explicito en builds reales.
-const UPDATE_PUBLIC_KEY_BYTES: [u8; 32] = [0u8; 32];
+const UPDATE_PUBLIC_KEY_BYTES: [u8; 32] = [
+    0x6e, 0x7a, 0x14, 0x24, 0x0d, 0xaf, 0x33, 0x8d, 0x64, 0x2b, 0xab, 0x84, 0x86, 0x24, 0x61, 0x27,
+    0x86, 0x9a, 0x95, 0x92, 0xf6, 0x66, 0x86, 0xbb, 0x66, 0x63, 0xb8, 0x38, 0xdf, 0x85, 0x0e, 0xa7,
+];
 
 /// Manifiesto firmado que vincula una release con su asset y digest.
 #[derive(Debug, Serialize, Deserialize)]
