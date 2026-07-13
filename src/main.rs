@@ -14,13 +14,20 @@ fn init_tracing() {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    baud::diagnostics::hooks::install_panic_hook();
-    init_tracing();
+    // Los comandos CLI informativos y de actualizacion se ejecutan antes de
+    // inicializar cualquier subsistema grafico o de diagnostico.
+    match baud::cli::run()? {
+        Some(code) => std::process::exit(code),
+        None => {
+            baud::diagnostics::hooks::install_panic_hook();
+            init_tracing();
 
-    tracing::info!("baud starting");
+            tracing::info!("baud starting");
 
-    // ponytail: el event loop es bloqueante. No hace falta join explicito.
-    baud::event_loop::run()?;
+            // ponytail: el event loop es bloqueante. No hace falta join explicito.
+            baud::event_loop::run()?;
 
-    Ok(())
+            Ok(())
+        }
+    }
 }
