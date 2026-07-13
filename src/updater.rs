@@ -129,15 +129,19 @@ pub struct Updater {
     installation: Installation,
     client: Box<dyn HttpClient>,
     verifying_key: VerifyingKey,
+    installed_version: Version,
 }
 
 impl Updater {
     pub fn new(installation: Installation) -> Self {
         let key = load_embedded_key();
+        let installed_version =
+            Version::parse_package(env!("CARGO_PKG_VERSION")).expect("version valida");
         Self {
             installation,
             client: Box::new(UreqClient::new()),
             verifying_key: key,
+            installed_version,
         }
     }
 
@@ -148,18 +152,20 @@ impl Updater {
         installation: Installation,
         client: Box<dyn HttpClient>,
         key: VerifyingKey,
+        installed_version: Version,
     ) -> Self {
         Self {
             installation,
             client,
             verifying_key: key,
+            installed_version,
         }
     }
 
     pub fn run(&self) -> Result<(), UpdateError> {
         self.ensure_supported_platform()?;
 
-        let installed = Version::parse_package(env!("CARGO_PKG_VERSION"))?;
+        let installed = self.installed_version.clone();
 
         self.println_phase("Checking for updates...");
         let release_tag = fetch_latest_release(self.client.as_ref())?;
@@ -910,6 +916,10 @@ mod tests {
         SigningKey::from_bytes(&TEST_BAD_SEED).verifying_key()
     }
 
+    fn installed_version() -> Version {
+        Version::parse_package("0.0.6").unwrap()
+    }
+
     fn make_archive(new_version: &str) -> Vec<u8> {
         let tmp = tempfile::tempdir().unwrap();
         let staging = tmp.path().join("staging");
@@ -1031,8 +1041,9 @@ mod tests {
         installation: Installation,
         client: MockClient,
         key: VerifyingKey,
+        installed: Version,
     ) -> Result<(), UpdateError> {
-        Updater::with_client_and_key(installation, Box::new(client), key).run()
+        Updater::with_client_and_key(installation, Box::new(client), key, installed).run()
     }
 
     #[test]
@@ -1042,7 +1053,7 @@ mod tests {
         let (signing, key) = generate_keypair();
         let (client, _archive, _digest) = build_release_fixture(&signing, "0.0.7");
 
-        run_updater(installation.clone(), client, key).unwrap();
+        run_updater(installation.clone(), client, key, installed_version()).unwrap();
 
         let new_output = std::process::Command::new(&installation.binary_path)
             .output()
@@ -1061,7 +1072,7 @@ mod tests {
             .unwrap()
             .modified()
             .unwrap();
-        run_updater(installation.clone(), client, key).unwrap();
+        run_updater(installation.clone(), client, key, installed_version()).unwrap();
         let after = fs::metadata(&installation.binary_path)
             .unwrap()
             .modified()
@@ -1078,7 +1089,7 @@ mod tests {
         let (client, _archive, _digest) = build_release_fixture(&signing, "0.0.5");
 
         assert!(matches!(
-            run_updater(installation.clone(), client, key),
+            run_updater(installation.clone(), client, key, installed_version()),
             Err(UpdateError::StaleRelease { .. })
         ));
     }
@@ -1092,7 +1103,7 @@ mod tests {
         let (client, _archive, _digest) = build_release_fixture(&signing, "0.0.7");
 
         assert!(matches!(
-            run_updater(installation.clone(), client, key_bad),
+            run_updater(installation.clone(), client, key_bad, installed_version()),
             Err(UpdateError::SignatureInvalid)
         ));
     }
@@ -1112,7 +1123,7 @@ mod tests {
         );
 
         assert!(matches!(
-            run_updater(installation.clone(), client, key),
+            run_updater(installation.clone(), client, key, installed_version()),
             Err(UpdateError::ChecksumMismatch)
         ));
     }
@@ -1130,7 +1141,7 @@ mod tests {
         );
 
         assert!(matches!(
-            run_updater(installation.clone(), client, key),
+            run_updater(installation.clone(), client, key, installed_version()),
             Err(UpdateError::Checksum(_))
         ));
     }
@@ -1153,7 +1164,7 @@ mod tests {
         );
 
         let before = fs::read(&installation.binary_path).unwrap();
-        assert!(run_updater(installation.clone(), client, key).is_err());
+        assert!(run_updater(installation.clone(), client, key, installed_version()).is_err());
         let after = fs::read(&installation.binary_path).unwrap();
         assert_eq!(before, after);
     }
