@@ -75,16 +75,20 @@ fn build_event_payload(
 
 /// Etiquetas de metadata del sistema (OS, arch).
 pub fn system_tags() -> HashMap<String, String> {
-    let mut tags = HashMap::new();
-    tags.insert("os".to_string(), std::env::consts::OS.to_string());
-    tags.insert("arch".to_string(), std::env::consts::ARCH.to_string());
-    tags.insert(
-        "release".to_string(),
-        option_env!("BAUD_RELEASE_VERSION")
-            .unwrap_or(env!("CARGO_PKG_VERSION"))
-            .to_string(),
-    );
-    tags
+    use std::sync::LazyLock;
+    static TAGS: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
+        let mut tags = HashMap::new();
+        tags.insert("os".to_string(), std::env::consts::OS.to_string());
+        tags.insert("arch".to_string(), std::env::consts::ARCH.to_string());
+        tags.insert(
+            "release".to_string(),
+            option_env!("BAUD_RELEASE_VERSION")
+                .unwrap_or(env!("CARGO_PKG_VERSION"))
+                .to_string(),
+        );
+        tags
+    });
+    TAGS.clone()
 }
 
 #[cfg(test)]

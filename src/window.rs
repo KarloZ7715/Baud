@@ -1854,15 +1854,7 @@ impl App {
         if accepted {
             let dsn = crate::event_loop::resolve_dsn(&self.config);
             if let Some(dsn) = dsn {
-                let install_id = crate::diagnostics::install_id::load_or_create_install_id();
-                let transport = crate::diagnostics::transport::UreqTransport::new();
-                let reporter = crate::diagnostics::reporter::Reporter::new(
-                    Some(dsn),
-                    install_id,
-                    Box::new(transport),
-                );
-                crate::diagnostics::hooks::set_reporter(reporter.handle());
-                tracing::info!("reporter: active after consent");
+                crate::event_loop::activate_reporter(dsn);
             }
         }
 

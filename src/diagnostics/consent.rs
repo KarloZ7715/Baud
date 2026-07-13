@@ -22,7 +22,6 @@ pub enum ConsentState {
 
 impl ConsentState {
     /// Deriva el estado desde el valor `enabled` de la config.
-    /// `None` = nunca decidió; `Some(true)` = aceptó; `Some(false)` = rechazó.
     pub fn from_config(enabled: Option<bool>) -> Self {
         match enabled {
             Some(true) => Self::Accepted,
@@ -31,7 +30,7 @@ impl ConsentState {
         }
     }
 
-    /// `true` si el usuario ya tomó una decisión (Accepted o Declined).
+    /// `true` si el usuario ya tomó una decisión.
     pub fn is_decided(self) -> bool {
         matches!(self, Self::Accepted | Self::Declined)
     }
@@ -39,30 +38,42 @@ impl ConsentState {
 
 /// Escribe `[diagnostics.reporting] enabled = bool` en config.toml.
 /// Crea el archivo y los directorios padres si no existen.
-/// Devuelve la ruta del archivo escrito.
-pub fn persist_reporting_enabled(enabled: bool) -> Result<PathBuf, PersistError> {
+pub fn persist_reporting_enabled(
+    enabled: bool,
+) -> Result<PathBuf, crate::config::persist::PersistError> {
     let path = crate::config::persist::config_write_path();
-
-    if path.exists() {
-        let content = fs::read_to_string(&path).map_err(|e| PersistError::Io(e.to_string()))?;
-        let mut doc = content
-            .parse::<DocumentMut>()
-            .map_err(|e| PersistError::Parse(e.to_string()))?;
-        ensure_diagnostics_section(&mut doc, enabled);
-        fs::write(&path, doc.to_string()).map_err(|e| PersistError::Io(e.to_string()))?;
-    } else {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| PersistError::Io(e.to_string()))?;
-        }
-        let mut doc = DocumentMut::new();
-        ensure_diagnostics_section(&mut doc, enabled);
-        fs::write(&path, doc.to_string()).map_err(|e| PersistError::Io(e.to_string()))?;
-    }
-
+    persist_at(&path, enabled)?;
     Ok(path)
 }
 
-/// Asegura que el documento TOML tenga `[diagnostics.reporting]` con `enabled`.
+/// Implementación interna que acepta una ruta explícita.
+fn persist_at(path: &PathBuf, enabled: bool) -> Result<(), crate::config::persist::PersistError> {
+    match fs::read_to_string(path) {
+        Ok(content) => {
+            let mut doc = content
+                .parse::<DocumentMut>()
+                .map_err(|e| crate::config::persist::PersistError::Parse(e.to_string()))?;
+            ensure_diagnostics_section(&mut doc, enabled);
+            fs::write(path, doc.to_string())
+                .map_err(|e| crate::config::persist::PersistError::Io(e.to_string()))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| crate::config::persist::PersistError::Io(e.to_string()))?;
+            }
+            let mut doc = DocumentMut::new();
+            ensure_diagnostics_section(&mut doc, enabled);
+            fs::write(path, doc.to_string())
+                .map_err(|e| crate::config::persist::PersistError::Io(e.to_string()))?;
+        }
+        Err(e) => {
+            return Err(crate::config::persist::PersistError::Io(e.to_string()));
+        }
+    }
+    Ok(())
+}
+
 fn ensure_diagnostics_section(doc: &mut DocumentMut, enabled: bool) {
     let diag = doc
         .entry("diagnostics")
@@ -75,22 +86,6 @@ fn ensure_diagnostics_section(doc: &mut DocumentMut, enabled: bool) {
 
         if let Item::Table(reporting_table) = reporting {
             reporting_table.insert("enabled", Item::Value(Value::from(enabled)));
-        }
-    }
-}
-
-/// Error al persistir el consentimiento.
-#[derive(Debug)]
-pub enum PersistError {
-    Io(String),
-    Parse(String),
-}
-
-impl std::fmt::Display for PersistError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(msg) => write!(f, "I/O: {msg}"),
-            Self::Parse(msg) => write!(f, "parse: {msg}"),
         }
     }
 }
@@ -139,8 +134,6 @@ mod tests {
     fn persist_enabled_true_crea_archivo() {
         let path = temp_config_path("new_true");
         cleanup(&path);
-        // Forzamos la ruta para el test; persist_reporting_enabled usa config_write_path
-        // que depende de dirs::config_dir(). Para tests usamos una ruta fija.
         persist_at(&path, true).unwrap();
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("[diagnostics]"));
@@ -182,25 +175,5 @@ mod tests {
         assert!(content.contains("enabled = false"));
         assert!(!content.contains("enabled = true"));
         cleanup(&path);
-    }
-
-    /// Versión de persist que acepta una ruta explícita (para tests).
-    fn persist_at(path: &PathBuf, enabled: bool) -> Result<(), PersistError> {
-        if path.exists() {
-            let content = fs::read_to_string(path).map_err(|e| PersistError::Io(e.to_string()))?;
-            let mut doc = content
-                .parse::<DocumentMut>()
-                .map_err(|e| PersistError::Parse(e.to_string()))?;
-            ensure_diagnostics_section(&mut doc, enabled);
-            fs::write(path, doc.to_string()).map_err(|e| PersistError::Io(e.to_string()))?;
-        } else {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).map_err(|e| PersistError::Io(e.to_string()))?;
-            }
-            let mut doc = DocumentMut::new();
-            ensure_diagnostics_section(&mut doc, enabled);
-            fs::write(path, doc.to_string()).map_err(|e| PersistError::Io(e.to_string()))?;
-        }
-        Ok(())
     }
 }

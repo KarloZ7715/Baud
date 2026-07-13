@@ -3,50 +3,60 @@
 //! Proporciona una abstracción `Transport` con dos implementaciones:
 //! - `UreqTransport`: envía vía HTTPS (TLS verificado).
 //! - `MockTransport`: para tests, registra los envíos en un `Vec`.
+//!
+//! Fail-closed: si falla, la app sigue sin error fatal.
 
 use std::sync::Mutex;
 
 /// Abstracción de transporte para enviar un envelope a Sentry.
-/// Fail-closed: si falla, la app sigue sin error fatal.
 pub trait Transport: Send + Sync {
     /// Envía el envelope (cuerpo HTTP ya construido).
-    /// Devuelve `Ok(())` si se envió con éxito o `Err` con descripción del fallo.
     fn send(&self, dsn: &str, envelope: &str) -> Result<(), String>;
 }
 
 /// Transporte real que envía envelopes vía HTTPS a Sentry.
+/// El URL y auth header se cachean tras el primer envío.
 #[derive(Default)]
-pub struct UreqTransport;
+pub struct UreqTransport {
+    cached_url: std::sync::OnceLock<String>,
+    cached_auth: std::sync::OnceLock<String>,
+}
 
 impl UreqTransport {
     pub fn new() -> Self {
-        Self
+        Self::default()
+    }
+
+    fn cache_dsn(&self, dsn: &str) -> Result<(&str, &str), String> {
+        let url = format!(
+            "https://{}.ingest.{}.sentry.io/api/{}/envelope/",
+            extract_host_prefix(dsn)?,
+            extract_region(dsn).unwrap_or("us"),
+            extract_project_id(dsn)?
+        );
+        let auth = format!(
+            "Sentry sentry_version=7,sentry_client=baud/{},sentry_key={}",
+            env!("CARGO_PKG_VERSION"),
+            extract_public_key(dsn).unwrap_or("unknown")
+        );
+
+        let url_ref = self.cached_url.get_or_init(|| url.clone());
+        let auth_ref = self.cached_auth.get_or_init(|| auth.clone());
+
+        // La primera llamada inicializa ambos; si ya estaban inicializados,
+        // ignorar los nuevos valores (DSN es inmutable en esta sesión).
+        Ok((url_ref.as_str(), auth_ref.as_str()))
     }
 }
 
 impl Transport for UreqTransport {
     fn send(&self, dsn: &str, envelope: &str) -> Result<(), String> {
-        let project_id = extract_project_id(dsn)?;
-        let url = format!(
-            "https://{}.ingest.{}.sentry.io/api/{}/envelope/",
-            extract_host_prefix(dsn)?,
-            extract_region(dsn).unwrap_or("us"),
-            project_id
-        );
+        let (url, auth) = self.cache_dsn(dsn)?;
 
-        let agent = ureq::agent();
-
-        let response = agent
-            .post(&url)
+        let response = ureq::agent()
+            .post(url)
             .header("Content-Type", "application/x-sentry-envelope")
-            .header(
-                "X-Sentry-Auth",
-                &format!(
-                    "Sentry sentry_version=7,sentry_client=baud/{},sentry_key={}",
-                    env!("CARGO_PKG_VERSION"),
-                    extract_public_key(dsn).unwrap_or("unknown")
-                ),
-            )
+            .header("X-Sentry-Auth", auth)
             .send(envelope)
             .map_err(|e| format!("network error: {e}"))?;
 
@@ -60,8 +70,6 @@ impl Transport for UreqTransport {
     }
 }
 
-/// Extrae el ID del proyecto del DSN.
-/// Formato DSN: `https://<key>@<host_prefix>.ingest.<region>.sentry.io/<project_id>`
 fn extract_project_id(dsn: &str) -> Result<&str, String> {
     let parts: Vec<&str> = dsn.rsplitn(2, ".sentry.io/").collect();
     if parts.len() < 2 {
@@ -75,7 +83,9 @@ fn extract_project_id(dsn: &str) -> Result<&str, String> {
 }
 
 fn extract_host_prefix(dsn: &str) -> Result<&str, String> {
-    let dsn = dsn.strip_prefix("https://").unwrap_or(dsn);
+    let dsn = dsn
+        .strip_prefix("https://")
+        .ok_or("DSN sin https://".to_string())?;
     let prefix = dsn
         .split('@')
         .nth(1)
@@ -103,9 +113,7 @@ pub struct MockTransport {
 
 impl MockTransport {
     pub fn new() -> Self {
-        Self {
-            sent: Mutex::new(Vec::new()),
-        }
+        Self::default()
     }
 
     pub fn reset(&self) {
@@ -137,6 +145,11 @@ mod tests {
     #[test]
     fn extract_project_id_devuelve_error_con_dsn_invalido() {
         assert!(extract_project_id("no-es-un-dsn").is_err());
+    }
+
+    #[test]
+    fn extract_host_prefix_sin_https_falla() {
+        assert!(extract_host_prefix("http://k@o0.ingest.us.sentry.io/1").is_err());
     }
 
     #[test]

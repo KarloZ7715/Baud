@@ -10,6 +10,10 @@ use crate::diagnostics::reporter::{EventLevel, ReportEvent, ReporterHandle};
 /// Handle global del reporter, accesible desde el panic hook.
 static REPORTER: OnceLock<ReporterHandle> = OnceLock::new();
 
+/// Millis de espera para que el worker envíe el evento antes de que el
+/// proceso termine tras un panic.
+const PANIC_FLUSH_GRACE_MS: u64 = 500;
+
 /// Registra el handle del reporter para que el panic hook pueda usarlo.
 pub fn set_reporter(handle: ReporterHandle) {
     if REPORTER.set(handle).is_err() {
@@ -32,7 +36,7 @@ pub fn install_panic_hook() {
                 timestamp: now_secs(),
             });
             // Dar tiempo al worker para enviar antes de que el proceso muera
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            std::thread::sleep(std::time::Duration::from_millis(PANIC_FLUSH_GRACE_MS));
         }
         // Ejecutar el hook por defecto para el mensaje estándar y volcado
         default_hook(info);

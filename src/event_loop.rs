@@ -47,25 +47,27 @@ pub fn resolve_dsn(config: &Config) -> Option<String> {
 }
 
 /// Crea y registra el reporter si el consentimiento es `Accepted` y hay DSN.
-fn init_reporter_if_accepted(config: &Config) {
-    let consent = ConsentState::from_config(config.diagnostics.reporting.enabled);
-    if consent != ConsentState::Accepted {
-        tracing::info!("reporter: consent = {:?}, no network", consent);
-        return;
-    }
-
-    let dsn = resolve_dsn(config);
-    let Some(dsn) = dsn else {
-        tracing::info!("reporter: consent accepted but no DSN — noop mode");
-        return;
-    };
-
+pub fn activate_reporter(dsn: String) {
     let install_id = crate::diagnostics::install_id::load_or_create_install_id();
     let transport = crate::diagnostics::transport::UreqTransport::new();
     let reporter =
         crate::diagnostics::reporter::Reporter::new(Some(dsn), install_id, Box::new(transport));
     crate::diagnostics::hooks::set_reporter(reporter.handle());
     tracing::info!("reporter: active, sending to Sentry");
+}
+
+/// Verifica consentimiento y DSN, luego activa el reporter si procede.
+fn init_reporter_if_accepted(config: &Config) {
+    let consent = ConsentState::from_config(config.diagnostics.reporting.enabled);
+    if consent != ConsentState::Accepted {
+        tracing::info!("reporter: consent = {:?}, no network", consent);
+        return;
+    }
+    let Some(dsn) = resolve_dsn(config) else {
+        tracing::info!("reporter: consent accepted but no DSN — noop mode");
+        return;
+    };
+    activate_reporter(dsn);
 }
 
 // ponytail: tope de bytes por pasada del drain; suelta el mutex del Term para la GUI.

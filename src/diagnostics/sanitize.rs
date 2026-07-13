@@ -21,14 +21,23 @@ pub fn sanitize_backtrace(bt: &str) -> String {
 
 /// Reemplaza apariciones de `$HOME` o su valor real por `<HOME>`.
 fn sanitize_home_paths(input: &str) -> String {
-    let home = dirs::home_dir();
+    static CACHED_HOME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-    let home_str = home
-        .as_deref()
-        .and_then(|p| p.to_str())
-        .unwrap_or("/home/unknown");
+    let home_str = CACHED_HOME.get_or_init(|| {
+        dirs::home_dir()
+            .and_then(|p| p.to_str().map(String::from))
+            .unwrap_or_else(|| "/home/unknown".to_string())
+    });
 
-    input.replace(home_str, "<HOME>")
+    input.replace(home_str.as_str(), "<HOME>")
+}
+
+/// Devuelve la posición del carácter UTF-8 más cercano antes o en `max`.
+pub fn floor_char_boundary(s: &str, max: usize) -> usize {
+    if s.is_char_boundary(max) {
+        return max;
+    }
+    (0..max).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0)
 }
 
 /// Trunca una cadena a `max_bytes` bytes en una frontera de carácter válida.
@@ -37,10 +46,7 @@ fn truncate_bytes(s: &str, max_bytes: usize) -> String {
         return s.to_string();
     }
 
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = floor_char_boundary(s, max_bytes);
 
     if end == 0 {
         return String::new();

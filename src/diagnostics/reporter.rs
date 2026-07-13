@@ -25,6 +25,8 @@ const MAX_EVENTS_PER_MINUTE: usize = 10;
 /// Ventana de deduplicación: no se envían eventos con el mismo mensaje
 /// dentro de esta ventana.
 const DEDUP_WINDOW_SECS: u64 = 30;
+/// Bytes máximos del mensaje considerados para comparación de dedup.
+const DEDUP_MSG_MAX_BYTES: usize = 200;
 
 /// Nivel de severidad de un evento.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,16 +142,13 @@ fn process_event(
 ) {
     let now = Instant::now();
 
-    // Limpieza de ventanas
     recent.retain(|(_, t)| t.elapsed() < Duration::from_secs(DEDUP_WINDOW_SECS));
     minute_events.retain(|t| t.elapsed() < Duration::from_secs(60));
 
-    // Rate-limit por minuto
     if minute_events.len() >= MAX_EVENTS_PER_MINUTE {
         return;
     }
 
-    // Dedup por mensaje
     let normalized = normalize_message(&event.message);
     if recent.iter().any(|(m, _)| m == &normalized) {
         return;
@@ -157,16 +156,14 @@ fn process_event(
     recent.push((normalized, now));
     minute_events.push(now);
 
-    // Sanitizar
     let sanitized = sanitize::sanitize_message(&event.message);
 
-    // Construir envelope
     let level = match event.level {
         EventLevel::Error => "error",
         EventLevel::Warn => "warn",
     };
 
-    let event_id = generate_event_id();
+    let event_id = crate::diagnostics::install_id::generate_install_id();
     let timestamp = format_timestamp(event.timestamp);
 
     let mut tags = sentry::system_tags();
@@ -187,43 +184,15 @@ fn process_event(
     }
 }
 
-/// Normaliza un mensaje para deduplicación: trunca a 200 bytes seguros.
+/// Normaliza un mensaje para deduplicación: trunca a bytes seguros.
 fn normalize_message(msg: &str) -> String {
     let trimmed = msg.trim();
-    if trimmed.len() <= 200 {
+    if trimmed.len() <= DEDUP_MSG_MAX_BYTES {
         trimmed.to_string()
     } else {
-        let end = find_char_boundary(trimmed, 200);
+        let end = sanitize::floor_char_boundary(trimmed, DEDUP_MSG_MAX_BYTES);
         trimmed[..end].to_string()
     }
-}
-
-fn find_char_boundary(s: &str, max: usize) -> usize {
-    if s.is_char_boundary(max) {
-        return max;
-    }
-    (0..max).rev().find(|&i| s.is_char_boundary(i)).unwrap_or(0)
-}
-
-/// Genera un ID de evento con 32 hex chars.
-fn generate_event_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-
-    let pid = std::process::id() as u64;
-    let mixed = now
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(pid)
-        .wrapping_add(counter);
-
-    format!("{mixed:016x}{counter:016x}")
 }
 
 /// Convierte epoch seconds a ISO 8601 UTC: `2026-07-13T01:55:05.000Z`.
@@ -248,27 +217,6 @@ fn format_timestamp(ts: i64) -> String {
     let year = (e / 1461) - 4716 + ((14 - month) / 12);
 
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}.000Z")
-}
-
-/// Genera un ID de instalación con 32 hex chars.
-pub fn generate_install_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-
-    let pid = std::process::id() as u64;
-    let mixed = now
-        .wrapping_mul(6364136223846793005)
-        .wrapping_add(pid)
-        .wrapping_add(counter);
-
-    format!("{mixed:016x}{counter:016x}")
 }
 
 #[cfg(test)]
@@ -324,8 +272,8 @@ mod tests {
 
     #[test]
     fn generate_install_id_es_unico() {
-        let id1 = generate_install_id();
-        let id2 = generate_install_id();
+        let id1 = crate::diagnostics::install_id::generate_install_id();
+        let id2 = crate::diagnostics::install_id::generate_install_id();
         assert_ne!(id1, id2);
         assert_eq!(id1.len(), 32);
     }
