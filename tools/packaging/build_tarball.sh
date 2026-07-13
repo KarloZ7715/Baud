@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Packages the Baud release binary into a tarball for the install script.
+# Packages the Baud release binary, desktop entry, and icons into a tarball.
 # Usage: ./tools/packaging/build_tarball.sh
 
 set -Eeuo pipefail
@@ -14,6 +14,17 @@ if [[ ! -f "$BINARY" ]]; then
     echo "Run 'cargo build --release' first." >&2
     exit 1
 fi
+
+DESKTOP_SRC="$REPO_ROOT/assets/packaging/baud.desktop"
+ICON_48_SRC="$REPO_ROOT/assets/icons/hicolor/48x48/apps/baud.png"
+ICON_256_SRC="$REPO_ROOT/assets/icons/hicolor/256x256/apps/baud.png"
+
+for src in "$DESKTOP_SRC" "$ICON_48_SRC" "$ICON_256_SRC"; do
+    if [[ ! -f "$src" ]]; then
+        echo "Error: packaging resource not found: $src" >&2
+        exit 1
+    fi
+done
 
 ARCH="${BAUD_ARCH:-$(uname -m)}"
 case "$ARCH" in
@@ -36,10 +47,24 @@ case "$OS" in
 esac
 TARBALL_NAME="baud_${OS}_${ARCH}.tar.gz"
 
-echo "Creating tarball ${TARBALL_NAME}..."
+echo "Creating tarball ${TARBALL_NAME} with desktop bundle profile..."
+
+staging="$(mktemp -d)"
+trap 'rm -rf -- "$staging"' EXIT
+
+cp "$BINARY" "$staging/baud"
+
+mkdir -p "$staging/share/applications"
+cp "$DESKTOP_SRC" "$staging/share/applications/baud.desktop"
+
+mkdir -p "$staging/share/icons/hicolor/48x48/apps"
+cp "$ICON_48_SRC" "$staging/share/icons/hicolor/48x48/apps/baud.png"
+
+mkdir -p "$staging/share/icons/hicolor/256x256/apps"
+cp "$ICON_256_SRC" "$staging/share/icons/hicolor/256x256/apps/baud.png"
 
 mkdir -p "$DIST_DIR"
-tar czf "$DIST_DIR/$TARBALL_NAME" -C "$(dirname "$BINARY")" -- "$(basename "$BINARY")"
+tar czf "$DIST_DIR/$TARBALL_NAME" -C "$staging" baud share
 
 echo "Tarball created: $DIST_DIR/$TARBALL_NAME"
 

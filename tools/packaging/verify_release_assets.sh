@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Validates the complete Linux asset set before it is uploaded to a release.
+# Requires the tarball to contain the desktop bundle profile.
 
 set -Eeuo pipefail
 
@@ -54,10 +55,90 @@ fi
 
 (cd "$dist_dir" && sha256sum -c --status SHA256SUMS)
 
-tar_contents="$(tar tzf "$dist_dir/$required_tarball")"
-if [[ "$tar_contents" != "baud" ]]; then
-    echo "Error: $required_tarball must contain only a root-level baud binary" >&2
+expected_files=(
+    "baud"
+    "share/applications/baud.desktop"
+    "share/icons/hicolor/48x48/apps/baud.png"
+    "share/icons/hicolor/256x256/apps/baud.png"
+)
+
+tar_entries="$(tar tzf "$dist_dir/$required_tarball")"
+
+declare -A seen
+while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+
+    case "$entry" in
+        *..*)
+            echo "Error: traversal path detected in $required_tarball: $entry" >&2
+            exit 1
+            ;;
+    esac
+
+    if [[ -n "${seen["$entry"]:-}" ]]; then
+        echo "Error: duplicate entry in $required_tarball: $entry" >&2
+        exit 1
+    fi
+    seen["$entry"]=1
+done <<< "$tar_entries"
+
+tar_detail="$(tar tvzf "$dist_dir/$required_tarball")"
+while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+
+    type="${line:0:1}"
+    entry="${line##* }"
+
+    case "$entry" in
+        */)
+            if [[ "$type" != "d" ]]; then
+                echo "Error: trailing-slash entry is not a directory in $required_tarball: $entry" >&2
+                exit 1
+            fi
+            ;;
+        *)
+            if [[ "$type" == "l" ]]; then
+                echo "Error: symbolic link not allowed in $required_tarball: $entry" >&2
+                exit 1
+            fi
+            if [[ "$type" == "h" ]]; then
+                echo "Error: hard link not allowed in $required_tarball: $entry" >&2
+                exit 1
+            fi
+            if [[ "$type" != "-" ]]; then
+                echo "Error: unexpected file type in $required_tarball: $entry (type=$type)" >&2
+                exit 1
+            fi
+            ;;
+    esac
+done <<< "$tar_detail"
+
+present_files=()
+while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    case "$entry" in
+        */) ;;
+        *) present_files+=("$entry") ;;
+    esac
+done <<< "$tar_entries"
+
+if (( ${#present_files[@]} != ${#expected_files[@]} )); then
+    echo "Error: expected ${#expected_files[@]} regular files in $required_tarball, found ${#present_files[@]}" >&2
     exit 1
 fi
+
+for expected in "${expected_files[@]}"; do
+    found=0
+    for present in "${present_files[@]}"; do
+        if [[ "$present" == "$expected" ]]; then
+            found=1
+            break
+        fi
+    done
+    if [[ "$found" -eq 0 ]]; then
+        echo "Error: missing expected file in $required_tarball: $expected" >&2
+        exit 1
+    fi
+done
 
 echo "Release assets verified in $dist_dir"
