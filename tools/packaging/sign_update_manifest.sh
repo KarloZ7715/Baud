@@ -36,6 +36,7 @@ fi
 SIGNER_BIN="$REPO_ROOT/target/baud-update-signer"
 if [[ ! -x "$SIGNER_BIN" ]]; then
     cargo build --manifest-path "$SIGNER_DIR/Cargo.toml" --release
+    mkdir -p "$REPO_ROOT/target"
     cp "$SIGNER_DIR/target/release/baud-update-signer" "$SIGNER_BIN"
 fi
 
