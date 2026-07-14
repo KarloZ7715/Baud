@@ -198,6 +198,11 @@ pub struct Renderer {
     prev_selection_bounds: Option<(usize, usize, usize, usize)>,
     /// Offset de scrollback del frame anterior (invalida cache si cambia con seleccion).
     prev_scrollback_offset: isize,
+    /// Fila/columna visible del cursor en el frame anterior. Movimientos de
+    /// cursor via CSI (CUU/CUD/CUF/CUB/CUP) no marcan damage de grid por si
+    /// solos, asi que esta comparacion es la unica forma de invalidar la fila
+    /// vieja y la nueva cuando el cursor se mueve sin reescribir celdas.
+    prev_cursor_pos: Option<(usize, usize)>,
     /// Familia tipográfica desde la configuracion.
     font_family: String,
     /// Fallbacks de fuente configurados por el usuario.
@@ -436,6 +441,7 @@ impl Renderer {
             frame_count: 0,
             prev_selection_bounds: None,
             prev_scrollback_offset: 0,
+            prev_cursor_pos: None,
             font_family,
             font_fallback: font_config.fallback.clone(),
             font_size,
@@ -1026,6 +1032,29 @@ impl Renderer {
                 damage = DamageSnapshot::Full;
             }
             self.prev_scrollback_offset = term.scrollback_offset;
+
+            // Movimientos de cursor via CSI (CUU/CUD/CUF/CUB/CUP) actualizan
+            // term.cursor pero no marcan ninguna celda como escrita, asi que
+            // el damage incremental por fila no los detecta por si solo.
+            // Comparar contra la posicion del frame anterior invalida tanto
+            // la fila vieja como la nueva cuando el cursor se movio sin
+            // reescribir celdas (p.ej. Space/Delete que la app resuelve con
+            // un simple avance de cursor).
+            if show_scrollback {
+                self.prev_cursor_pos = None;
+            } else {
+                let new_cursor = term
+                    .cursor_visible
+                    .then_some((term.cursor.row, term.cursor.col));
+                if self.prev_cursor_pos != new_cursor {
+                    for pos in [self.prev_cursor_pos, new_cursor].into_iter().flatten() {
+                        if pos.0 < rows_count {
+                            damage.mark_row_dirty(pos.0, cols_count);
+                        }
+                    }
+                }
+                self.prev_cursor_pos = new_cursor;
+            }
         }
 
         let cols_count = limits::clamp_grid_dimension(cols_count);
