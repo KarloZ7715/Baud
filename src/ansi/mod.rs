@@ -2552,6 +2552,24 @@ mod tests {
     }
 
     #[test]
+    fn test_scroll_down_region_marks_full_damage() {
+        let mut term = Term::new();
+        // Llenar varias filas para que el scroll down mueva contenido.
+        for i in 0..term.grid.rows_count {
+            feed(&mut term, format!("fila{i}\r\n").as_bytes());
+        }
+        // Consumir el damage del print.
+        let _ = term.active_grid_mut().damage.take();
+        assert!(!term.active_grid().damage.is_full());
+        // CSI T: scroll down de la región completa.
+        feed(&mut term, b"\x1b[T");
+        assert!(
+            term.active_grid().damage.is_full(),
+            "scroll down debe invalidar todo el grid para repintado"
+        );
+    }
+
+    #[test]
     fn test_decaln_rellena_con_e() {
         let mut term = Term::new();
         feed(&mut term, b"\x1b#8");

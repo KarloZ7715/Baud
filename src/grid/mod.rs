@@ -211,9 +211,7 @@ impl Grid {
     }
 
     /// Scroll down: mueve todas las filas de la región [top, bottom] una posición
-    /// hacia abajo. La fila `top` queda en blanco. Por ahora solo se usa
-    /// internamente; no expuesto en CSI todavía.
-    #[allow(dead_code)]
+    /// hacia abajo. La fila `top` queda en blanco.
     pub fn scroll_down_region(&mut self, n: usize, top: usize, bottom: usize) {
         for _ in 0..n {
             if top < self.rows_count && bottom < self.rows_count && top <= bottom {
@@ -225,6 +223,7 @@ impl Grid {
                 self.row_continuations.insert(top, false);
             }
         }
+        self.damage.mark_all();
     }
 
     /// Desplaza las filas [row, total_rows) una posición hacia abajo. La fila
