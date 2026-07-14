@@ -17,15 +17,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Los comandos CLI informativos y de actualizacion se ejecutan antes de
     // inicializar cualquier subsistema grafico o de diagnostico.
     match baud::cli::run()? {
-        Some(code) => std::process::exit(code),
-        None => {
+        baud::cli::CliOutcome::Exit(code) => std::process::exit(code),
+        baud::cli::CliOutcome::LaunchGui(opts) => {
             baud::diagnostics::hooks::install_panic_hook();
             init_tracing();
 
             tracing::info!("baud starting");
 
             // ponytail: el event loop es bloqueante. No hace falta join explicito.
-            baud::event_loop::run()?;
+            baud::event_loop::run(opts)?;
 
             Ok(())
         }
