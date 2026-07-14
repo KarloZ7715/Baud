@@ -12,6 +12,7 @@ pub struct MouseReporting {
     pub drag: bool,
     pub any_motion: bool,
     pub sgr: bool,
+    pub focus: bool,
 }
 impl MouseReporting {
     pub fn is_active(&self) -> bool {
@@ -697,6 +698,7 @@ impl Term {
             1000 => self.mouse_reporting.click,
             1002 => self.mouse_reporting.drag,
             1003 => self.mouse_reporting.any_motion,
+            1004 => self.mouse_reporting.focus,
             1006 => self.mouse_reporting.sgr,
             2004 => self.bracketed_paste,
             2026 => self.sync_update_active,
@@ -1808,6 +1810,7 @@ impl vte::Perform for Term {
                         1000 => self.mouse_reporting.click = set,
                         1002 => self.mouse_reporting.drag = set,
                         1003 => self.mouse_reporting.any_motion = set,
+                        1004 => self.mouse_reporting.focus = set,
                         1006 => self.mouse_reporting.sgr = set,
                         2004 => self.bracketed_paste = set,
                         2026 => {
@@ -4156,6 +4159,47 @@ mod tests {
             term.mouse_reporting.sgr,
             "SGR (1006) debe activarse dentro de un CSI con parametros multiples"
         );
+    }
+
+    #[test]
+    fn test_decset_1004_focus_events() {
+        let mut term = Term::new();
+        assert!(!term.mouse_reporting.focus);
+        feed(&mut term, b"\x1b[?1004h");
+        assert!(term.mouse_reporting.focus);
+        feed(&mut term, b"\x1b[?1004l");
+        assert!(!term.mouse_reporting.focus);
+    }
+
+    #[test]
+    fn test_decrqm_mouse_modes_report_truthful_state() {
+        let mut term = Term::new();
+        // Estado inicial: todos reset.
+        for mode in [1000, 1002, 1003, 1004, 1006] {
+            feed(&mut term, format!("\x1b[?{mode}$p").as_bytes());
+            assert_eq!(
+                term.take_pty_response(),
+                format!("\x1b[?{mode};2$y").as_bytes(),
+                "modo {mode} debe reportarse reset por defecto"
+            );
+        }
+
+        feed(&mut term, b"\x1b[?1000;1004;1006h");
+        for (mode, set) in [
+            (1000, true),
+            (1002, false),
+            (1003, false),
+            (1004, true),
+            (1006, true),
+        ] {
+            feed(&mut term, format!("\x1b[?{mode}$p").as_bytes());
+            let expected_state = if set { 1 } else { 2 };
+            assert_eq!(
+                term.take_pty_response(),
+                format!("\x1b[?{mode};{expected_state}$y").as_bytes(),
+                "modo {mode} no refleja el estado tras DECSET"
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

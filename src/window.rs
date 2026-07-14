@@ -2841,6 +2841,21 @@ impl ApplicationHandler<UserEvent> for App {
                 // esperara 100ms, y morira. El Pty se dropea con SIGKILL safety net.
                 event_loop.exit();
             }
+            WindowEvent::Focused(focused) => {
+                let Ok(guard) = self.focused_term().try_lock() else {
+                    self.watchdog.note_term_lock_busy();
+                    return;
+                };
+                if guard.mouse_reporting.focus {
+                    let seq = if focused {
+                        b"\x1b[I".to_vec()
+                    } else {
+                        b"\x1b[O".to_vec()
+                    };
+                    drop(guard);
+                    self.send_pty_bytes(seq);
+                }
+            }
             WindowEvent::Resized(new_size) => {
                 self.window_width = new_size.width as f32;
                 self.window_height = new_size.height as f32;
@@ -4262,6 +4277,7 @@ mod tests {
             drag: true,
             any_motion: false,
             sgr: true,
+            focus: false,
         };
         let app_vim = test_app(term);
         assert_eq!(
@@ -4283,6 +4299,7 @@ mod tests {
                 drag: true,
                 any_motion: false,
                 sgr: true,
+                focus: false,
             };
         }
         let app = test_app(Arc::clone(&term));
