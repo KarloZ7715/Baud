@@ -15,7 +15,7 @@ pub const EXIT_ERR: i32 = 1;
 
 /// Texto de ayuda mostrado por `baud help` y ante un comando desconocido.
 pub const HELP_TEXT: &str =
-    "Usage: baud [OPTIONS] [COMMAND]\n\nCommands:\n  update    Update Baud to the latest release\n  version   Print the installed Baud version\n  help      Show this help message\n\nOptions:\n  -e, --exec <command> [args...]    Execute command and its arguments in the PTY\n      --working-directory <dir>      Set the initial working directory for the child process\n      --title <text>                 Set the initial window title\n      --app-id <id>                  Set the Wayland app_id / X11 WM_CLASS instance\n      --hold                         Keep the window open after the command exits\n\nAliases:\n  -v, --version    Print the installed Baud version\n  -h, --help       Show this help message\n";
+    "Usage: baud [OPTIONS] [COMMAND]\n\nCommands:\n  update    Update Baud to the latest release\n  version   Print the installed Baud version\n  help      Show this help message\n\nOptions:\n  -e <command> [args...]            Execute command and its arguments in the PTY\n      --working-directory <dir>      Set the initial working directory for the child process\n      --title <text>                 Set the initial window title\n      --app-id <id>                  Set the Wayland app_id / X11 WM_CLASS instance\n      --hold                         Keep the window open after the command exits\n\nAliases:\n  -v, --version    Print the installed Baud version\n  -h, --help       Show this help message\n";
 
 /// Mensaje de error ante un subcomando o flag no reconocido.
 pub const UNKNOWN_COMMAND: &str = "Error: unknown command. Run `baud help` for usage.\n";
@@ -113,7 +113,7 @@ fn parse_flags(mut iter: impl Iterator<Item = OsString>) -> Command {
                 opts.app_id = Some(value);
             }
             "--hold" => opts.hold = true,
-            "-e" | "--exec" => {
+            "-e" => {
                 let tail: Vec<String> = iter.map(|s| s.into_string().unwrap_or_default()).collect();
                 if tail.is_empty() {
                     return Command::Unknown;
@@ -265,7 +265,7 @@ mod tests {
         assert!(HELP_TEXT.contains("version"));
         assert!(HELP_TEXT.contains("-v, --version"));
         assert!(HELP_TEXT.contains("-h, --help"));
-        assert!(HELP_TEXT.contains("-e, --exec"));
+        assert!(HELP_TEXT.contains("-e <command>"));
         assert!(HELP_TEXT.contains("--working-directory"));
         assert!(HELP_TEXT.contains("--title"));
         assert!(HELP_TEXT.contains("--app-id"));

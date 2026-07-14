@@ -46,6 +46,8 @@ use winit::window::{CursorGrabMode, CursorIcon, Fullscreen, Window, WindowId};
 
 #[cfg(all(unix, not(target_os = "macos")))]
 use winit::platform::wayland::WindowAttributesExtWayland;
+#[cfg(all(unix, not(target_os = "macos")))]
+use winit::platform::x11::WindowAttributesExtX11;
 
 /// Eventos enviados desde el hilo drain al hilo GUI.
 #[derive(Debug)]
@@ -2727,7 +2729,11 @@ impl ApplicationHandler<UserEvent> for App {
             .with_decorations(wcfg.decorations);
         #[cfg(all(unix, not(target_os = "macos")))]
         if let Some(app_id) = &self.app_id {
+            // Los dos traits escriben en el mismo campo platform_specific.name,
+            // asi que el orden no importa; con valores iguales ambos lados quedan
+            // app_id para Wayland (general) y X11 (instance/class).
             attrs = WindowAttributesExtWayland::with_name(attrs, app_id.clone(), app_id.clone());
+            attrs = WindowAttributesExtX11::with_name(attrs, app_id.clone(), app_id.clone());
         }
         match wcfg.startup {
             StartupState::Maximized => {
