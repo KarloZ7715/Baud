@@ -6,7 +6,17 @@ use oklab::{oklab_to_srgb, srgb_to_oklab, Oklab, Rgb};
 
 use crate::color::contrast_ratio_rgb;
 
-/// Cache LRU simple por frame: `(fg, bg, min_bits) -> adjusted fg`.
+/// Tope defensivo de entradas: acota la memoria si una sesion pasa por
+/// muchisimas combinaciones fg/bg unicas (truecolor variable, temas
+/// alternados). Un uso normal no se acerca a este limite.
+const MAX_ENTRIES: usize = 8192;
+
+/// Cache de ajuste de contraste, persistente entre frames: `(fg, bg,
+/// min_bits) -> adjusted fg`. La clave ya captura fg y bg totalmente
+/// resueltos (post-paleta, post-seleccion/cursor) mas el ratio minimo, asi
+/// que una entrada sigue siendo valida en cualquier frame futuro que repita
+/// esa combinacion exacta; un cambio de tema simplemente deja de golpear las
+/// entradas viejas en vez de invalidarlas.
 #[derive(Debug, Default)]
 pub struct ContrastCache {
     entries: HashMap<(u32, u32, u64), (u8, u8, u8)>,
@@ -24,6 +34,9 @@ impl ContrastCache {
             return *cached;
         }
         let adjusted = adjust_fg(fg, bg, min_ratio);
+        if self.entries.len() >= MAX_ENTRIES {
+            self.entries.clear();
+        }
         self.entries.insert(key, adjusted);
         adjusted
     }
@@ -123,6 +136,34 @@ mod tests {
         let bg = (0x00, 0x2b, 0x36);
         let adjusted = adjust_fg(fg, bg, 3.0);
         assert!(contrast_ratio_rgb(adjusted, bg) >= 3.0);
+    }
+
+    #[test]
+    fn cache_survives_without_explicit_clear_between_frames() {
+        // La cache ya no se limpia por frame; una entrada calculada en un
+        // "frame" debe seguir sirviendo hits en frames posteriores.
+        let mut cache = ContrastCache::default();
+        let fg = (0x58, 0x6e, 0x75);
+        let bg = (0x00, 0x2b, 0x36);
+        let frame1 = cache.adjust(fg, bg, 3.0);
+        let frame2 = cache.adjust(fg, bg, 3.0);
+        let frame3 = cache.adjust(fg, bg, 3.0);
+        assert_eq!(frame1, frame2);
+        assert_eq!(frame2, frame3);
+        assert_eq!(cache.entries.len(), 1);
+    }
+
+    #[test]
+    fn cache_self_evicts_past_max_entries() {
+        let mut cache = ContrastCache::default();
+        for i in 0..(MAX_ENTRIES + 10) {
+            let fg = ((i % 256) as u8, ((i / 256) % 256) as u8, 10);
+            cache.adjust(fg, (0, 0, 0), 3.0);
+        }
+        assert!(
+            cache.entries.len() <= MAX_ENTRIES,
+            "la cache debe autolimitarse en vez de crecer sin limite"
+        );
     }
 
     #[test]

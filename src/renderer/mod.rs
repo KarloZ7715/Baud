@@ -668,7 +668,6 @@ impl Renderer {
         let (fg_r, fg_g, fg_b) = palette.rgb(Color::Default, false);
         let default_fg_color = glyphon::Color::rgb(fg_r, fg_g, fg_b);
 
-        self.contrast_cache.clear();
         let mut base_metrics = self.cell_metrics;
         base_metrics.padding_y += self.grid_top_offset;
         self.prepare_glyph_metrics(&base_metrics);
