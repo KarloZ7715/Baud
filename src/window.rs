@@ -1638,6 +1638,11 @@ impl App {
                 guard.clear_selection();
             }
             guard.reset_blink_phase();
+            // El PTY puede no generar ningun eco (Space, Delete en linea vacia, Tab...),
+            // en cuyo caso term.dirty seguiria en false y el guard de RedrawRequested
+            // saltaria el repintado. Marcar dirty aqui cubre todo byte escrito por el
+            // usuario sin enumerar teclas sin eco una por una.
+            guard.mark_dirty();
         }
         tracing::debug!("send_input: {} bytes: {:02x?}", bytes.len(), bytes);
         let _ = self.focused_session().pty_tx.send(PtyCommand::Input(bytes));
@@ -3933,6 +3938,25 @@ mod tests {
         app.focused = 1;
         app.focus_session(0);
         assert!(!app.sessions[0].session.dirty);
+    }
+
+    #[test]
+    fn send_input_marca_pane_dirty_aunque_pty_no_eco() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let app = test_app(term.clone());
+        let id = app.sessions[0].session.id;
+        term.lock().expect("term mutex").take_dirty();
+        assert!(
+            !app.pane_is_dirty(id),
+            "precondicion: sin dirty antes del input"
+        );
+
+        app.send_input(b" ".to_vec());
+
+        assert!(
+            app.pane_is_dirty(id),
+            "send_input debe marcar el pane dirty aunque el PTY no genere eco"
+        );
     }
 
     #[test]
