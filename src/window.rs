@@ -17,7 +17,7 @@ use crate::config::watch::WatchState;
 use crate::config::{persist, Config, ConfigSource, ProcessSection, StartupState};
 use crate::copy_mode::CopyModeState;
 use crate::display_quirks::{self, DisplayQuirks};
-use crate::event_loop::BlinkFocus;
+use crate::event_loop::{should_redraw, BlinkFocus};
 use crate::grid::Cell;
 use crate::input::actions::{normalize_binding_key, Action, Keybindings};
 use crate::input::keymap::{self, Key as KKey, KeyEventKind, KeyModes, Mods};
@@ -248,6 +248,12 @@ pub struct App {
     keybindings: Keybindings,
     last_gui_redraw: Option<Instant>,
     gui_redraw_metrics: GuiRedrawMetrics,
+    /// Momento del ultimo request_redraw disparado por drag/extend_selection
+    /// (distinto de last_gui_redraw, que registra el redraw ya renderizado).
+    last_selection_redraw: Option<Instant>,
+    /// True cuando un update de seleccion quedo diferido por el throttle;
+    /// exige un redraw garantizado al terminar el gesto (R3).
+    selection_redraw_pending: bool,
     /// Momento en que debe ejecutarse copy-on-select pendiente (tras multi-clic).
     copy_on_select_deadline: Option<Instant>,
     /// Selector interactivo de temas (exclusivo con copy mode).
@@ -359,6 +365,8 @@ impl App {
             keybindings,
             last_gui_redraw: None,
             gui_redraw_metrics: GuiRedrawMetrics::new(),
+            last_selection_redraw: None,
+            selection_redraw_pending: false,
             copy_on_select_deadline: None,
             theme_picker: None,
             consent_prompt_active: false,
@@ -1648,9 +1656,31 @@ impl App {
         let _ = self.focused_session().pty_tx.send(PtyCommand::Input(bytes));
     }
 
+    /// Pide un redraw para un update de seleccion (drag o teclado) respetando
+    /// el intervalo configurado. `mark_dirty()` ya debe haberse llamado antes;
+    /// si el intervalo no elapsed, el request_redraw se difiere y queda
+    /// `selection_redraw_pending` para forzarlo al terminar el gesto (R3).
+    fn request_selection_redraw(&mut self, force: bool) {
+        let now = Instant::now();
+        let interval_nanos = self.redraw_interval_nanos.load(Ordering::Relaxed);
+        let elapsed_enough = self
+            .last_selection_redraw
+            .is_none_or(|last| should_redraw(last, now, interval_nanos));
+        if force || elapsed_enough {
+            self.last_selection_redraw = Some(now);
+            self.selection_redraw_pending = false;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        } else {
+            self.selection_redraw_pending = true;
+        }
+    }
+
     /// Extiende la seleccion con teclado (Shift+arrow).
     /// Si no hay seleccion, crea una desde la posicion del cursor.
-    fn extend_selection(&self, drow: isize, dcol: isize) {
+    fn extend_selection(&mut self, drow: isize, dcol: isize) {
+        let mut changed = false;
         if let Ok(mut guard) = self.focused_term().lock() {
             let cols_count = guard.grid.cols_count;
             let sb_len = if guard.alt_screen {
@@ -1702,9 +1732,10 @@ impl App {
             }
             guard.scroll_to_show_logical_row(new_row as usize);
             guard.mark_dirty();
+            changed = true;
         }
-        if let Some(window) = &self.window {
-            window.request_redraw();
+        if changed {
+            self.request_selection_redraw(false);
         }
     }
 
@@ -3200,9 +3231,7 @@ impl ApplicationHandler<UserEvent> for App {
                     if scroll_changed {
                         self.clear_link_hover_state();
                     }
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
-                    }
+                    self.request_selection_redraw(false);
                 }
             }
             // Mouse left: el cursor salio de la ventana.
@@ -3305,6 +3334,11 @@ impl ApplicationHandler<UserEvent> for App {
                     self.mouse_start = None;
                     if let Some(window) = &self.window {
                         let _ = window.set_cursor_grab(CursorGrabMode::None);
+                    }
+                    // Fin del gesto: garantiza el frame final aunque el
+                    // ultimo update de seleccion haya quedado diferido (R3).
+                    if self.selection_redraw_pending {
+                        self.request_selection_redraw(true);
                     }
                 }
 
@@ -3956,6 +3990,32 @@ mod tests {
         assert!(
             app.pane_is_dirty(id),
             "send_input debe marcar el pane dirty aunque el PTY no genere eco"
+        );
+    }
+
+    #[test]
+    fn request_selection_redraw_respeta_intervalo_y_fuerza_al_final_del_gesto() {
+        let mut app = test_app(Arc::new(Mutex::new(Term::new())));
+        app.redraw_interval_nanos
+            .store(1_000_000_000, Ordering::Relaxed);
+
+        app.request_selection_redraw(false);
+        assert!(
+            !app.selection_redraw_pending,
+            "el primer request nunca debe diferirse"
+        );
+        assert!(app.last_selection_redraw.is_some());
+
+        app.request_selection_redraw(false);
+        assert!(
+            app.selection_redraw_pending,
+            "un segundo request dentro del intervalo debe diferirse"
+        );
+
+        app.request_selection_redraw(true);
+        assert!(
+            !app.selection_redraw_pending,
+            "force=true debe emitir el redraw pendiente"
         );
     }
 
