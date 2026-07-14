@@ -7,3 +7,5 @@ Icon=baud
 Terminal=false
 Categories=System;TerminalEmulator;
 Keywords=terminal;emulator;console;shell;
+X-TerminalArgExec=-e
+X-TerminalArgDir=--working-directory=
