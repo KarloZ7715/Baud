@@ -232,6 +232,9 @@ pub struct App {
     /// Indica si el botón izquierdo del mouse está presionado.
     /// Arc<AtomicBool> para compartir con el thread de auto-scroll.
     mouse_down: Arc<AtomicBool>,
+    /// Último botón del mouse presionado mientras el reenvío a la app está activo.
+    /// Necesario para codificar motion events con el botón correcto en modo 1002.
+    mouse_down_button: Option<MouseButton>,
     /// Punto inicial de la selección actual (si se está arrastrando).
     mouse_start: Option<SelectionPoint>,
     /// Última posición conocida del mouse (para usar en MouseInput).
@@ -355,6 +358,7 @@ impl App {
             font_size,
             modifiers: winit::event::Modifiers::default(),
             mouse_down: Arc::new(AtomicBool::new(false)),
+            mouse_down_button: None,
             mouse_start: None,
             mouse_x: 0.0,
             mouse_y: 0.0,
@@ -2533,8 +2537,11 @@ impl App {
             let suffix = if release { 'm' } else { 'M' };
             Some(format!("\x1b[<{};{};{}{}", button, x, y, suffix).into_bytes())
         } else {
-            let b = if release { button + 3 } else { button } + 0x20;
-            Some(vec![0x1b, b'M', b, (x + 0x20) as u8, (y + 0x20) as u8])
+            // X10: todas las liberaciones se reportan como boton 3.
+            let b = (if release { 3 } else { button }) + 0x20;
+            let cx = (x.min(223) + 0x20) as u8;
+            let cy = (y.min(223) + 0x20) as u8;
+            Some(vec![0x1b, b'M', b, cx, cy])
         }
     }
 
@@ -3147,7 +3154,7 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     Some(true) => {
-                        let mouse_down = self.mouse_down.load(Ordering::Relaxed);
+                        let held = self.mouse_down_button;
                         let term = Arc::clone(self.focused_term());
                         let Some(renderer) = &self.renderer else {
                             return;
@@ -3160,11 +3167,17 @@ impl ApplicationHandler<UserEvent> for App {
                         if reporting.reports_motion() {
                             let (row, col) = self.mouse_cell_coords(renderer);
                             let cell = (row, col);
-                            if mouse_down && reporting.drag {
+                            if held.is_some() && reporting.drag {
                                 drop(guard);
                                 if self.last_reported_cell != Some(cell) {
                                     self.last_reported_cell = Some(cell);
-                                    self.forward_mouse_motion(32);
+                                    let btn = match held {
+                                        Some(MouseButton::Left) => 0,
+                                        Some(MouseButton::Middle) => 1,
+                                        Some(MouseButton::Right) => 2,
+                                        _ => 0,
+                                    };
+                                    self.forward_mouse_motion(32 + btn);
                                 }
                             } else if reporting.any_motion {
                                 drop(guard);
@@ -3360,6 +3373,7 @@ impl ApplicationHandler<UserEvent> for App {
                             _ => return,
                         };
                         let release = state == ElementState::Released;
+                        self.mouse_down_button = if release { None } else { Some(button) };
                         self.forward_mouse_button(btn, release);
                         if button == MouseButton::Left {
                             self.mouse_down.store(!release, Ordering::Relaxed);
@@ -4267,6 +4281,61 @@ mod tests {
         // El contador solo sube cuando el hot path anota busy.
         app.watchdog.note_term_lock_busy();
         assert_eq!(app.watchdog.snapshot().term_lock_busy, 1);
+    }
+
+    #[test]
+    fn test_encode_mouse_report_sgr_press_release() {
+        use crate::ansi::MouseReporting;
+
+        let reporting = MouseReporting {
+            click: true,
+            sgr: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            App::encode_mouse_report(&reporting, 0, 9, 4, false),
+            Some(b"\x1b[<0;10;5M".to_vec())
+        );
+        assert_eq!(
+            App::encode_mouse_report(&reporting, 0, 9, 4, true),
+            Some(b"\x1b[<0;10;5m".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_encode_mouse_report_x10_release_uses_button_three() {
+        use crate::ansi::MouseReporting;
+
+        let reporting = MouseReporting {
+            click: true,
+            ..Default::default()
+        };
+        let press =
+            App::encode_mouse_report(&reporting, 2, 0, 0, false).expect("press codificable");
+        let release =
+            App::encode_mouse_report(&reporting, 2, 0, 0, true).expect("release codificable");
+        // Boton derecho (2) presionado -> 0x22; cualquier liberacion -> 0x23.
+        assert_eq!(press[2], 0x22);
+        assert_eq!(release[2], 0x23);
+    }
+
+    #[test]
+    fn test_encode_mouse_report_x10_clamps_at_223() {
+        use crate::ansi::MouseReporting;
+
+        let reporting = MouseReporting {
+            click: true,
+            ..Default::default()
+        };
+        let bytes = App::encode_mouse_report(&reporting, 0, 222, 222, false)
+            .expect("coordenada limite codificable");
+        assert_eq!(bytes[3], 255);
+        assert_eq!(bytes[4], 255);
+
+        let bytes_clamped = App::encode_mouse_report(&reporting, 0, 500, 500, false)
+            .expect("coordenada excedida debe clamp");
+        assert_eq!(bytes_clamped[3], 255);
+        assert_eq!(bytes_clamped[4], 255);
     }
 
     #[test]

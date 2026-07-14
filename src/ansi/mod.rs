@@ -1789,57 +1789,61 @@ impl vte::Perform for Term {
         // DEC private modes: handler temprano con return para no ensuciar
         // el match principal.
         if intermediates == b"?" {
-            let mode = params
-                .iter()
-                .next()
-                .map(|p| p.first().copied().unwrap_or(0))
-                .unwrap_or(0);
-            match (action, mode) {
-                ('h', 25) => self.cursor_visible = true,
-                ('l', 25) => self.cursor_visible = false,
-                ('h', 1) => self.app_cursor_keys = true,
-                ('l', 1) => self.app_cursor_keys = false,
-                ('h', 6) => self.origin_mode = true,
-                ('l', 6) => self.origin_mode = false,
-                ('h', 7) => self.auto_wrap = true,
-                ('l', 7) => self.auto_wrap = false,
-                ('h', 1049) => self.enter_alt_screen(),
-                ('l', 1049) => self.exit_alt_screen(),
-                // ponytail: 1000-1006 son mouse reporting, se ignoran hasta implementacion completa
-                ('h', 1000) => self.mouse_reporting.click = true,
-                ('l', 1000) => self.mouse_reporting.click = false,
-                ('h', 1002) => self.mouse_reporting.drag = true,
-                ('l', 1002) => self.mouse_reporting.drag = false,
-                ('h', 1003) => self.mouse_reporting.any_motion = true,
-                ('l', 1003) => self.mouse_reporting.any_motion = false,
-                ('h', 1006) => self.mouse_reporting.sgr = true,
-                ('l', 1006) => self.mouse_reporting.sgr = false,
-                // DEC 2004: bracketed paste mode
-                ('h', 2004) => self.bracketed_paste = true,
-                ('l', 2004) => self.bracketed_paste = false,
-                // DEC 2026: synchronized output (BSU/ESU)
-                ('h', 2026) => {
-                    // No reiniciar el reloj si ya hay un frame abierto: un BSU
-                    // repetido no debe alargar el timeout de seguridad.
-                    if !self.sync_update_active {
-                        self.sync_update_started_at = Some(Instant::now());
+            if action == 'h' || action == 'l' {
+                let set = action == 'h';
+                for p in params.iter() {
+                    let mode = p.first().copied().unwrap_or(0);
+                    match mode {
+                        1 => self.app_cursor_keys = set,
+                        6 => self.origin_mode = set,
+                        7 => self.auto_wrap = set,
+                        25 => self.cursor_visible = set,
+                        1049 => {
+                            if set {
+                                self.enter_alt_screen();
+                            } else {
+                                self.exit_alt_screen();
+                            }
+                        }
+                        1000 => self.mouse_reporting.click = set,
+                        1002 => self.mouse_reporting.drag = set,
+                        1003 => self.mouse_reporting.any_motion = set,
+                        1006 => self.mouse_reporting.sgr = set,
+                        2004 => self.bracketed_paste = set,
+                        2026 => {
+                            if set {
+                                // No reiniciar el reloj si ya hay un frame abierto: un BSU
+                                // repetido no debe alargar el timeout de seguridad.
+                                if !self.sync_update_active {
+                                    self.sync_update_started_at = Some(Instant::now());
+                                }
+                                self.sync_update_active = true;
+                            } else {
+                                self.sync_update_active = false;
+                                self.sync_update_started_at = None;
+                                self.dirty = true;
+                            }
+                        }
+                        _ => {}
                     }
-                    self.sync_update_active = true;
                 }
-                ('l', 2026) => {
-                    self.sync_update_active = false;
-                    self.sync_update_started_at = None;
-                    self.dirty = true;
-                }
-                ('n', 6) => {
+                return;
+            }
+
+            if action == 'n' {
+                let mode = params
+                    .iter()
+                    .next()
+                    .and_then(|p| p.first().copied())
+                    .unwrap_or(0);
+                if mode == 6 {
                     let row = (self.cursor.row + 1) as u16;
                     let col = (self.cursor.col + 1) as u16;
                     let resp = format!("\x1b[?{row};{col}R");
                     self.respond(resp.as_bytes());
                 }
-                _ => {}
+                return;
             }
-            return;
         }
 
         if intermediates.is_empty() && (action == 'h' || action == 'l') {
