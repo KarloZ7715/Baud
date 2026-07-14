@@ -161,11 +161,24 @@ pub fn encode_key(key: Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
     // Upgrade path: mapear PhysicalKey Numpad* en window.rs y pasar un Key::Numpad*.
     match key {
         Key::Char(c) => Some(encode_char(c, mods)),
-        Key::Enter => Some(if modes.newline_mode {
-            vec![0x0d, 0x0a]
-        } else {
-            vec![0x0d]
-        }),
+        Key::Enter => {
+            // Alt antepone ESC (mismo patron que Backspace/Escape). Shift no
+            // tiene encoding clasico distinguible de Enter (limitacion del
+            // protocolo legacy sin modifyOtherKeys): ambos envian CR/CRLF.
+            let base = if modes.newline_mode {
+                vec![0x0d, 0x0a]
+            } else {
+                vec![0x0d]
+            };
+            Some(if mods.alt {
+                let mut out = Vec::with_capacity(base.len() + 1);
+                out.push(0x1b);
+                out.extend_from_slice(&base);
+                out
+            } else {
+                base
+            })
+        }
         Key::Tab => {
             if mods.shift {
                 Some(b"\x1b[Z".to_vec())
@@ -633,6 +646,90 @@ mod tests {
             encode_key(Key::F(5), shift, d),
             Some(b"\x1b[15;2~".to_vec())
         );
+    }
+
+    #[test]
+    fn test_ctrl_j_produce_lf_classic_y_kitty() {
+        let d = KeyModes::default();
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        assert_eq!(encode_key(Key::Char('j'), ctrl, d), Some(vec![0x0a]));
+
+        let disambiguate = KeyModes {
+            keyboard_flags: KB_FLAG_DISAMBIGUATE,
+            ..KeyModes::default()
+        };
+        assert_eq!(
+            encode_key_extended(Key::Char('j'), ctrl, disambiguate, KeyEventKind::Press),
+            Some(b"\x1b[106;5u".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_alt_enter_antepone_esc_classic() {
+        let d = KeyModes::default();
+        let alt = Mods {
+            alt: true,
+            ..Mods::NONE
+        };
+        assert_eq!(encode_key(Key::Enter, alt, d), Some(vec![0x1b, 0x0d]));
+    }
+
+    #[test]
+    fn test_shift_enter_clasico_es_cr_plano_sin_encoding_distinguible() {
+        // Limitacion del protocolo legacy: sin kitty protocol/modifyOtherKeys,
+        // ningun terminal puede distinguir Shift+Enter de Enter (ambos 0x0d).
+        let d = KeyModes::default();
+        let shift = Mods {
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(encode_key(Key::Enter, shift, d), Some(vec![0x0d]));
+    }
+
+    #[test]
+    fn test_enter_chords_kitty_protocol_csi_u() {
+        let disambiguate = KeyModes {
+            keyboard_flags: KB_FLAG_DISAMBIGUATE,
+            ..KeyModes::default()
+        };
+        let shift = Mods {
+            shift: true,
+            ..Mods::NONE
+        };
+        let alt = Mods {
+            alt: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            encode_key_extended(Key::Enter, shift, disambiguate, KeyEventKind::Press),
+            Some(b"\x1b[13;2u".to_vec())
+        );
+        assert_eq!(
+            encode_key_extended(Key::Enter, alt, disambiguate, KeyEventKind::Press),
+            Some(b"\x1b[13;3u".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_enter_plain_sin_mods_sigue_siendo_cr() {
+        // Regresion R7: Enter sin modificadores no debe verse afectado por el
+        // prefijo ESC de Alt.
+        let d = KeyModes::default();
+        assert_eq!(encode_key(Key::Enter, Mods::NONE, d), Some(vec![0x0d]));
+    }
+
+    #[test]
+    fn test_ctrl_arrow_word_motion_bytes_sin_cambios() {
+        // Regresion R7: Ctrl+Arrow no debe verse afectado por los cambios de U1.
+        let d = KeyModes::default();
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        assert_eq!(encode_key(Key::Right, ctrl, d), Some(b"\x1b[1;5C".to_vec()));
     }
 
     #[test]
