@@ -1022,7 +1022,7 @@ impl Renderer {
                 }
             }
 
-            if term.selection.is_some() && term.scrollback_offset != self.prev_scrollback_offset {
+            if term.scrollback_offset != self.prev_scrollback_offset {
                 damage = DamageSnapshot::Full;
             }
             self.prev_scrollback_offset = term.scrollback_offset;
