@@ -3361,10 +3361,25 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     Some(true) => {
-                        if let Some(renderer) = &self.renderer {
-                            if self.is_in_tab_bar_row(self.mouse_y, renderer) {
+                        let Some(renderer) = &self.renderer else {
+                            return;
+                        };
+                        if self.is_in_tab_bar_row(self.mouse_y, renderer) {
+                            return;
+                        }
+                        let focused_id = self.tabs[self.focused].focused();
+                        if let Some((id, _, _)) =
+                            self.pixel_to_pane_cell(self.mouse_x, self.mouse_y, renderer)
+                        {
+                            if id != focused_id {
+                                // Click en otro pane: enfocarlo y no reenviar el evento
+                                // a la sesion que tenia el foco.
+                                self.focus_pane_by_id(id);
                                 return;
                             }
+                        } else {
+                            // Fuera de cualquier pane: no reenviar.
+                            return;
                         }
                         let btn = match button {
                             MouseButton::Left => 0,
@@ -4336,6 +4351,16 @@ mod tests {
             .expect("coordenada excedida debe clamp");
         assert_eq!(bytes_clamped[3], 255);
         assert_eq!(bytes_clamped[4], 255);
+    }
+
+    #[test]
+    fn test_clamp_mouse_to_grid_rejects_sentinel() {
+        assert_eq!(
+            App::clamp_mouse_to_grid(usize::MAX, 0, 24, 80),
+            None,
+            "coordenada fuera del pane debe rechazarse, no clamp al borde"
+        );
+        assert_eq!(App::clamp_mouse_to_grid(0, usize::MAX, 24, 80), None);
     }
 
     #[test]
