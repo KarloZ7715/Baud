@@ -994,16 +994,14 @@ impl Renderer {
         if show_scrollback {
             damage = DamageSnapshot::Full;
         }
-        if !damage.is_full() && !damage.has_any_dirty() {
-            let needs_blink = track_selection && term.has_blink_stuff();
-            if !needs_blink
-                && self.emit_cached_pane_glyphs(session_id, metrics, &palette, theme, out)?
-            {
-                return Ok(());
-            }
-            damage = DamageSnapshot::Full;
-        }
 
+        // Diffing de seleccion/scrollback/cursor contra el frame anterior:
+        // debe correr ANTES del guard de "sin damage -> reusar cache" de abajo.
+        // Ninguno de estos cambios escribe celdas (mark_cell_written), asi que
+        // el damage de grid queda vacio aunque el cursor se haya movido o la
+        // seleccion haya cambiado; si este bloque corriera despues del guard,
+        // el early-return con glyphs cacheados se dispararia primero y esos
+        // cambios nunca se pintarian.
         if track_selection {
             let new_bounds = term.selection.as_ref().map(|s| s.normalize());
             let old_bounds = self.prev_selection_bounds;
@@ -1055,6 +1053,16 @@ impl Renderer {
                 }
                 self.prev_cursor_pos = new_cursor;
             }
+        }
+
+        if !damage.is_full() && !damage.has_any_dirty() {
+            let needs_blink = track_selection && term.has_blink_stuff();
+            if !needs_blink
+                && self.emit_cached_pane_glyphs(session_id, metrics, &palette, theme, out)?
+            {
+                return Ok(());
+            }
+            damage = DamageSnapshot::Full;
         }
 
         let cols_count = limits::clamp_grid_dimension(cols_count);
