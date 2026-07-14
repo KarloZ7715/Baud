@@ -909,6 +909,7 @@ impl Renderer {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
+        self.atlas.trim();
         let gpu_us = t_gpu.elapsed().as_secs_f64() * 1_000_000.0;
 
         let total_us = t0.elapsed().as_secs_f64() * 1_000_000.0;
@@ -1300,6 +1301,7 @@ impl Renderer {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
+        self.atlas.trim();
         let gpu_us = t_gpu.elapsed().as_secs_f64() * 1_000_000.0;
 
         let total_us = t0.elapsed().as_secs_f64() * 1_000_000.0;
@@ -1409,6 +1411,7 @@ impl Renderer {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
+        self.atlas.trim();
         let gpu_us = t_gpu.elapsed().as_secs_f64() * 1_000_000.0;
 
         let total_us = t0.elapsed().as_secs_f64() * 1_000_000.0;
