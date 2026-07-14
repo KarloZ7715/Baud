@@ -44,6 +44,9 @@ use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{CursorGrabMode, CursorIcon, Fullscreen, Window, WindowId};
 
+#[cfg(all(unix, not(target_os = "macos")))]
+use winit::platform::wayland::WindowAttributesExtWayland;
+
 /// Eventos enviados desde el hilo drain al hilo GUI.
 #[derive(Debug)]
 pub enum UserEvent {
@@ -299,6 +302,10 @@ pub struct App {
     display_quirks: DisplayQuirks,
     /// Acumulador residual para eventos de rueda (PixelDelta fraccionarios).
     wheel_residual: f32,
+    /// Titulo inicial de ventana solicitado por CLI; OSC 0/2 lo puede sobreescribir.
+    initial_title: Option<String>,
+    /// app_id de Wayland / instancia de WM_CLASS en X11.
+    app_id: Option<String>,
 }
 
 fn allowed_open_url(url: &str) -> bool {
@@ -329,6 +336,7 @@ fn open_url(url: &str) {
 
 impl App {
     /// Crea una nueva instancia de App con las sesiones dadas.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         sessions: Vec<SessionHost>,
         config: Config,
@@ -337,6 +345,8 @@ impl App {
         blink_focus: Arc<BlinkFocus>,
         config_source: ConfigSource,
         watchdog: EventLoopWatchdog,
+        initial_title: Option<String>,
+        app_id: Option<String>,
     ) -> Self {
         debug_assert!(!sessions.is_empty(), "App requiere al menos una sesion");
         let font_size = config.font.size;
@@ -392,6 +402,8 @@ impl App {
             blink_focus,
             display_quirks: DisplayQuirks::DEFAULT,
             wheel_residual: 0.0,
+            initial_title,
+            app_id,
         }
     }
 
@@ -524,16 +536,40 @@ impl App {
                 }
             }
             UserEvent::PtyExited(id, code) => {
+                let session_idx = self.session_by_id(id);
+                let held = session_idx.is_some_and(|i| self.sessions[i].session.hold);
+                let close_on_exit =
+                    session_idx.is_some_and(|i| self.sessions[i].session.close_on_exit);
+
                 if self.is_session_in_active_tab(id) {
                     if self.is_focused_session(id) {
-                        if let Some(renderer) = &mut self.renderer {
+                        if held {
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.set_status(&format!(
+                                    "[Proceso terminado: codigo {} (mantenido)]",
+                                    code
+                                ));
+                            }
+                        } else if close_on_exit {
+                            self.pending_exit = true;
+                            return;
+                        } else if let Some(renderer) = &mut self.renderer {
                             renderer.set_status(&format!("[Proceso terminado: codigo {}]", code));
                         }
                     } else if self.tabs[self.focused].leaves().len() > 1 {
-                        if let Some(renderer) = &mut self.renderer {
-                            renderer.set_status(&format!("[Pane cerrado: codigo {}]", code));
+                        if held {
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.set_status(&format!(
+                                    "[Pane cerrado: codigo {} (mantenido)]",
+                                    code
+                                ));
+                            }
+                        } else {
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.set_status(&format!("[Pane cerrado: codigo {}]", code));
+                            }
+                            self.close_pane_session(id);
                         }
-                        self.close_pane_session(id);
                     }
                     if let Some(window) = &self.window {
                         window.request_redraw();
@@ -1030,10 +1066,13 @@ impl App {
             ));
         let spawned = match crate::event_loop::spawn_session(
             &cfg,
+            &cfg.process_config(),
             rows,
             cols,
             proxy.clone(),
             Arc::clone(&self.redraw_interval_nanos),
+            false,
+            false,
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -1235,10 +1274,13 @@ impl App {
 
         let spawned = match crate::event_loop::spawn_session(
             &cfg,
+            &cfg.process_config(),
             new_rect.rows as u16,
             new_rect.cols as u16,
             proxy.clone(),
             Arc::clone(&self.redraw_interval_nanos),
+            false,
+            false,
         ) {
             Ok(s) => s,
             Err(e) => {
@@ -1632,14 +1674,16 @@ impl App {
         } else {
             crate::input::paste_text(&text)
         };
-        let _ = self
-            .focused_session()
-            .pty_tx
-            .send(PtyCommand::Input(filtered));
+        self.send_input(filtered);
     }
 
     /// Envia bytes de input al hilo PTY para escribirlos en el master fd.
+    /// Para sesiones en hold el input se ignora (el proceso hijo ya termino).
     fn send_input(&self, bytes: Vec<u8>) {
+        let session = self.focused_session();
+        if session.hold {
+            return;
+        }
         // Resetear scrollback offset al enviar cualquier input al PTY
         if let Ok(mut guard) = self.focused_term().lock() {
             if guard.scrollback_offset > 0 {
@@ -1657,7 +1701,7 @@ impl App {
             guard.mark_dirty();
         }
         tracing::debug!("send_input: {} bytes: {:02x?}", bytes.len(), bytes);
-        let _ = self.focused_session().pty_tx.send(PtyCommand::Input(bytes));
+        let _ = session.pty_tx.send(PtyCommand::Input(bytes));
     }
 
     /// Pide un redraw para un update de seleccion (drag o teclado) respetando
@@ -2676,10 +2720,15 @@ impl ApplicationHandler<UserEvent> for App {
 
         // 1. Crear ventana.
         let wcfg = &self.config.window;
+        let initial_title = self.initial_title.as_deref().unwrap_or("baud");
         let mut attrs = Window::default_attributes()
-            .with_title("baud")
+            .with_title(initial_title)
             .with_inner_size(winit::dpi::LogicalSize::new(wcfg.width, wcfg.height))
             .with_decorations(wcfg.decorations);
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some(app_id) = &self.app_id {
+            attrs = WindowAttributesExtWayland::with_name(attrs, app_id.clone(), app_id.clone());
+        }
         match wcfg.startup {
             StartupState::Maximized => {
                 tracing::info!("window: width/height del config no aplican con startup=maximized");
@@ -3886,6 +3935,8 @@ mod tests {
             pty_tx: dummy_pty_sender(),
             title: String::new(),
             dirty: false,
+            hold: false,
+            close_on_exit: false,
         }
     }
 
@@ -3900,6 +3951,8 @@ mod tests {
             BlinkFocus::new(id),
             ConfigSource::Ok,
             EventLoopWatchdog::noop(),
+            None,
+            None,
         )
     }
 
@@ -3917,6 +3970,8 @@ mod tests {
             BlinkFocus::new(id_b),
             ConfigSource::Ok,
             EventLoopWatchdog::noop(),
+            None,
+            None,
         );
         app.focused = 1;
 
@@ -4011,6 +4066,8 @@ mod tests {
             BlinkFocus::new(id_b),
             ConfigSource::Ok,
             EventLoopWatchdog::noop(),
+            None,
+            None,
         );
         app.sessions[0].session.dirty = true;
         app.focused = 1;
@@ -4035,6 +4092,45 @@ mod tests {
             app.pane_is_dirty(id),
             "send_input debe marcar el pane dirty aunque el PTY no genere eco"
         );
+    }
+
+    #[test]
+    fn send_input_ignora_sesiones_en_hold() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term.clone());
+        let id = app.sessions[0].session.id;
+        term.lock().expect("term mutex").take_dirty();
+        app.sessions[0].session.hold = true;
+
+        app.send_input(b" ".to_vec());
+
+        assert!(
+            !app.pane_is_dirty(id),
+            "send_input no debe marcar dirty en sesion held"
+        );
+    }
+
+    #[test]
+    fn pty_exited_con_close_on_exit_cierra_app() {
+        let mut app = test_app(Arc::new(Mutex::new(Term::new())));
+        let id = app.sessions[0].session.id;
+        app.sessions[0].session.close_on_exit = true;
+
+        app.dispatch_user_event(UserEvent::PtyExited(id, 0));
+
+        assert!(app.pending_exit);
+    }
+
+    #[test]
+    fn pty_exited_con_hold_no_cierra_app() {
+        let mut app = test_app(Arc::new(Mutex::new(Term::new())));
+        let id = app.sessions[0].session.id;
+        app.sessions[0].session.hold = true;
+        app.sessions[0].session.close_on_exit = true;
+
+        app.dispatch_user_event(UserEvent::PtyExited(id, 0));
+
+        assert!(!app.pending_exit);
     }
 
     #[test]
@@ -4080,6 +4176,8 @@ mod tests {
             BlinkFocus::new(id0),
             ConfigSource::Ok,
             EventLoopWatchdog::noop(),
+            None,
+            None,
         );
         app.run_action(Action::GotoTab(2));
         assert_eq!(app.focused, 1);

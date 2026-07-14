@@ -12,10 +12,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::ansi::Term;
+use crate::cli::LaunchOptions;
 use crate::config::Config;
 use crate::diagnostics::consent::ConsentState;
 use crate::grid::{DEFAULT_COLS, DEFAULT_ROWS};
-use crate::pty::{self, PtyCommand, PtyCommandSender, SessionBackend, WakeSource};
+use crate::pty::{self, ProcessConfig, PtyCommand, PtyCommandSender, SessionBackend, WakeSource};
 use crate::session::{Session, SessionId};
 use crate::watchdog::EventLoopWatchdog;
 use crate::window::{App, SessionHost, UserEvent};
@@ -383,17 +384,20 @@ pub struct SpawnedSession {
 /// Crea una sesion completa: PTY, Term, hilos drain y pty.
 ///
 /// Los eventos del drain y del PTY se etiquetan con el `SessionId` de la sesion.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_session(
     cfg: &Config,
+    process_cfg: &ProcessConfig,
     rows: u16,
     cols: u16,
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
     redraw_interval_nanos: Arc<AtomicU64>,
+    hold: bool,
+    close_on_exit: bool,
 ) -> std::io::Result<SpawnedSession> {
-    let process_cfg = cfg.process_config();
     let session_id = SessionId::next();
 
-    let master = pty::spawn_with(&process_cfg)?;
+    let master = pty::spawn_with(process_cfg)?;
     master.set_winsize(rows, cols)?;
 
     let (tx_pty_to_gui, rx_pty_to_gui) = mpsc::channel::<PtyEvent>();
@@ -535,6 +539,8 @@ pub fn spawn_session(
         pty_tx: cmd_sender,
         title: String::new(),
         dirty: false,
+        hold,
+        close_on_exit,
     };
 
     Ok(SpawnedSession {
@@ -646,26 +652,54 @@ fn pty_thread_main(
     }
 }
 
+/// Combina la configuracion de proceso de la aplicacion con las opciones de
+/// lanzamiento de la CLI. El directorio se valida y, si no existe, se ignora
+/// con un warning para no abortar el arranque.
+fn merge_launch_options(cfg: &Config, opts: &LaunchOptions) -> ProcessConfig {
+    let mut process_cfg = cfg.process_config();
+
+    if let Some(command) = &opts.command {
+        if !command.is_empty() {
+            process_cfg.shell = command[0].clone();
+            process_cfg.args = command[1..].to_vec();
+            process_cfg.login_shell = false;
+        }
+    }
+    if let Some(dir) = &opts.working_directory {
+        if std::path::Path::new(dir).is_dir() {
+            process_cfg.working_directory = Some(dir.clone());
+        } else {
+            tracing::warn!("working directory does not exist: {dir}");
+        }
+    }
+
+    process_cfg
+}
+
 /// Punto de entrada del event loop.
 ///
 /// Crea el PTY, lanza el shell configurado, y arranca los hilos necesarios.
 /// Retorna cuando se cierra la ventana (event_loop.exit()).
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(opts: LaunchOptions) -> Result<(), Box<dyn std::error::Error>> {
     let load_result = Config::load();
     let app_config = load_result.config;
-    let process_cfg = app_config.process_config();
+    let process_cfg = merge_launch_options(&app_config, &opts);
     let startup_command = process_cfg.startup_command.clone();
 
     let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
     let proxy = event_loop.create_proxy();
     let redraw_interval_nanos = Arc::new(AtomicU64::new(app_config.render.redraw_interval_nanos()));
 
+    let started_from_command = opts.command.is_some();
     let spawned = spawn_session(
         &app_config,
+        &process_cfg,
         DEFAULT_ROWS as u16,
         DEFAULT_COLS as u16,
         proxy.clone(),
         Arc::clone(&redraw_interval_nanos),
+        opts.hold,
+        started_from_command,
     )?;
 
     let blink_focus = BlinkFocus::new(spawned.session.id);
@@ -718,6 +752,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         blink_focus,
         load_result.source,
         watchdog,
+        opts.title,
+        opts.app_id,
     );
     app.set_redraw_interval_handle(redraw_interval_nanos);
 
@@ -800,6 +836,42 @@ mod tests {
                 Err(_) => break,
             }
         }
+    }
+
+    #[test]
+    fn test_merge_launch_options_mapea_comando_y_args() {
+        let cfg = Config::default();
+        let opts = LaunchOptions {
+            command: Some(vec!["tmux".into(), "-u".into()]),
+            ..LaunchOptions::default()
+        };
+        let pc = merge_launch_options(&cfg, &opts);
+        assert_eq!(pc.shell, "tmux");
+        assert_eq!(pc.args, vec!["-u"]);
+        assert!(!pc.login_shell);
+    }
+
+    #[test]
+    fn test_merge_launch_options_cwd_invalido_no_reemplaza_default() {
+        let cfg = Config::default();
+        let original_cwd = cfg.process.working_directory.clone();
+        let opts = LaunchOptions {
+            working_directory: Some("/no/existe/seguro".into()),
+            ..LaunchOptions::default()
+        };
+        let pc = merge_launch_options(&cfg, &opts);
+        assert_eq!(pc.working_directory, original_cwd);
+    }
+
+    #[test]
+    fn test_merge_launch_options_sin_opts_mantiene_default() {
+        let cfg = Config::default();
+        let pc = merge_launch_options(&cfg, &LaunchOptions::default());
+        let default = cfg.process_config();
+        assert_eq!(pc.shell, default.shell);
+        assert_eq!(pc.args, default.args);
+        assert_eq!(pc.working_directory, default.working_directory);
+        assert_eq!(pc.login_shell, default.login_shell);
     }
 
     #[cfg(unix)]

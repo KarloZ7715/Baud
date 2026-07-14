@@ -24,6 +24,10 @@ pub struct Session {
     pub title: String,
     /// Output pendiente de redibujar cuando la sesion no esta enfocada.
     pub dirty: bool,
+    /// Si es true, la sesion se mantiene abierta tras salir el proceso hijo.
+    pub hold: bool,
+    /// Si es true, la sesion se lanzo desde `-e` y sin `--hold` debe cerrarse al salir.
+    pub close_on_exit: bool,
 }
 
 #[cfg(test)]
