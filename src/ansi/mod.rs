@@ -4117,7 +4117,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mouse_reporting_ignored() {
+    fn test_mouse_report_sequences_do_not_print() {
         let mut term = Term::new();
         // SGR mouse: ESC [ < 0 ; 10 ; 5 M y m
         feed(&mut term, b"\x1b[<0;10;5M");
@@ -4127,6 +4127,31 @@ mod tests {
         feed(&mut term, b"\x1b[?1006l");
         // El grid NO debe haber cambiado (sigue siendo el char default, espacio).
         assert_eq!(term.grid.rows[0][0].ch, ' ');
+    }
+
+    #[test]
+    fn test_decset_mouse_single_mode_sets_flags() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?1000h");
+        assert!(term.mouse_reporting.click);
+        feed(&mut term, b"\x1b[?1002h");
+        assert!(term.mouse_reporting.drag);
+        feed(&mut term, b"\x1b[?1003h");
+        assert!(term.mouse_reporting.any_motion);
+        feed(&mut term, b"\x1b[?1006h");
+        assert!(term.mouse_reporting.sgr);
+    }
+
+    #[test]
+    fn test_decset_mouse_multiple_modes_sets_all_flags() {
+        let mut term = Term::new();
+        // ncurses y muchas apps envian varios modos en un solo CSI.
+        feed(&mut term, b"\x1b[?1002;1006h");
+        assert!(term.mouse_reporting.drag);
+        assert!(
+            term.mouse_reporting.sgr,
+            "SGR (1006) debe activarse dentro de un CSI con parametros multiples"
+        );
     }
 
     // -----------------------------------------------------------------------
