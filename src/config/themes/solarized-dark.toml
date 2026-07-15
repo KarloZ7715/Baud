@@ -19,3 +19,4 @@ bright_blue = "#839496"
 bright_magenta = "#6c71c4"
 bright_cyan = "#93a1a1"
 bright_white = "#fdf6e3"
+minimum_contrast = 3.0
