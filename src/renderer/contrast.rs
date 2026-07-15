@@ -176,4 +176,12 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(cache.entries.len(), 1);
     }
+    /// valor exacto de regression. Si el algoritmo OKLab cambia,
+    /// este test falla y obliga a revisar el cambio intencionalmente.
+    #[test]
+    fn fg_868686_on_1e1e2e_min_3_passthrough() {
+        let fg = (0x86, 0x86, 0x86);
+        let bg = (0x1e, 0x1e, 0x2e);
+        assert_eq!(adjust_fg(fg, bg, 3.0), fg);
+    }
 }
