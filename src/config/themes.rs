@@ -220,4 +220,54 @@ mod tests {
             }
         }
     }
+
+    /// Pin de vibrancia: cada tema embebido debe mantener la luminancia de
+    /// `bright_white` dentro del rango de su clase (vivid / pastel). Esto
+    /// detecta ediciones accidentales que desvanezcan una paleta.
+    #[test]
+    fn presets_bright_white_cumple_clase_de_vibrancia() {
+        use crate::color::relative_luminance;
+        use crate::config::parse_hex;
+
+        // (nombre, luminancia mínima esperada de bright_white)
+        let vivid: &[(&str, f64)] = &[
+            ("ayu-dark", 0.90),
+            ("claude-dark", 0.90),
+            ("cobalt2", 0.90),
+            ("dracula", 0.90),
+            ("github-dark", 0.90),
+            ("monokai", 0.90),
+            ("nord", 0.85),
+            ("solarized-dark", 0.90),
+        ];
+        let pastel: &[(&str, f64)] = &[
+            ("catppuccin-mocha", 0.50),
+            ("everforest-dark", 0.60),
+            ("flexoki-dark", 0.60),
+            ("gruvbox-dark", 0.70),
+            ("kanagawa-wave", 0.65),
+            ("one-dark", 0.60),
+            ("rose-pine", 0.70),
+            ("tokyo-night", 0.60),
+        ];
+
+        for &(name, min) in vivid {
+            let theme = try_preset(name).unwrap();
+            let rgb = parse_hex(&theme.bright_white);
+            let lum = relative_luminance(rgb);
+            assert!(
+                lum >= min,
+                "preset '{name}' vivid: bright_white lum={lum:.4} < {min}"
+            );
+        }
+        for &(name, min) in pastel {
+            let theme = try_preset(name).unwrap();
+            let rgb = parse_hex(&theme.bright_white);
+            let lum = relative_luminance(rgb);
+            assert!(
+                lum >= min,
+                "preset '{name}' pastel: bright_white lum={lum:.4} < {min}"
+            );
+        }
+    }
 }

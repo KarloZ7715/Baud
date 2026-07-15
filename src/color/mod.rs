@@ -13,7 +13,8 @@ pub fn contrast_ratio_rgb(fg: (u8, u8, u8), bg: (u8, u8, u8)) -> f64 {
     (lighter + 0.05) / (darker + 0.05)
 }
 
-fn relative_luminance(rgb: (u8, u8, u8)) -> f64 {
+/// Luminancia relativa WCAG 2.1 de un color sRGB.
+pub fn relative_luminance(rgb: (u8, u8, u8)) -> f64 {
     fn channel(c: u8) -> f64 {
         let c = f64::from(c) / 255.0;
         if c <= 0.03928 {
