@@ -330,6 +330,12 @@ impl Renderer {
         self.cell_h
     }
 
+    /// Cuenta de frames realmente presentados (no incrementa en los early-return
+    /// de `render()` que no llegan a dibujar: Timeout/Occluded/Outdated/Lost).
+    pub fn frame_count(&self) -> u64 {
+        self.frame_count
+    }
+
     /// Inicializa wgpu, glyphon y la surface configuration.
     ///
     /// `font_system` llega pre-construido: el caller lo arma en paralelo con la

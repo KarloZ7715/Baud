@@ -3307,6 +3307,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let bold = self.config.bold_is_bright || self.config.theme.bold_is_bright;
                 let layout = self.tabs[self.focused].layout().clone();
                 let t_render = Instant::now();
+                let frame_count_before = renderer.frame_count();
                 match renderer.render(
                     &panes,
                     terminal_area,
@@ -3319,11 +3320,16 @@ impl ApplicationHandler<UserEvent> for App {
                     tab_layout.as_ref(),
                 ) {
                     Ok(updated) => {
-                        if let Some(t_start) = self.startup_instant.take() {
-                            tracing::info!(
-                                "startup: time-to-first-frame {}ms",
-                                t_start.elapsed().as_millis()
-                            );
+                        // Ok(_) tambien lo devuelven los early-return de render()
+                        // que no llegan a dibujar (Timeout/Occluded/Outdated/Lost);
+                        // frame_count solo sube en los paths que si presentan.
+                        if renderer.frame_count() > frame_count_before {
+                            if let Some(t_start) = self.startup_instant.take() {
+                                tracing::info!(
+                                    "startup: time-to-first-frame {}ms",
+                                    t_start.elapsed().as_millis()
+                                );
+                            }
                         }
                         for id in updated {
                             if let Some(idx) = self.session_by_id(id) {
