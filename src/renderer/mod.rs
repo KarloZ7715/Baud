@@ -338,11 +338,21 @@ impl Renderer {
         config: wgpu::SurfaceConfiguration,
         font_config: &FontConfig,
     ) -> Self {
+        let t_font_system = Instant::now();
         let mut font_system =
             terminal_fallback::create_font_system_with_fallback(&font_config.fallback);
+        tracing::info!(
+            "startup: font system listo en {}ms",
+            t_font_system.elapsed().as_millis()
+        );
         // Cache necesario para glyphon 0.11
+        let t_glyphon_cache = Instant::now();
         let wgpu_cache = glyphon::Cache::new(&device);
         let mut atlas = glyphon::TextAtlas::new(&device, &queue, &wgpu_cache, config.format);
+        tracing::info!(
+            "startup: glyphon cache + atlas listos en {}ms",
+            t_glyphon_cache.elapsed().as_millis()
+        );
         // Inicializar viewport con la resolución REAL de la surface.
         // glyphon::Viewport::new() por defecto crea resolución (0, 0),
         // lo que clipea todo el texto. Sin este update, el primer frame
@@ -355,11 +365,16 @@ impl Renderer {
                 height: config.height,
             },
         );
+        let t_text_renderer = Instant::now();
         let text_renderer = glyphon::TextRenderer::new(
             &mut atlas,
             &device,
             wgpu::MultisampleState::default(),
             None,
+        );
+        tracing::info!(
+            "startup: text renderer listo en {}ms",
+            t_text_renderer.elapsed().as_millis()
         );
         let swash_cache = glyphon::SwashCache::new();
 

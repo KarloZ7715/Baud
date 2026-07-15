@@ -81,10 +81,22 @@ fn build_common_fallback(
 pub fn create_font_system_with_fallback(user_fallback: &[String]) -> glyphon::FontSystem {
     let locale = system_locale();
     let mut db = glyphon::fontdb::Database::new();
+    let t_scan = std::time::Instant::now();
     db.load_system_fonts();
+    tracing::info!(
+        "startup: load_system_fonts en {}ms ({} fuentes)",
+        t_scan.elapsed().as_millis(),
+        db.len()
+    );
+    let t_fallback = std::time::Instant::now();
     let common = build_common_fallback(&db, user_fallback);
     let fallback = TerminalFallbackChain { common };
-    FontSystem::new_with_locale_and_db_and_fallback(locale, db, fallback)
+    let font_system = FontSystem::new_with_locale_and_db_and_fallback(locale, db, fallback);
+    tracing::info!(
+        "startup: resolucion de fallback en {}ms",
+        t_fallback.elapsed().as_millis()
+    );
+    font_system
 }
 
 /// FontSystem con fuentes del sistema y fallbacks para terminal (tests y defaults).

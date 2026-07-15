@@ -308,6 +308,8 @@ pub struct App {
     initial_title: Option<String>,
     /// app_id de Wayland / instancia de WM_CLASS en X11.
     app_id: Option<String>,
+    /// Marca de tiempo al entrar a `resumed()`; se consume al loguear el primer frame.
+    startup_instant: Option<Instant>,
 }
 
 fn allowed_open_url(url: &str) -> bool {
@@ -406,6 +408,7 @@ impl App {
             wheel_residual: 0.0,
             initial_title,
             app_id,
+            startup_instant: None,
         }
     }
 
@@ -2841,9 +2844,12 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
+        let t_start = Instant::now();
+        self.startup_instant = Some(t_start);
         self.display_quirks = display_quirks::snapshot_for_event_loop(event_loop);
 
         // 1. Crear ventana.
+        let t_window = Instant::now();
         let wcfg = &self.config.window;
         let initial_title = self.initial_title.as_deref().unwrap_or("baud");
         let mut attrs = Window::default_attributes()
@@ -2883,6 +2889,10 @@ impl ApplicationHandler<UserEvent> for App {
         );
         self.window = Some(window.clone());
         window.set_ime_allowed(true);
+        tracing::info!(
+            "startup: ventana creada en {}ms",
+            t_window.elapsed().as_millis()
+        );
 
         // 2. Obtener display handle para wgpu (evita el lifetime de ActiveEventLoop).
         let display_handle = event_loop.owned_display_handle();
@@ -2929,6 +2939,7 @@ impl ApplicationHandler<UserEvent> for App {
             t_gpu_init.elapsed().as_millis()
         );
 
+        let t_surface_cfg = Instant::now();
         let size = window.inner_size();
         let surface_w = size.width.clamp(1, 16_384);
         let surface_h = size.height.clamp(1, 16_384);
@@ -2941,8 +2952,13 @@ impl ApplicationHandler<UserEvent> for App {
             config.view_formats = vec![config.format.add_srgb_suffix()];
         }
         surface.configure(&device, &config);
+        tracing::info!(
+            "startup: surface config lista en {}ms",
+            t_surface_cfg.elapsed().as_millis()
+        );
 
         // 4. Crear Renderer.
+        let t_renderer = Instant::now();
         self.renderer = Some(Renderer::new(
             window.clone(),
             device,
@@ -2951,6 +2967,10 @@ impl ApplicationHandler<UserEvent> for App {
             config,
             &self.config.font,
         ));
+        tracing::info!(
+            "startup: renderer construido en {}ms",
+            t_renderer.elapsed().as_millis()
+        );
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_content_padding(wcfg.padding_x, wcfg.padding_y);
             if let Some(source) = self.pending_config_source.take() {
@@ -2976,7 +2996,6 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
-        tracing::info!("renderer inicializado");
 
         // Verificar si hay que mostrar el modal de consentimiento de primer arranque.
         self.check_first_run_consent();
@@ -3244,6 +3263,12 @@ impl ApplicationHandler<UserEvent> for App {
                     tab_layout.as_ref(),
                 ) {
                     Ok(updated) => {
+                        if let Some(t_start) = self.startup_instant.take() {
+                            tracing::info!(
+                                "startup: time-to-first-frame {}ms",
+                                t_start.elapsed().as_millis()
+                            );
+                        }
                         for id in updated {
                             if let Some(idx) = self.session_by_id(id) {
                                 if deferred_at_schedule.contains(&id) {
