@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <!-- UpgradeCode fijo: no cambiar entre versiones, es la identidad de producto para MajorUpgrade. -->
+  <Package Name="Baud"
+           Manufacturer="Baud"
+           Version="$(var.BaudVersion)"
+           UpgradeCode="BA1B21AF-39C6-4282-9308-56286E29B1B3"
+           Language="1033"
+           Scope="perMachine">
+
+    <SummaryInformation Description="Baud terminal emulator installer" Manufacturer="Baud" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Baud is already installed." />
+
+    <Icon Id="BaudIcon" SourceFile="..\baud.ico" />
+    <Property Id="ARPPRODUCTICON" Value="BaudIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/KarloZ7715/Baud" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Baud">
+        <Component Id="BaudExecutable" Guid="C61C7365-2C93-4CA8-BB01-E534D2032984">
+          <File Id="BaudExe" Source="$(var.BaudExePath)" KeyPath="yes" />
+        </Component>
+        <Component Id="BaudLicense" Guid="1756C607-64CC-49CB-9179-ED8382435B70">
+          <File Id="LicenseFile" Source="$(var.BaudLicensePath)" Name="LICENSE" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="BaudStartMenuFolder" Name="Baud">
+        <Component Id="BaudShortcut" Guid="CA7D8925-D7B8-45AA-8921-BB9D2226E7BA">
+          <Shortcut Id="BaudStartMenuShortcut"
+                    Name="Baud"
+                    Description="Baud terminal emulator"
+                    Target="[INSTALLFOLDER]baud.exe"
+                    WorkingDirectory="INSTALLFOLDER"
+                    Icon="BaudIcon" />
+          <RemoveFolder Id="RemoveBaudStartMenuFolder" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\Baud" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="Baud" Level="1">
+      <ComponentRef Id="BaudExecutable" />
+      <ComponentRef Id="BaudLicense" />
+      <ComponentRef Id="BaudShortcut" />
+    </Feature>
+
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+
+  </Package>
+</Wix>
