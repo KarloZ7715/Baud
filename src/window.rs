@@ -2965,6 +2965,43 @@ impl ApplicationHandler<UserEvent> for App {
             t_surface_cfg.elapsed().as_millis()
         );
 
+        // Pintar el fondo del tema y presentar ya: la ventana no queda vacia
+        // mientras el hilo de fuentes sigue escaneando en segundo plano.
+        let t_early_present = Instant::now();
+        let (bg_r, bg_g, bg_b) = crate::config::parse_hex(&self.config.theme.background);
+        let clear_color = crate::renderer::frame_clear_color((bg_r, bg_g, bg_b), opacity);
+        if let wgpu::CurrentSurfaceTexture::Success(frame)
+        | wgpu::CurrentSurfaceTexture::Suboptimal(frame) = surface.get_current_texture()
+        {
+            let view = frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("early background clear"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(clear_color),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    ..Default::default()
+                });
+            }
+            queue.submit(std::iter::once(encoder.finish()));
+            frame.present();
+            tracing::info!(
+                "startup: ventana pintada (fondo) en {}ms",
+                t_early_present.elapsed().as_millis()
+            );
+        }
+
         let t_font_join = Instant::now();
         let font_system = match font_thread.join() {
             Ok(font_system) => font_system,
