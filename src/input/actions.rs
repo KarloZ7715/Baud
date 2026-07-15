@@ -34,6 +34,12 @@ pub enum Action {
     FocusPaneRight,
     ClosePane,
     ToggleFpsCounter,
+    ExtendSelectionWordLeft,
+    ExtendSelectionWordRight,
+    ExtendSelectionLineStart,
+    ExtendSelectionLineEnd,
+    ExtendSelectionViewportStart,
+    ExtendSelectionViewportEnd,
 }
 
 /// Mapa de combinaciones de tecla a acciones del terminal.
@@ -127,14 +133,24 @@ impl Default for Keybindings {
                 (Key::Char('d'), cs, Action::SplitPane),
                 (Key::Char('|'), cs, Action::ToggleSplit),
                 (Key::Char('s'), cs, Action::SwapSplit),
-                (Key::Right, cs, Action::FocusNextPane),
-                (Key::Left, cs, Action::FocusPrevPane),
+                // Ctrl+Shift+] / Ctrl+Shift+[ (convencion de kitty): ciclar foco de
+                // panel. Libera Ctrl+Shift+Left/Right para extender seleccion por
+                // palabra (convencion universal de editores/terminales).
+                (Key::Char(']'), cs, Action::FocusNextPane),
+                (Key::Char('['), cs, Action::FocusPrevPane),
                 (Key::Up, alt_shift, Action::FocusPaneUp),
                 (Key::Down, alt_shift, Action::FocusPaneDown),
                 (Key::Left, alt_shift, Action::FocusPaneLeft),
                 (Key::Right, alt_shift, Action::FocusPaneRight),
                 (Key::Char('q'), cs, Action::ClosePane),
                 (Key::F(12), cs, Action::ToggleFpsCounter),
+                (Key::Left, cs, Action::ExtendSelectionWordLeft),
+                (Key::Right, cs, Action::ExtendSelectionWordRight),
+                (Key::Home, shift, Action::ExtendSelectionLineStart),
+                (Key::End, shift, Action::ExtendSelectionLineEnd),
+                (Key::Home, cs, Action::ExtendSelectionViewportStart),
+                (Key::End, cs, Action::ExtendSelectionViewportEnd),
+                (Key::Insert, shift, Action::PastePrimary),
             ],
         }
     }
@@ -232,6 +248,12 @@ pub fn parse_action(s: &str) -> Option<Action> {
         "focus_pane_right" => Action::FocusPaneRight,
         "close_pane" => Action::ClosePane,
         "toggle_fps_counter" => Action::ToggleFpsCounter,
+        "extend_selection_word_left" => Action::ExtendSelectionWordLeft,
+        "extend_selection_word_right" => Action::ExtendSelectionWordRight,
+        "extend_selection_line_start" => Action::ExtendSelectionLineStart,
+        "extend_selection_line_end" => Action::ExtendSelectionLineEnd,
+        "extend_selection_viewport_start" => Action::ExtendSelectionViewportStart,
+        "extend_selection_viewport_end" => Action::ExtendSelectionViewportEnd,
         _ => return None,
     })
 }
@@ -367,8 +389,8 @@ mod tests {
         assert_eq!(kb.lookup(Key::Char('s'), cs), Some(Action::SwapSplit));
         assert_eq!(kb.lookup(Key::Char('t'), cs), Some(Action::NewTab));
         assert_eq!(kb.lookup(Key::Char('e'), cs), None);
-        assert_eq!(kb.lookup(Key::Right, cs), Some(Action::FocusNextPane));
-        assert_eq!(kb.lookup(Key::Left, cs), Some(Action::FocusPrevPane));
+        assert_eq!(kb.lookup(Key::Char(']'), cs), Some(Action::FocusNextPane));
+        assert_eq!(kb.lookup(Key::Char('['), cs), Some(Action::FocusPrevPane));
         assert_eq!(kb.lookup(Key::Char('q'), cs), Some(Action::ClosePane));
         let alt_shift = Mods {
             alt: true,
@@ -377,6 +399,73 @@ mod tests {
         };
         assert_eq!(kb.lookup(Key::Up, alt_shift), Some(Action::FocusPaneUp));
         assert_eq!(kb.lookup(Key::Down, alt_shift), Some(Action::FocusPaneDown));
+    }
+
+    #[test]
+    fn test_default_bindings_extend_selection() {
+        let kb = Keybindings::default();
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        let shift = Mods {
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            kb.lookup(Key::Left, cs),
+            Some(Action::ExtendSelectionWordLeft)
+        );
+        assert_eq!(
+            kb.lookup(Key::Right, cs),
+            Some(Action::ExtendSelectionWordRight)
+        );
+        assert_eq!(
+            kb.lookup(Key::Home, shift),
+            Some(Action::ExtendSelectionLineStart)
+        );
+        assert_eq!(
+            kb.lookup(Key::End, shift),
+            Some(Action::ExtendSelectionLineEnd)
+        );
+        assert_eq!(
+            kb.lookup(Key::Home, cs),
+            Some(Action::ExtendSelectionViewportStart)
+        );
+        assert_eq!(
+            kb.lookup(Key::End, cs),
+            Some(Action::ExtendSelectionViewportEnd)
+        );
+        assert_eq!(kb.lookup(Key::Insert, shift), Some(Action::PastePrimary));
+    }
+
+    #[test]
+    fn test_parse_action_extend_selection_str() {
+        assert_eq!(
+            parse_action("extend_selection_word_left"),
+            Some(Action::ExtendSelectionWordLeft)
+        );
+        assert_eq!(
+            parse_action("extend_selection_word_right"),
+            Some(Action::ExtendSelectionWordRight)
+        );
+        assert_eq!(
+            parse_action("extend_selection_line_start"),
+            Some(Action::ExtendSelectionLineStart)
+        );
+        assert_eq!(
+            parse_action("extend_selection_line_end"),
+            Some(Action::ExtendSelectionLineEnd)
+        );
+        assert_eq!(
+            parse_action("extend_selection_viewport_start"),
+            Some(Action::ExtendSelectionViewportStart)
+        );
+        assert_eq!(
+            parse_action("extend_selection_viewport_end"),
+            Some(Action::ExtendSelectionViewportEnd)
+        );
     }
 
     #[test]

@@ -1789,6 +1789,123 @@ impl App {
         }
     }
 
+    /// Extiende la seleccion de teclado hacia una posicion absoluta (row, col),
+    /// compartiendo con extend_selection la creacion-desde-cursor, el clamp de
+    /// limites y el redraw diferido.
+    fn extend_selection_to(&mut self, target_row: usize, target_col: usize) {
+        let mut changed = false;
+        if let Ok(mut guard) = self.focused_term().lock() {
+            let cols_count = guard.grid.cols_count;
+            let sb_len = if guard.alt_screen {
+                0
+            } else {
+                guard.grid.scrollback.len()
+            };
+            let total_rows = sb_len + guard.grid.rows_count;
+            let max_row = total_rows.saturating_sub(1);
+
+            if guard.selection.is_none() {
+                let abs_row = guard.cursor_logical_row();
+                // El cursor descansa una columna despues del ultimo caracter
+                // recien tecleado (celda en blanco aun no escrita). Anclar ahi
+                // tal cual incluiria esa celda en blanco de mas una vez que
+                // normalize() la trate como extremo "mayor" al extender hacia
+                // atras. Anclar sobre el ultimo caracter real evita esa celda
+                // fantasma sin afectar el caso en que el cursor ya esta sobre
+                // contenido real (medio de linea).
+                let content_len = guard.line_content_end_col(abs_row) + 1;
+                let cur_col = if guard.cursor.col == content_len {
+                    content_len.saturating_sub(1)
+                } else {
+                    guard.cursor.col
+                };
+                if abs_row < total_rows {
+                    guard.selection = Some(Selection::new(SelectionPoint {
+                        row: abs_row,
+                        col: cur_col,
+                    }));
+                } else {
+                    return;
+                }
+            }
+
+            let new_row = target_row.min(max_row);
+            let new_col = target_col.min(cols_count.saturating_sub(1));
+
+            if let Some(ref mut sel) = guard.selection {
+                sel.end.row = new_row;
+                sel.end.col = new_col;
+            }
+            guard.scroll_to_show_logical_row(new_row);
+            guard.mark_dirty();
+            changed = true;
+        }
+        if changed {
+            self.request_selection_redraw(false);
+        }
+    }
+
+    /// Ctrl+Shift+Left/Right: extiende la seleccion al limite de palabra
+    /// anterior/siguiente, reutilizando Term::word_boundary_left/right.
+    fn extend_selection_word(&mut self, left: bool) {
+        let target = {
+            let Ok(guard) = self.focused_term().lock() else {
+                return;
+            };
+            let (row, col) = guard
+                .selection
+                .as_ref()
+                .map(|s| (s.end.row, s.end.col))
+                .unwrap_or_else(|| (guard.cursor_logical_row(), guard.cursor.col));
+            if left {
+                guard.word_boundary_left(row, col)
+            } else {
+                guard.word_boundary_right(row, col)
+            }
+        };
+        self.extend_selection_to(target.0, target.1);
+    }
+
+    /// Shift+Home/End: extiende la seleccion al inicio/fin de la fila logica
+    /// actual (fin = ultimo caracter no-espacio, columna 0 si esta vacia).
+    fn extend_selection_line_edge(&mut self, start: bool) {
+        let target = {
+            let Ok(guard) = self.focused_term().lock() else {
+                return;
+            };
+            let row = guard
+                .selection
+                .as_ref()
+                .map(|s| s.end.row)
+                .unwrap_or_else(|| guard.cursor_logical_row());
+            let col = if start {
+                0
+            } else {
+                guard.line_content_end_col(row)
+            };
+            (row, col)
+        };
+        self.extend_selection_to(target.0, target.1);
+    }
+
+    /// Ctrl+Shift+Home/End: extiende la seleccion al borde superior/inferior
+    /// del viewport visible actual (no todo el scrollback).
+    fn extend_selection_viewport_edge(&mut self, start: bool) {
+        let target = {
+            let Ok(guard) = self.focused_term().lock() else {
+                return;
+            };
+            let rows_count = guard.grid.rows_count;
+            if start {
+                (guard.visible_to_logical_row(0), 0)
+            } else {
+                let row = guard.visible_to_logical_row(rows_count.saturating_sub(1));
+                (row, guard.line_content_end_col(row))
+            }
+        };
+        self.extend_selection_to(target.0, target.1);
+    }
+
     fn scroll_lines(&mut self, n: isize) {
         let mut guard = self.focused_term().lock().expect("term mutex poisoned");
         if n > 0 {
@@ -2190,6 +2307,12 @@ impl App {
             FocusPaneLeft => self.focus_pane_direction(crate::layout::Direction::Left),
             FocusPaneRight => self.focus_pane_direction(crate::layout::Direction::Right),
             ClosePane => self.close_pane(),
+            ExtendSelectionWordLeft => self.extend_selection_word(true),
+            ExtendSelectionWordRight => self.extend_selection_word(false),
+            ExtendSelectionLineStart => self.extend_selection_line_edge(true),
+            ExtendSelectionLineEnd => self.extend_selection_line_edge(false),
+            ExtendSelectionViewportStart => self.extend_selection_viewport_edge(true),
+            ExtendSelectionViewportEnd => self.extend_selection_viewport_edge(false),
             ToggleFpsCounter => {
                 if self.config.debug.fps_counter_enabled {
                     self.fps_overlay_visible = !self.fps_overlay_visible;
@@ -4189,6 +4312,116 @@ mod tests {
         assert_eq!(app.focused, 1);
         app.run_action(Action::GotoTab(0));
         assert_eq!(app.focused, 1);
+    }
+
+    #[test]
+    fn extend_selection_word_ae2_uno_dos_tres() {
+        use crate::input::actions::Action;
+        let term = Arc::new(Mutex::new(Term::new()));
+        {
+            let mut guard = term.lock().expect("term mutex");
+            feed_term(&mut guard, b"uno dos tres");
+        }
+        let mut app = test_app(term.clone());
+
+        app.run_action(Action::ExtendSelectionWordLeft);
+        app.run_action(Action::ExtendSelectionWordLeft);
+
+        let guard = term.lock().expect("term mutex");
+        assert_eq!(guard.selected_text(), "dos tres");
+    }
+
+    #[test]
+    fn extend_selection_line_start_end_desde_mitad_de_linea() {
+        use crate::input::actions::Action;
+        let term = Arc::new(Mutex::new(Term::new()));
+        {
+            let mut guard = term.lock().expect("term mutex");
+            feed_term(&mut guard, b"uno dos tres");
+            guard.cursor.col = 5; // mitad de "dos"
+        }
+        let mut app = test_app(term.clone());
+
+        app.run_action(Action::ExtendSelectionLineEnd);
+        {
+            let guard = term.lock().expect("term mutex");
+            assert_eq!(guard.selected_text(), "os tres");
+            assert_eq!(guard.selection.as_ref().unwrap().end.col, 11);
+        }
+
+        // Reiniciar y probar Home desde la misma posicion.
+        {
+            let mut guard = term.lock().expect("term mutex");
+            guard.selection = None;
+            guard.cursor.col = 5;
+        }
+        app.run_action(Action::ExtendSelectionLineStart);
+        let guard = term.lock().expect("term mutex");
+        assert_eq!(guard.selected_text(), "uno do");
+        assert_eq!(guard.selection.as_ref().unwrap().end.col, 0);
+    }
+
+    #[test]
+    fn extend_selection_line_end_en_linea_vacia_no_invierte_ni_panica() {
+        use crate::input::actions::Action;
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term.clone());
+
+        app.run_action(Action::ExtendSelectionLineEnd);
+
+        let guard = term.lock().expect("term mutex");
+        let sel = guard.selection.as_ref().expect("seleccion creada");
+        assert_eq!(
+            sel.end.col, 0,
+            "fila vacia: no-op, no debe invertir el rango"
+        );
+    }
+
+    #[test]
+    fn extend_selection_viewport_start_end_no_panica() {
+        use crate::input::actions::Action;
+        let term = Arc::new(Mutex::new(Term::new()));
+        {
+            let mut guard = term.lock().expect("term mutex");
+            feed_term(&mut guard, b"uno dos tres");
+        }
+        let mut app = test_app(term.clone());
+
+        app.run_action(Action::ExtendSelectionViewportStart);
+        app.run_action(Action::ExtendSelectionViewportEnd);
+
+        let guard = term.lock().expect("term mutex");
+        assert!(guard.selection.is_some());
+    }
+
+    #[test]
+    fn extend_selection_word_override_de_config_remapea_chord() {
+        use crate::input::actions::Action;
+        use crate::input::keymap::{Key, Mods};
+        let overrides = vec![(
+            "alt+shift+j".to_string(),
+            "extend_selection_word_left".to_string(),
+        )];
+        let kb = Keybindings::from_overrides(&overrides);
+        let alt_shift = Mods {
+            alt: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            kb.lookup(Key::Char('j'), alt_shift),
+            Some(Action::ExtendSelectionWordLeft)
+        );
+        // El chord por defecto (Ctrl+Shift+Left) se conserva ademas del override.
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            kb.lookup(Key::Left, cs),
+            Some(Action::ExtendSelectionWordLeft)
+        );
     }
 
     #[test]

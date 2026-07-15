@@ -34,7 +34,7 @@ pub struct Selection {
 }
 
 /// Caracteres considerados parte de una palabra: alfanuméricos + guión bajo.
-fn is_word_char(c: char) -> bool {
+pub(crate) fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 

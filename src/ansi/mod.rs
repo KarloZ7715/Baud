@@ -918,6 +918,10 @@ impl Term {
             self.cursor.move_to(row, col);
         }
         self.pending_wrap = false;
+        // Invalidar el frame cacheado del renderer: el grid activo cambio, asi
+        // que la display list anterior (del alt screen) no puede reusarse.
+        self.mark_dirty();
+        self.active_grid_mut().damage.mark_all();
     }
 
     /// Devuelve la cantidad de lineas en el scrollback.
@@ -1255,6 +1259,108 @@ impl Term {
         } else {
             self.scrollback_offset = 0;
         }
+    }
+
+    fn char_at_logical(&self, row: usize, col: usize) -> Option<char> {
+        self.row_cells_at_logical(row)?.get(col).map(|c| c.ch)
+    }
+
+    /// Longitud de contenido real de una fila logica: una posicion despues
+    /// del ultimo caracter no-espacio, 0 si esta vacia. A diferencia de
+    /// `row_cells_at_logical(..).len()` (ancho fijo del grid), esto evita que
+    /// el motion de palabras vague por celdas nunca escritas.
+    fn row_content_len(&self, row: usize) -> usize {
+        let cells = self.row_cells_at_logical(row).unwrap_or_default();
+        cells
+            .iter()
+            .rposition(|c| c.ch != ' ')
+            .map(|p| p + 1)
+            .unwrap_or(0)
+    }
+
+    /// Un paso atras en el espacio logico continuo (scrollback + grid),
+    /// devolviendo la nueva posicion junto con el caracter que se cruzo.
+    /// Cruza a la fila anterior cuando col llega a 0; una fila anterior sin
+    /// contenido se trata como un unico separador para seguir progresando.
+    fn step_left_logical(&self, row: usize, col: usize) -> Option<(usize, usize, char)> {
+        if col > 0 {
+            let ch = self.char_at_logical(row, col - 1)?;
+            return Some((row, col - 1, ch));
+        }
+        if row == 0 {
+            return None;
+        }
+        let prev_row = row - 1;
+        let len = self.row_content_len(prev_row);
+        if len == 0 {
+            return Some((prev_row, 0, ' '));
+        }
+        let ch = self.char_at_logical(prev_row, len - 1)?;
+        Some((prev_row, len - 1, ch))
+    }
+
+    /// Un paso adelante en el espacio logico continuo, devolviendo la nueva
+    /// posicion junto con el caracter cruzado. Solo cruza a la fila
+    /// siguiente si esta tiene contenido real (mismo motivo que arriba).
+    fn step_right_logical(&self, row: usize, col: usize) -> Option<(usize, usize, char)> {
+        let len = self.row_content_len(row);
+        if col < len {
+            let ch = self.char_at_logical(row, col)?;
+            return Some((row, col + 1, ch));
+        }
+        let next_row = row + 1;
+        if self.row_content_len(next_row) == 0 {
+            return None;
+        }
+        let ch = self.char_at_logical(next_row, 0)?;
+        Some((next_row, 1, ch))
+    }
+
+    /// Retrocede desde (row, col) hasta el inicio de la palabra anterior:
+    /// salta separadores y luego la corrida de caracteres de palabra.
+    /// Reutiliza la misma nocion de "caracter de palabra" que expand_to_word.
+    pub fn word_boundary_left(&self, row: usize, col: usize) -> (usize, usize) {
+        let mut pos = (row, col);
+        while let Some((r, c, ch)) = self.step_left_logical(pos.0, pos.1) {
+            if crate::selection::is_word_char(ch) {
+                break;
+            }
+            pos = (r, c);
+        }
+        while let Some((r, c, ch)) = self.step_left_logical(pos.0, pos.1) {
+            if !crate::selection::is_word_char(ch) {
+                break;
+            }
+            pos = (r, c);
+        }
+        pos
+    }
+
+    /// Avanza desde (row, col) hasta el inicio de la siguiente palabra:
+    /// salta la palabra actual (si el punto esta dentro de una) y luego
+    /// los separadores hasta el primer caracter de palabra.
+    pub fn word_boundary_right(&self, row: usize, col: usize) -> (usize, usize) {
+        let mut pos = (row, col);
+        while let Some((r, c, ch)) = self.step_right_logical(pos.0, pos.1) {
+            if !crate::selection::is_word_char(ch) {
+                break;
+            }
+            pos = (r, c);
+        }
+        while let Some((r, c, ch)) = self.step_right_logical(pos.0, pos.1) {
+            if crate::selection::is_word_char(ch) {
+                break;
+            }
+            pos = (r, c);
+        }
+        pos
+    }
+
+    /// Columna del ultimo caracter no-espacio de la fila logica (inclusive),
+    /// 0 si la fila esta vacia. Usado por Shift+End y Ctrl+Shift+End.
+    pub fn line_content_end_col(&self, row: usize) -> usize {
+        let cells = self.row_cells_at_logical(row).unwrap_or_default();
+        cells.iter().rposition(|c| c.ch != ' ').unwrap_or(0)
     }
 
     /// Ajusta `prompt_marks` contra el recorte de scrollback primario: cada
@@ -3366,6 +3472,20 @@ mod tests {
         assert_eq!(t.alt_grid.rows_count, 35);
         assert_eq!(t.alt_grid.cols_count, 120);
     }
+
+    #[test]
+    fn exit_alt_screen_marks_dirty_and_full_damage() {
+        let mut t = Term::new();
+        t.enter_alt_screen();
+        let _ = t.take_dirty();
+        let _ = t.take_active_grid_damage();
+        t.exit_alt_screen();
+        assert!(t.dirty, "salir de alt screen debe marcar el term dirty");
+        assert!(
+            t.take_active_grid_damage().is_full(),
+            "salir de alt screen debe invalidar todo el grid primario"
+        );
+    }
     // -----------------------------------------------------------------------
     // Tests SGR
     // -----------------------------------------------------------------------
@@ -5239,6 +5359,86 @@ mod tests {
             crate::selection::SelectionPoint { row: 0, col: 0 },
         ));
         assert!(term.is_selected(0, 0));
+    }
+
+    #[test]
+    fn test_word_boundary_left_uno_dos_tres() {
+        let mut term = Term::new();
+        feed(&mut term, b"uno dos tres");
+        // Cursor tras "tres" (col 12). Primera llamada -> inicio de "tres" (col 8).
+        let (row, col) = term.word_boundary_left(0, 12);
+        assert_eq!((row, col), (0, 8));
+        // Segunda llamada desde ahi -> inicio de "dos" (col 4).
+        let (row, col) = term.word_boundary_left(row, col);
+        assert_eq!((row, col), (0, 4));
+        // Tercera llamada -> inicio de "uno" (col 0).
+        let (row, col) = term.word_boundary_left(row, col);
+        assert_eq!((row, col), (0, 0));
+        // En el limite (col 0, row 0) no retrocede mas.
+        let (row, col) = term.word_boundary_left(row, col);
+        assert_eq!((row, col), (0, 0));
+    }
+
+    #[test]
+    fn test_word_boundary_left_desde_mitad_de_palabra() {
+        let mut term = Term::new();
+        feed(&mut term, b"uno dos tres");
+        // Click en medio de "dos" (col 5, la 'o') -> inicio de "dos" (col 4).
+        let (row, col) = term.word_boundary_left(0, 5);
+        assert_eq!((row, col), (0, 4));
+    }
+
+    #[test]
+    fn test_word_boundary_left_desde_separador() {
+        let mut term = Term::new();
+        feed(&mut term, b"uno dos tres");
+        // Justo en el inicio de "dos" (col 4) -> retrocede sobre el separador
+        // y llega al inicio de la palabra previa, "uno" (col 0).
+        let (row, col) = term.word_boundary_left(0, 4);
+        assert_eq!((row, col), (0, 0));
+    }
+
+    #[test]
+    fn test_word_boundary_right_uno_dos_tres() {
+        let mut term = Term::new();
+        feed(&mut term, b"uno dos tres");
+        let (row, col) = term.word_boundary_right(0, 0);
+        assert_eq!((row, col), (0, 4));
+        let (row, col) = term.word_boundary_right(row, col);
+        assert_eq!((row, col), (0, 8));
+        // Tras la ultima palabra no hay mas filas: se queda al final.
+        let (row, col) = term.word_boundary_right(row, col);
+        assert_eq!((row, col), (0, 12));
+    }
+
+    #[test]
+    fn test_word_boundary_cruza_fila_logica_envuelta() {
+        // Una fila de DEFAULT_COLS caracteres de palabra envuelve a la
+        // siguiente fila logica sin separador visible entre ambas.
+        let mut term = Term::new();
+        let long_word: String = "a".repeat(DEFAULT_COLS + 3);
+        feed(&mut term, long_word.as_bytes());
+        assert!(
+            term.grid.row_continuations[1],
+            "precondicion: la segunda fila debe ser continuacion (wrap)"
+        );
+        // Desde (row=1, col=3) retroceder debe cruzar a la fila 0 y llegar a (0, 0).
+        let (row, col) = term.word_boundary_left(1, 3);
+        assert_eq!((row, col), (0, 0));
+    }
+
+    #[test]
+    fn test_line_content_end_col() {
+        let mut term = Term::new();
+        feed(&mut term, b"uno dos tres");
+        assert_eq!(term.line_content_end_col(0), 11, "col del ultimo char 's'");
+
+        let empty_term = Term::new();
+        assert_eq!(
+            empty_term.line_content_end_col(0),
+            0,
+            "fila vacia no debe entrar en panico ni invertir el rango"
+        );
     }
 
     #[test]
