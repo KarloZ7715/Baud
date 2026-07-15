@@ -576,4 +576,92 @@ mod tests {
         assert_eq!(kb.lookup(Key::Char('v'), cs), Some(Action::PastePrimary));
         assert_eq!(kb.lookup(Key::Char('c'), cs), Some(Action::Copy));
     }
+
+    /// Table-driven: recorre la tabla "Bindings por defecto existentes" de
+    /// docs/references/keybinding-matrix.md. Un cambio en un default debe
+    /// reflejarse tambien en el doc (y viceversa).
+    #[test]
+    fn test_matrix_default_bindings_table_driven() {
+        let kb = Keybindings::default();
+        let none = Mods::NONE;
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        let shift = Mods {
+            shift: true,
+            ..Mods::NONE
+        };
+        let alt = Mods {
+            alt: true,
+            ..Mods::NONE
+        };
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        let alt_ctrl = Mods {
+            ctrl: true,
+            alt: true,
+            ..Mods::NONE
+        };
+        let alt_shift = Mods {
+            alt: true,
+            shift: true,
+            ..Mods::NONE
+        };
+
+        let rows: &[(Key, Mods, Action)] = &[
+            (Key::Char('c'), cs, Action::Copy),
+            (Key::Char('v'), cs, Action::Paste),
+            (Key::Insert, shift, Action::PastePrimary),
+            (Key::Char('x'), cs, Action::ToggleCopyMode),
+            (Key::Char('f'), cs, Action::ToggleSearch),
+            (Key::Char('='), ctrl, Action::FontZoomIn),
+            (Key::Char('-'), ctrl, Action::FontZoomOut),
+            (Key::Char('0'), ctrl, Action::FontZoomReset),
+            (Key::Char('t'), alt_ctrl, Action::ToggleThemePicker),
+            (Key::Char('t'), cs, Action::NewTab),
+            (Key::Char('w'), cs, Action::CloseTab),
+            (Key::PageDown, ctrl, Action::NextTab),
+            (Key::PageUp, ctrl, Action::PrevTab),
+            (Key::Up, cs, Action::ScrollLineUp),
+            (Key::Down, cs, Action::ScrollLineDown),
+            (Key::Up, alt, Action::ScrollPageUp),
+            (Key::Down, alt, Action::ScrollPageDown),
+            (Key::PageUp, shift, Action::ScrollPageUp),
+            (Key::PageDown, shift, Action::ScrollPageDown),
+            (Key::PageUp, none, Action::ScrollPageUp),
+            (Key::PageDown, none, Action::ScrollPageDown),
+            (Key::End, ctrl, Action::ScrollToBottom),
+            (Key::Up, alt_ctrl, Action::JumpToPrevPrompt),
+            (Key::Down, alt_ctrl, Action::JumpToNextPrompt),
+            (Key::Char('d'), cs, Action::SplitPane),
+            (Key::Char('|'), cs, Action::ToggleSplit),
+            (Key::Char('s'), cs, Action::SwapSplit),
+            (Key::Char(']'), cs, Action::FocusNextPane),
+            (Key::Char('['), cs, Action::FocusPrevPane),
+            (Key::Up, alt_shift, Action::FocusPaneUp),
+            (Key::Down, alt_shift, Action::FocusPaneDown),
+            (Key::Left, alt_shift, Action::FocusPaneLeft),
+            (Key::Right, alt_shift, Action::FocusPaneRight),
+            (Key::Char('q'), cs, Action::ClosePane),
+            (Key::F(12), cs, Action::ToggleFpsCounter),
+            (Key::Left, cs, Action::ExtendSelectionWordLeft),
+            (Key::Right, cs, Action::ExtendSelectionWordRight),
+            (Key::Home, shift, Action::ExtendSelectionLineStart),
+            (Key::End, shift, Action::ExtendSelectionLineEnd),
+            (Key::Home, cs, Action::ExtendSelectionViewportStart),
+            (Key::End, cs, Action::ExtendSelectionViewportEnd),
+        ];
+
+        for (key, mods, expected) in rows.iter().copied() {
+            assert_eq!(
+                kb.lookup(key, mods),
+                Some(expected),
+                "{key:?}+{mods:?} no coincide con la matriz"
+            );
+        }
+    }
 }

@@ -732,6 +732,50 @@ mod tests {
         assert_eq!(encode_key(Key::Right, ctrl, d), Some(b"\x1b[1;5C".to_vec()));
     }
 
+    /// Table-driven: recorre la fila "Chords de nueva linea" de
+    /// docs/references/keybinding-matrix.md (columnas Baud clasico/kitty).
+    /// Un cambio en esta tabla debe reflejarse tambien en el doc.
+    #[test]
+    fn test_matrix_newline_chords_table_driven() {
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        let alt = Mods {
+            alt: true,
+            ..Mods::NONE
+        };
+        let shift = Mods {
+            shift: true,
+            ..Mods::NONE
+        };
+        let d = KeyModes::default();
+        let disambiguate = KeyModes {
+            keyboard_flags: KB_FLAG_DISAMBIGUATE,
+            ..KeyModes::default()
+        };
+
+        type MatrixRow = (&'static str, Key, Mods, &'static [u8], &'static [u8]);
+        let rows: &[MatrixRow] = &[
+            ("ctrl+j", Key::Char('j'), ctrl, &[0x0a], b"\x1b[106;5u"),
+            ("alt+enter", Key::Enter, alt, &[0x1b, 0x0d], b"\x1b[13;3u"),
+            ("shift+enter", Key::Enter, shift, &[0x0d], b"\x1b[13;2u"),
+        ];
+
+        for (label, key, mods, expected_classic, expected_kitty) in rows.iter().copied() {
+            assert_eq!(
+                encode_key(key, mods, d),
+                Some(expected_classic.to_vec()),
+                "{label}: encoding clasico no coincide con la matriz"
+            );
+            assert_eq!(
+                encode_key_extended(key, mods, disambiguate, KeyEventKind::Press),
+                Some(expected_kitty.to_vec()),
+                "{label}: encoding kitty protocol no coincide con la matriz"
+            );
+        }
+    }
+
     #[test]
     fn test_keypad_app_mode_enter() {
         // En app keypad, Enter del numpad -> SS3 M. Modelamos el numpad Enter como
