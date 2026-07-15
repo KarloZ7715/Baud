@@ -146,8 +146,8 @@ mod tests {
     }
 
     #[test]
-    fn minimum_contrast_default_es_tres() {
-        assert!((ThemeConfig::default().minimum_contrast - 3.0).abs() < f64::EPSILON);
+    fn minimum_contrast_default_es_uno() {
+        assert!((ThemeConfig::default().minimum_contrast - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -198,22 +198,24 @@ mod tests {
         }
     }
 
+    /// Verifica el algoritmo de ajuste OKLab a un piso de 3.0 (texto grande
+    /// WCAG), independientemente del default de `minimum_contrast`.
     #[test]
-    fn presets_ajustados_cumplen_minimo() {
+    fn presets_ajustados_cumplen_piso_tres() {
         use crate::color::contrast_ratio_rgb;
         use crate::config::parse_hex;
         use crate::renderer::adjust_fg;
 
+        const AJUSTE: f64 = 3.0;
         for name in available_presets() {
             let theme = try_preset(name).unwrap();
             let bg = parse_hex(&theme.background);
-            let min = theme.minimum_contrast;
             for field in ANSI_COLOR_FIELDS {
                 let fg = parse_hex(theme_color_hex(&theme, field));
-                let adjusted = adjust_fg(fg, bg, min);
+                let adjusted = adjust_fg(fg, bg, AJUSTE);
                 assert!(
-                    contrast_ratio_rgb(adjusted, bg) >= min,
-                    "preset {name} campo {field}: ratio tras ajuste < {min}"
+                    contrast_ratio_rgb(adjusted, bg) >= AJUSTE,
+                    "preset {name} campo {field}: ratio tras ajuste a {AJUSTE} < {AJUSTE}"
                 );
             }
         }

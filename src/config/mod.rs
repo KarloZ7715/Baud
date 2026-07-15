@@ -11,9 +11,11 @@
 //! `bold_is_bright` puede declararse en la raíz del TOML o en `[theme]`; si
 //! cualquiera de los dos es `true`, el renderer aplica el mapeo bold→bright.
 //!
-//! `[theme].minimum_contrast` (default `3.0`) ajusta dinámicamente el fg sobre
+//! `[theme].minimum_contrast` (default `1.0`) ajusta dinámicamente el fg sobre
 //! el bg efectivo de cada celda para cumplir contraste WCAG. Use `1.0` para
-//! desactivar el ajuste y conservar colores crudos del tema.
+//! desactivar el ajuste y conservar colores crudos del tema; `3.0` piso de
+//! texto grande; `4.5` piso de cuerpo de texto (WCAG AA). Rango útil 1.0–21.0,
+//! valores fuera se ajustan al límite con un warning.
 
 pub mod persist;
 mod themes;
@@ -263,7 +265,8 @@ pub struct ThemeConfig {
     /// SGR dim atenua alpha del glifo en vez de oscurecer RGB.
     #[serde(default)]
     pub dim_alpha: bool,
-    /// Contraste mínimo WCAG fg/bg por celda (1.0 = desactivado, default 3.0).
+    /// Contraste mínimo WCAG fg/bg por celda (1.0 = desactivado, default 1.0).
+    /// Precedencia: override de usuario > valor del tema > default.
     #[serde(default = "default_minimum_contrast")]
     pub minimum_contrast: f64,
 }
@@ -299,7 +302,7 @@ macro_rules! define_theme_table {
                 base.dim_alpha = v;
             }
             if let Some(v) = table.minimum_contrast {
-                base.minimum_contrast = v;
+                base.minimum_contrast = clamp_minimum_contrast(v);
             }
         }
     };
@@ -749,7 +752,24 @@ fn default_foreground() -> String {
     "#ececec".into()
 }
 fn default_minimum_contrast() -> f64 {
-    3.0
+    1.0
+}
+
+/// Rango útil de contraste WCAG: 1.0 (sin ajuste) ..= 21.0 (negro/blanco puros).
+pub const MIN_CONTRAST_FLOOR: f64 = 1.0;
+pub const MIN_CONTRAST_CEIL: f64 = 21.0;
+
+/// Acota `minimum_contrast` al rango útil avisando cuando se excede.
+fn clamp_minimum_contrast(v: f64) -> f64 {
+    if v.is_finite() && (MIN_CONTRAST_FLOOR..=MIN_CONTRAST_CEIL).contains(&v) {
+        v
+    } else {
+        let clamped = v.clamp(MIN_CONTRAST_FLOOR, MIN_CONTRAST_CEIL);
+        tracing::warn!(
+            "minimum_contrast {v} fuera de rango [{MIN_CONTRAST_FLOOR}, {MIN_CONTRAST_CEIL}], ajustado a {clamped}"
+        );
+        clamped
+    }
 }
 fn default_background() -> String {
     "#0a0a0a".into()
