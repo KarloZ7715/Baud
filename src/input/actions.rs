@@ -261,8 +261,16 @@ pub fn parse_action(s: &str) -> Option<Action> {
 /// Normaliza tecla y modificadores antes de consultar el mapa de bindings.
 pub fn normalize_binding_key(key: Key, mods: Mods) -> Key {
     match key {
-        Key::Char(c) if mods.ctrl => Key::Char(c.to_ascii_lowercase()),
+        // Shift desplaza el simbolo del layout (US QWERTY: '='->'+', '['->'{',
+        // ']'->'}') antes de que llegue a logical_key; los bindings por
+        // defecto usan el simbolo sin desplazar, asi que se normaliza de
+        // vuelta. Deben ir antes del brazo generico de minusculas con Ctrl:
+        // to_ascii_lowercase() es un no-op sobre estos simbolos y dejaria
+        // el match en el brazo de Ctrl sin volver a pasar por este.
         Key::Char('+') => Key::Char('='),
+        Key::Char('{') => Key::Char('['),
+        Key::Char('}') => Key::Char(']'),
+        Key::Char(c) if mods.ctrl => Key::Char(c.to_ascii_lowercase()),
         other => other,
     }
 }
@@ -534,6 +542,45 @@ mod tests {
             ..Mods::NONE
         };
         assert_eq!(kb.lookup(Key::End, ctrl), Some(Action::ScrollToBottom));
+    }
+
+    #[test]
+    fn test_normalize_binding_key_llaves_a_corchetes_focus_pane() {
+        // Con Shift sostenido, winit reporta el simbolo desplazado del layout
+        // ('{'/'}' en US QWERTY), no el corchete sin desplazar almacenado en
+        // el binding por defecto. Mismo patron que '+' -> '=' para FontZoomIn.
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        let kb = Keybindings::default();
+        assert_eq!(
+            kb.lookup(normalize_binding_key(Key::Char('{'), cs), cs),
+            Some(Action::FocusPrevPane)
+        );
+        assert_eq!(
+            kb.lookup(normalize_binding_key(Key::Char('}'), cs), cs),
+            Some(Action::FocusNextPane)
+        );
+    }
+
+    #[test]
+    fn test_normalize_binding_key_mas_a_igual_con_ctrl_sostenido() {
+        // Bug latente preexistente: el brazo '+' -> '=' nunca se alcanzaba
+        // porque el brazo generico de Ctrl (to_ascii_lowercase, no-op sobre
+        // simbolos) iba primero y consumia el match. Ctrl+Shift+= produce
+        // '+' en logical_key y debe seguir disparando FontZoomIn (bound a
+        // Ctrl+'=' sin shift).
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        let kb = Keybindings::default();
+        assert_eq!(
+            kb.lookup(normalize_binding_key(Key::Char('+'), ctrl), ctrl),
+            Some(Action::FontZoomIn)
+        );
     }
 
     #[test]
