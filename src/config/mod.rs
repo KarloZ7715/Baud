@@ -764,7 +764,11 @@ fn clamp_minimum_contrast(v: f64) -> f64 {
     if v.is_finite() && (MIN_CONTRAST_FLOOR..=MIN_CONTRAST_CEIL).contains(&v) {
         v
     } else {
-        let clamped = v.clamp(MIN_CONTRAST_FLOOR, MIN_CONTRAST_CEIL);
+        let clamped = if v.is_nan() || v < MIN_CONTRAST_FLOOR {
+            MIN_CONTRAST_FLOOR
+        } else {
+            MIN_CONTRAST_CEIL
+        };
         tracing::warn!(
             "minimum_contrast {v} fuera de rango [{MIN_CONTRAST_FLOOR}, {MIN_CONTRAST_CEIL}], ajustado a {clamped}"
         );
@@ -1187,6 +1191,14 @@ mod tests {
         assert!(!config.selection.bypass_contains("alt"));
         // Copy mode habilitado por defecto
         assert!(config.copy_mode.enabled);
+    }
+
+    #[test]
+    fn minimum_contrast_se_acota_al_rango_util() {
+        assert_eq!(clamp_minimum_contrast(0.5), MIN_CONTRAST_FLOOR);
+        assert_eq!(clamp_minimum_contrast(25.0), MIN_CONTRAST_CEIL);
+        assert_eq!(clamp_minimum_contrast(f64::NAN), MIN_CONTRAST_FLOOR);
+        assert!((clamp_minimum_contrast(3.0) - 3.0).abs() < f64::EPSILON);
     }
 
     /// Verifica que un TOML con todos los campos se parsea correctamente.
