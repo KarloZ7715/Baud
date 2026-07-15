@@ -2848,6 +2848,14 @@ impl ApplicationHandler<UserEvent> for App {
         self.startup_instant = Some(t_start);
         self.display_quirks = display_quirks::snapshot_for_event_loop(event_loop);
 
+        // El escaneo de fuentes del sistema no depende de la GPU: arrancar el
+        // hilo ya mismo lo solapa con la negociacion de adapter/device de wgpu
+        // en vez de esperar a que termine antes de tocar wgpu.
+        let font_fallback = self.config.font.fallback.clone();
+        let font_thread = std::thread::spawn(move || {
+            crate::renderer::create_font_system_with_fallback(&font_fallback)
+        });
+
         // 1. Crear ventana.
         let t_window = Instant::now();
         let wcfg = &self.config.window;
@@ -2957,6 +2965,16 @@ impl ApplicationHandler<UserEvent> for App {
             t_surface_cfg.elapsed().as_millis()
         );
 
+        let t_font_join = Instant::now();
+        let font_system = match font_thread.join() {
+            Ok(font_system) => font_system,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+        tracing::info!(
+            "startup: join del hilo de fonts esperado {}ms",
+            t_font_join.elapsed().as_millis()
+        );
+
         // 4. Crear Renderer.
         let t_renderer = Instant::now();
         self.renderer = Some(Renderer::new(
@@ -2966,6 +2984,7 @@ impl ApplicationHandler<UserEvent> for App {
             surface,
             config,
             &self.config.font,
+            font_system,
         ));
         tracing::info!(
             "startup: renderer construido en {}ms",

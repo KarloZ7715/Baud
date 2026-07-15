@@ -27,6 +27,7 @@ pub use tab_bar::{
     tab_index_at, TabBarLayout, TabBarMouseState, TabSegment, TAB_BAR_HEIGHT_ROWS,
     TAB_CLOSE_WIDTH_CELLS, TAB_CONTENT_GAP_PX, TAB_LABEL_PAD_CELLS,
 };
+pub(crate) use terminal_fallback::create_font_system_with_fallback;
 
 /// Base de ids reservados para box/block glyphs programaticos (sobre ids de cache).
 /// El `GlyphCache` de texto asigna desde ids bajos; estos rangos altos quedan
@@ -330,6 +331,10 @@ impl Renderer {
     }
 
     /// Inicializa wgpu, glyphon y la surface configuration.
+    ///
+    /// `font_system` llega pre-construido: el caller lo arma en paralelo con la
+    /// negociacion de adapter/device de wgpu (ver `resumed()` en `window.rs`),
+    /// ya que el escaneo de fuentes del sistema no depende de la GPU.
     pub fn new(
         _window: Arc<Window>,
         device: wgpu::Device,
@@ -337,14 +342,8 @@ impl Renderer {
         surface: wgpu::Surface<'static>,
         config: wgpu::SurfaceConfiguration,
         font_config: &FontConfig,
+        mut font_system: glyphon::FontSystem,
     ) -> Self {
-        let t_font_system = Instant::now();
-        let mut font_system =
-            terminal_fallback::create_font_system_with_fallback(&font_config.fallback);
-        tracing::info!(
-            "startup: font system listo en {}ms",
-            t_font_system.elapsed().as_millis()
-        );
         // Cache necesario para glyphon 0.11
         let t_glyphon_cache = Instant::now();
         let wgpu_cache = glyphon::Cache::new(&device);
