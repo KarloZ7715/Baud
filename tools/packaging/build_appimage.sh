@@ -9,7 +9,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 DIST_DIR="$REPO_ROOT/dist"
 BINARY="$REPO_ROOT/target/release/baud"
-DESKTOP_FILE="$REPO_ROOT/assets/packaging/baud.desktop"
+DESKTOP_FILE="$REPO_ROOT/packaging/linux/baud.desktop"
 ICON_256="$REPO_ROOT/assets/icons/hicolor/256x256/apps/baud.png"
 
 LINUXDEPLOY_URL="https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage"

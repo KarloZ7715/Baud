@@ -81,7 +81,7 @@ with multi-session support, tabs, split panes, themes, and clipboard integration
 """
 assets = [
     ["target/release/baud", "usr/bin/baud", "755"],
-    ["assets/packaging/baud.desktop", "usr/share/applications/baud.desktop", "644"],
+    ["packaging/linux/baud.desktop", "usr/share/applications/baud.desktop", "644"],
     ["assets/icons/hicolor/48x48/apps/baud.png", "usr/share/icons/hicolor/48x48/apps/baud.png", "644"],
     ["assets/icons/hicolor/256x256/apps/baud.png", "usr/share/icons/hicolor/256x256/apps/baud.png", "644"],
     ["LICENSE", "usr/share/doc/baud/LICENSE", "644"],
@@ -90,7 +90,7 @@ assets = [
 [package.metadata.generate-rpm]
 assets = [
     { source = "target/release/baud", dest = "/usr/bin/baud", mode = "755" },
-    { source = "assets/packaging/baud.desktop", dest = "/usr/share/applications/baud.desktop", mode = "644" },
+    { source = "packaging/linux/baud.desktop", dest = "/usr/share/applications/baud.desktop", mode = "644" },
     { source = "assets/icons/hicolor/*/apps/baud.png", dest = "/usr/share/icons/hicolor/", mode = "644" },
     { source = "LICENSE", dest = "/usr/share/doc/baud/LICENSE", mode = "644" },
 ]

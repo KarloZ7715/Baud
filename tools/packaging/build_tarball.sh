@@ -15,7 +15,7 @@ if [[ ! -f "$BINARY" ]]; then
     exit 1
 fi
 
-DESKTOP_SRC="$REPO_ROOT/assets/packaging/baud.desktop"
+DESKTOP_SRC="$REPO_ROOT/packaging/linux/baud.desktop"
 ICON_48_SRC="$REPO_ROOT/assets/icons/hicolor/48x48/apps/baud.png"
 ICON_256_SRC="$REPO_ROOT/assets/icons/hicolor/256x256/apps/baud.png"
 

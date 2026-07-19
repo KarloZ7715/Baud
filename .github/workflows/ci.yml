@@ -181,9 +181,9 @@ jobs:
       - name: Validate desktop entry source
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq desktop-file-utils
-          desktop-file-validate assets/packaging/baud.desktop
-          grep -q '^X-TerminalArgExec=-e$' assets/packaging/baud.desktop
-          grep -q '^X-TerminalArgDir=--working-directory=$' assets/packaging/baud.desktop
+          desktop-file-validate packaging/linux/baud.desktop
+          grep -q '^X-TerminalArgExec=-e$' packaging/linux/baud.desktop
+          grep -q '^X-TerminalArgDir=--working-directory=$' packaging/linux/baud.desktop
 
       - name: Release asset verifier suite
         run: bash tools/ci/test_release_assets.sh
