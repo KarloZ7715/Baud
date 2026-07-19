@@ -23,7 +23,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use super::contract::{SessionBackend, WakeSource};
-use super::ProcessConfig;
+use super::{ProcessConfig, SessionKind};
 
 const DEFAULT_ROWS: i16 = 24;
 const DEFAULT_COLS: i16 = 80;
@@ -363,11 +363,31 @@ pub fn spawn_with(cfg: &ProcessConfig) -> io::Result<Pty> {
         return Err(io::Error::last_os_error());
     }
 
-    let mut cmdline = build_cmdline(&cfg.shell, &cfg.args);
-    let cwd = cfg
-        .working_directory
-        .as_ref()
-        .map(|d| wide_null(OsStr::new(d)));
+    let (shell, args, cwd) = match cfg.kind {
+        SessionKind::Native => (
+            cfg.shell.clone(),
+            cfg.args.clone(),
+            cfg.working_directory.clone(),
+        ),
+        SessionKind::Wsl => {
+            let exe = super::wsl::wsl_exe_path()?;
+            super::wsl::preflight(&exe)?;
+            let argv = super::wsl::build_wsl_argv(
+                cfg.distro.as_deref(),
+                cfg.wsl_cwd.as_deref(),
+                None,
+                None,
+            );
+            (
+                exe.to_string_lossy().into_owned(),
+                argv,
+                cfg.working_directory.clone(),
+            )
+        }
+    };
+
+    let mut cmdline = build_cmdline(&shell, &args);
+    let cwd = cwd.as_ref().map(|d| wide_null(OsStr::new(d)));
 
     let mut startup: STARTUPINFOEXW = unsafe { mem::zeroed() };
     startup.StartupInfo.cb = mem::size_of::<STARTUPINFOEXW>() as u32;

@@ -16,7 +16,9 @@ use crate::cli::LaunchOptions;
 use crate::config::Config;
 use crate::diagnostics::consent::ConsentState;
 use crate::grid::{DEFAULT_COLS, DEFAULT_ROWS};
-use crate::pty::{self, ProcessConfig, PtyCommand, PtyCommandSender, SessionBackend, WakeSource};
+use crate::pty::{
+    self, ProcessConfig, PtyCommand, PtyCommandSender, SessionBackend, SessionKind, WakeSource,
+};
 use crate::session::{Session, SessionId};
 use crate::watchdog::EventLoopWatchdog;
 use crate::window::{App, SessionHost, UserEvent};
@@ -533,11 +535,19 @@ pub fn spawn_session(
         pty_thread_main(master, wakeup_pty, rx_gui_to_pty, tx_pty_to_gui);
     });
 
+    let title = match process_cfg.kind {
+        SessionKind::Wsl => format!(
+            "WSL: {}",
+            process_cfg.distro.as_deref().unwrap_or("default")
+        ),
+        SessionKind::Native => String::new(),
+    };
+
     let session = Session {
         id: session_id,
         term,
         pty_tx: cmd_sender,
-        title: String::new(),
+        title,
         dirty: false,
         hold,
         close_on_exit,
