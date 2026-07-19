@@ -31,6 +31,7 @@ docs/*
 # AI
 src/prompts/*
 .agents/*
+.claude/*
 skills-lock.json
 
 # Scratch local

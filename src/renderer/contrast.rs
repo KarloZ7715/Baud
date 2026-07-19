@@ -28,6 +28,11 @@ impl ContrastCache {
     }
 
     pub fn adjust(&mut self, fg: (u8, u8, u8), bg: (u8, u8, u8), min_ratio: f64) -> (u8, u8, u8) {
+        // Camino rápido: con ratio mínimo 1.0 todo par fg/bg es válido,
+        // así que no se necesita conversión OKLab ni entrada en cache.
+        if min_ratio <= 1.0 {
+            return fg;
+        }
         let min_bits = min_ratio.to_bits();
         let key = (pack_rgb(fg), pack_rgb(bg), min_bits);
         if let Some(cached) = self.entries.get(&key) {
