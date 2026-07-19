@@ -1,3 +1,14 @@
+/// Tipo de sesión soportada por el backend de PTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionKind {
+    /// Sesión nativa de la plataforma (shell por defecto).
+    #[default]
+    Native,
+    /// Sesión WSL bajo ConPTY (solo Windows).
+    Wsl,
+}
+
 /// Configuración del proceso hijo que se lanza en el PTY.
 #[derive(Debug, Clone)]
 pub struct ProcessConfig {
@@ -11,6 +22,12 @@ pub struct ProcessConfig {
     pub startup_command: Option<String>,
     /// Si true, arranca como login shell (argv[0] con '-' inicial).
     pub login_shell: bool,
+    /// Perfil de sesión. En Windows `Wsl` activa `wsl.exe` bajo ConPTY.
+    pub kind: SessionKind,
+    /// Distro WSL objetivo (opcional). Se traduce en `-d <distro>`.
+    pub distro: Option<String>,
+    /// Directorio inicial para WSL vía `--cd` (opcional).
+    pub wsl_cwd: Option<String>,
 }
 
 impl Default for ProcessConfig {
@@ -29,6 +46,9 @@ impl Default for ProcessConfig {
             env: Vec::new(),
             startup_command: None,
             login_shell: false,
+            kind: SessionKind::Native,
+            distro: None,
+            wsl_cwd: None,
         }
     }
 }

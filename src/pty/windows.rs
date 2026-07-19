@@ -295,10 +295,7 @@ pub fn spawn(shell: &str, args: &[&str]) -> io::Result<Pty> {
     spawn_with(&ProcessConfig {
         shell: shell.into(),
         args: args.iter().map(|s| (*s).to_string()).collect(),
-        working_directory: None,
-        env: Vec::new(),
-        startup_command: None,
-        login_shell: false,
+        ..ProcessConfig::default()
     })
 }
 

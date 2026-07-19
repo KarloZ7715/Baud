@@ -9,7 +9,7 @@ pub mod unix;
 pub mod windows;
 
 pub use channel::{PtyCommand, PtyCommandSender};
-pub use config::ProcessConfig;
+pub use config::{ProcessConfig, SessionKind};
 pub use contract::{SessionBackend, WakeSource};
 
 #[cfg(unix)]

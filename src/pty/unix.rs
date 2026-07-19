@@ -188,10 +188,7 @@ pub fn spawn(shell: &str, args: &[&str]) -> nix::Result<Pty> {
     spawn_with(&ProcessConfig {
         shell: shell.into(),
         args: args.iter().map(|s| (*s).to_string()).collect(),
-        working_directory: None,
-        env: Vec::new(),
-        startup_command: None,
-        login_shell: false,
+        ..ProcessConfig::default()
     })
 }
 
@@ -285,10 +282,8 @@ mod tests {
         let cfg = ProcessConfig {
             shell: "/bin/bash".into(),
             args: Vec::new(),
-            working_directory: None,
-            env: Vec::new(),
             startup_command: Some("echo HELLO".into()),
-            login_shell: false,
+            ..ProcessConfig::default()
         };
         let mut master = spawn_with(&ProcessConfig {
             startup_command: None,
@@ -334,10 +329,8 @@ mod tests {
         let cfg = ProcessConfig {
             shell: "/bin/bash".into(),
             args: vec!["-c".into(), "echo ARG0=$0".into()],
-            working_directory: None,
-            env: Vec::new(),
-            startup_command: None,
             login_shell: true,
+            ..ProcessConfig::default()
         };
         let mut master = spawn_with(&cfg).expect("spawn");
         let out = read_to_string_until_eof(&mut master);
@@ -354,8 +347,7 @@ mod tests {
             args: vec!["-c".into(), "echo CWD=$PWD VAR=$BAUD_TEST".into()],
             working_directory: Some("/tmp".into()),
             env: vec![("BAUD_TEST".into(), "ok".into())],
-            startup_command: None,
-            login_shell: false,
+            ..ProcessConfig::default()
         };
         let mut master = spawn_with(&cfg).expect("spawn");
         let out = read_to_string_until_eof(&mut master);
@@ -368,10 +360,8 @@ mod tests {
         let cfg = ProcessConfig {
             shell: "/bin/bash".into(),
             args: vec!["-c".into(), "echo COLORTERM=$COLORTERM TERM=$TERM".into()],
-            working_directory: None,
             env: vec![("COLORTERM".into(), "nope".into())],
-            startup_command: None,
-            login_shell: false,
+            ..ProcessConfig::default()
         };
         let mut master = spawn_with(&cfg).expect("spawn");
         let out = read_to_string_until_eof(&mut master);

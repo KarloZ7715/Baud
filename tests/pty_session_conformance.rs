@@ -39,10 +39,7 @@ fn unix_echo_cfg(script: &str) -> ProcessConfig {
     ProcessConfig {
         shell: "bash".into(),
         args: vec!["-c".into(), script.into()],
-        working_directory: None,
-        env: Vec::new(),
-        startup_command: None,
-        login_shell: false,
+        ..ProcessConfig::default()
     }
 }
 
@@ -130,10 +127,7 @@ fn windows_shell_cfg(args: Vec<String>) -> ProcessConfig {
     ProcessConfig {
         shell: "powershell.exe".into(),
         args,
-        working_directory: None,
-        env: Vec::new(),
-        startup_command: None,
-        login_shell: false,
+        ..ProcessConfig::default()
     }
 }
 

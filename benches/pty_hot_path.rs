@@ -27,10 +27,7 @@ fn spawn_writer() -> baud::pty::Pty {
     let cfg = ProcessConfig {
         shell: "bash".into(),
         args: vec!["-c".into(), format!("head -c {PAYLOAD} /dev/zero")],
-        working_directory: None,
-        env: Vec::new(),
-        startup_command: None,
-        login_shell: false,
+        ..ProcessConfig::default()
     };
     spawn_with(&cfg).expect("spawn PTY para bench")
 }
@@ -91,10 +88,7 @@ fn bench_pty_write_echo(c: &mut Criterion) {
             let mut master = spawn_with(&ProcessConfig {
                 shell: "bash".into(),
                 args: Vec::new(),
-                working_directory: None,
-                env: Vec::new(),
-                startup_command: None,
-                login_shell: false,
+                ..ProcessConfig::default()
             })
             .expect("spawn");
             master.write_input(b"echo BENCH_OK\n").expect("write");

@@ -644,6 +644,10 @@ pub struct ProcessSection {
     pub startup_command: Option<String>,
     #[serde(default)]
     pub login: bool,
+    #[serde(default)]
+    pub kind: crate::pty::SessionKind,
+    pub distro: Option<String>,
+    pub wsl_cwd: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -996,6 +1000,9 @@ impl Config {
             env,
             startup_command: self.process.startup_command.clone(),
             login_shell: self.process.login,
+            kind: self.process.kind,
+            distro: self.process.distro.clone(),
+            wsl_cwd: self.process.wsl_cwd.clone(),
         }
     }
 
@@ -1199,6 +1206,35 @@ mod tests {
         assert_eq!(clamp_minimum_contrast(25.0), MIN_CONTRAST_CEIL);
         assert_eq!(clamp_minimum_contrast(f64::NAN), MIN_CONTRAST_FLOOR);
         assert!((clamp_minimum_contrast(3.0) - 3.0).abs() < f64::EPSILON);
+    }
+
+    /// Precedencia: override de usuario > valor del preset > default.
+    #[test]
+    fn minimum_contrast_precedencia_usuario_tema_default() {
+        let default_cfg: Config = toml::from_str("").unwrap();
+        assert!((default_cfg.theme.minimum_contrast - 1.0).abs() < f64::EPSILON);
+
+        let named: Config = toml::from_str(r#"theme = "solarized-dark""#).unwrap();
+        assert!((named.theme.minimum_contrast - 3.0).abs() < f64::EPSILON);
+
+        let user_overrides_named: Config = toml::from_str(
+            r#"
+            [theme]
+            name = "solarized-dark"
+            minimum_contrast = 4.5
+            "#,
+        )
+        .unwrap();
+        assert!((user_overrides_named.theme.minimum_contrast - 4.5).abs() < f64::EPSILON);
+
+        let user_overrides_default: Config = toml::from_str(
+            r#"
+            [theme]
+            minimum_contrast = 2.0
+            "#,
+        )
+        .unwrap();
+        assert!((user_overrides_default.theme.minimum_contrast - 2.0).abs() < f64::EPSILON);
     }
 
     /// Verifica que un TOML con todos los campos se parsea correctamente.
@@ -1725,5 +1761,55 @@ enabled = false
         let cfg: Config = toml::from_str(toml).unwrap();
         assert_eq!(cfg.diagnostics.reporting.enabled, Some(false));
         assert!(cfg.diagnostics.reporting.dsn.is_none());
+    }
+
+    #[test]
+    fn test_process_kind_default_native() {
+        let cfg = Config::default();
+        assert_eq!(cfg.process.kind, crate::pty::SessionKind::Native);
+        let pc = cfg.process_config();
+        assert_eq!(pc.kind, crate::pty::SessionKind::Native);
+        assert!(pc.distro.is_none());
+        assert!(pc.wsl_cwd.is_none());
+    }
+
+    #[test]
+    fn test_process_kind_wsl_sin_distro() {
+        let toml = r#"
+[process]
+kind = "wsl"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.process.kind, crate::pty::SessionKind::Wsl);
+        assert!(cfg.process.distro.is_none());
+        let pc = cfg.process_config();
+        assert_eq!(pc.kind, crate::pty::SessionKind::Wsl);
+    }
+
+    #[test]
+    fn test_process_kind_wsl_con_distro_y_cwd() {
+        let toml = r#"
+[process]
+kind = "wsl"
+distro = "Ubuntu"
+wsl_cwd = "~"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.process.kind, crate::pty::SessionKind::Wsl);
+        assert_eq!(cfg.process.distro.as_deref(), Some("Ubuntu"));
+        assert_eq!(cfg.process.wsl_cwd.as_deref(), Some("~"));
+        let pc = cfg.process_config();
+        assert_eq!(pc.distro.as_deref(), Some("Ubuntu"));
+        assert_eq!(pc.wsl_cwd.as_deref(), Some("~"));
+    }
+
+    #[test]
+    fn test_process_kind_desconocido_da_error() {
+        let toml = r#"
+[process]
+kind = "docker"
+"#;
+        let result: Result<Config, _> = toml::from_str(toml);
+        assert!(result.is_err(), "kind desconocido debe fallar al parsear");
     }
 }
