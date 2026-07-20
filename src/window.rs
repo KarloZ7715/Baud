@@ -2891,7 +2891,7 @@ impl ApplicationHandler<UserEvent> for App {
             attrs
         };
         // En Windows el alfa por framebuffer no basta para que el escritorio
-        // se vea a traves: se pide el material Mica al DWM. Ambos ramas leen
+        // se vea a traves: se pide el material Mica al DWM. Ambas ramas leen
         // el mismo umbral, y `restart_required_fields` ya marca el cruce.
         #[cfg(windows)]
         let attrs = match select_windows_backdrop(opacity) {
