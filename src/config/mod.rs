@@ -850,11 +850,19 @@ fn default_selection_fg_option() -> Option<String> {
     Some(default_selection_fg())
 }
 
+#[cfg(target_os = "windows")]
 fn default_font_family() -> String {
-    // NOTA: Usar "monospace" delega en fontdb la resolución a Family::Monospace,
-    // que por defecto busca "Courier New" (no disponible en Linux). En su lugar,
-    // se usa una fuente concreta con soporte garantizado de box-drawing Unicode
-    // y glifos TUI. El usuario puede sobrescribir esto en ~/.config/baud/config.toml.
+    // Cascadia Mono viene con Windows Terminal (Win11 y Win10 con Terminal
+    // instalado); si falta, terminal_fallback::COMMON prioriza Consolas
+    // (presente desde Vista) antes de fuentes proporcionales.
+    "Cascadia Mono".into()
+}
+// NOTA: Usar "monospace" delega en fontdb la resolución a Family::Monospace,
+// que por defecto busca "Courier New" (no disponible en Linux). En su lugar,
+// se usa una fuente concreta con soporte garantizado de box-drawing Unicode
+// y glifos TUI. El usuario puede sobrescribir esto en ~/.config/baud/config.toml.
+#[cfg(not(target_os = "windows"))]
+fn default_font_family() -> String {
     "FiraCode Nerd Font Mono".into()
 }
 fn default_font_size() -> u16 {
@@ -1544,6 +1552,18 @@ fallback = ["Noto Color Emoji", "Noto Sans CJK SC"]
             parsed.font.fallback,
             vec!["Noto Color Emoji", "Noto Sans CJK SC"]
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_font_family_default_windows() {
+        assert_eq!(FontConfig::default().family, "Cascadia Mono");
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn test_font_family_default_no_windows() {
+        assert_eq!(FontConfig::default().family, "FiraCode Nerd Font Mono");
     }
 
     /// Verifica que un TOML parcial usa defaults para los campos faltantes.
