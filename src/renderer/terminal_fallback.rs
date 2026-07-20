@@ -8,6 +8,17 @@ use glyphon::cosmic_text::{Fallback, FontSystem, PlatformFallback};
 use unicode_script::Script;
 
 /// Fallbacks extra tras los especificos por script de `PlatformFallback`.
+#[cfg(target_os = "windows")]
+const COMMON: &[&str] = &[
+    "Segoe UI Symbol",
+    "Segoe UI Emoji",
+    "Cascadia Mono",
+    "Cascadia Code",
+    "Consolas",
+];
+
+/// Fallbacks extra tras los especificos por script de `PlatformFallback`.
+#[cfg(not(target_os = "windows"))]
 const COMMON: &[&str] = &[
     "Symbols Nerd Font Mono",
     "MesloLGS Nerd Font Mono",
@@ -37,13 +48,7 @@ impl Fallback for TerminalFallbackChain {
 }
 
 fn system_locale() -> String {
-    std::env::var("LANG")
-        .or_else(|_| std::env::var("LC_ALL"))
-        .unwrap_or_else(|_| "en-US".to_string())
-        .split('.')
-        .next()
-        .unwrap_or("en-US")
-        .to_string()
+    sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string())
 }
 
 fn family_in_db(db: &glyphon::fontdb::Database, family: &str) -> bool {
@@ -134,5 +139,25 @@ mod tests {
         } else {
             assert_eq!(chain.len(), COMMON.len() + 1);
         }
+    }
+
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn common_incluye_fallbacks_linux() {
+        assert!(COMMON.contains(&"Noto Color Emoji"));
+        assert!(COMMON.contains(&"DejaVu Sans Mono"));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn common_incluye_fallbacks_windows() {
+        assert!(COMMON.contains(&"Segoe UI Emoji"));
+        assert!(COMMON.contains(&"Consolas"));
+    }
+
+    #[test]
+    fn system_locale_no_esta_vacio_y_no_hace_panic() {
+        let locale = system_locale();
+        assert!(!locale.is_empty());
     }
 }

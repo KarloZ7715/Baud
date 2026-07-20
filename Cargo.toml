@@ -34,6 +34,7 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
+sys-locale = "0.3.2"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["term", "fs", "signal", "event", "poll", "user"] }
