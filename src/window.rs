@@ -2932,9 +2932,19 @@ impl ApplicationHandler<UserEvent> for App {
         // 3. Inicializar wgpu: instance, adapter, device, queue, surface, config.
         //    wgpu 29 tiene API async (request_adapter, request_device retornan Future).
         //    Usamos block_on() local (sin pollster) para bloquear en nativo.
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display_handle)),
-        );
+        // El mut solo se usa en la rama cfg(windows) de abajo.
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut instance_desc =
+            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display_handle));
+        // En DX12 la swapchain desde HWND solo ofrece alpha Opaque; el visual
+        // de DirectComposition es el unico camino a transparencia real (y a
+        // que el material Mica se vea). Solo aplica con opacidad < 1.0.
+        #[cfg(windows)]
+        if opacity < 1.0 {
+            instance_desc.backend_options.dx12.presentation_system =
+                wgpu::Dx12SwapchainKind::DxgiFromVisual;
+        }
+        let instance = wgpu::Instance::new(instance_desc);
 
         let surface = instance
             .create_surface(window.clone())
@@ -2980,8 +2990,20 @@ impl ApplicationHandler<UserEvent> for App {
             .expect("no se encontro formato de surface compatible");
         // Si hay transparencia, asegurar que el alpha mode sea compatible
         if opacity < 1.0 {
-            config.alpha_mode = wgpu::CompositeAlphaMode::PreMultiplied;
-            config.view_formats = vec![config.format.add_srgb_suffix()];
+            let alpha_modes = surface.get_capabilities(&adapter).alpha_modes;
+            match select_alpha_mode(opacity, &alpha_modes) {
+                Some(mode) => {
+                    config.alpha_mode = mode;
+                    config.view_formats = vec![config.format.add_srgb_suffix()];
+                }
+                // Sin swapchain translucida disponible la ventana queda
+                // opaca; mejor degradar que paniquear en configure.
+                None => tracing::warn!(
+                    "window.opacity < 1.0 pero el backend GPU no soporta \
+                     swapchain translucida (alpha modes: {alpha_modes:?}); \
+                     la ventana sera opaca"
+                ),
+            }
         }
         surface.configure(&device, &config);
         tracing::info!(
@@ -4181,6 +4203,27 @@ fn select_windows_backdrop(opacity: f32) -> WindowsBackdropChoice {
     }
 }
 
+/// Alpha mode de la swapchain para una opacidad dada, limitado a lo que el
+/// backend soporta. `None` = dejar el default del surface config (ventana
+/// opaca): con opacidad plena es lo deseado, y con opacidad < 1.0 evita un
+/// panic en `configure` en backends sin swapchain translúcida. El clear es
+/// premultiplicado, asi que `PreMultiplied` es la unica eleccion exacta;
+/// `Auto` queda como degradado delegando la eleccion a wgpu.
+fn select_alpha_mode(
+    opacity: f32,
+    supported: &[wgpu::CompositeAlphaMode],
+) -> Option<wgpu::CompositeAlphaMode> {
+    if opacity >= 1.0 {
+        return None;
+    }
+    [
+        wgpu::CompositeAlphaMode::PreMultiplied,
+        wgpu::CompositeAlphaMode::Auto,
+    ]
+    .into_iter()
+    .find(|mode| supported.contains(mode))
+}
+
 // ---------------------------------------------------------------------------
 // Tests adversariales
 // ---------------------------------------------------------------------------
@@ -4194,6 +4237,22 @@ mod tests {
     use crate::pty::PtyCommandSender;
     use crate::renderer::limits::pixel_to_cell_coords;
     use std::sync::mpsc;
+
+    #[test]
+    fn alpha_mode_respeta_lo_soportado_por_el_backend() {
+        use wgpu::CompositeAlphaMode as A;
+        // Opacidad plena: no se toca el alpha mode del default config.
+        assert_eq!(select_alpha_mode(1.0, &[A::PreMultiplied]), None);
+        // Backend con soporte (Linux/Vulkan, DX12 con visual): PreMultiplied.
+        assert_eq!(
+            select_alpha_mode(0.9, &[A::Opaque, A::PreMultiplied]),
+            Some(A::PreMultiplied)
+        );
+        // DX12 desde HWND (solo Opaque): sin panico, la ventana queda opaca.
+        assert_eq!(select_alpha_mode(0.9, &[A::Opaque]), None);
+        // Sin PreMultiplied pero con Auto: se delega la eleccion a wgpu.
+        assert_eq!(select_alpha_mode(0.9, &[A::Opaque, A::Auto]), Some(A::Auto));
+    }
 
     #[test]
     fn backdrop_mica_solo_con_opacidad_menor_a_1() {
