@@ -4182,6 +4182,31 @@ mod tests {
         assert_eq!(select_windows_backdrop(0.999), WindowsBackdropChoice::Mica);
     }
 
+    #[test]
+    fn restart_flag_solo_al_cruzar_el_umbral_de_opacidad() {
+        // El backdrop y `with_transparent` se fijan al crear la ventana con el
+        // mismo umbral `< 1.0`; cruzarlo exige reinicio y quedarse del mismo
+        // lado hot-aplica. Este test fija ese acoplamiento para que un
+        // refactor no separe ambas lecturas sin aviso.
+        let mut prev = Config::default();
+        let mut next = Config::default();
+        prev.window.opacity = 0.9;
+        next.window.opacity = 1.0;
+        let fields = App::restart_required_fields(&prev, &next);
+        assert!(
+            fields.contains(&"window.opacity"),
+            "cruzar el umbral debe pedir reinicio: {fields:?}"
+        );
+
+        prev.window.opacity = 0.5;
+        next.window.opacity = 0.8;
+        let fields = App::restart_required_fields(&prev, &next);
+        assert!(
+            !fields.contains(&"window.opacity"),
+            "mismo lado del umbral hot-aplica, sin reinicio: {fields:?}"
+        );
+    }
+
     fn test_config_watch() -> Arc<Mutex<WatchState>> {
         Arc::new(Mutex::new(WatchState::new(None)))
     }
