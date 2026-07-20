@@ -318,7 +318,8 @@ pub struct App {
     wheel_residual: f32,
     /// Titulo inicial de ventana solicitado por CLI; OSC 0/2 lo puede sobreescribir.
     initial_title: Option<String>,
-    /// app_id de Wayland / instancia de WM_CLASS en X11.
+    /// app_id de Wayland / instancia de WM_CLASS en X11; solo se lee en unix.
+    #[cfg_attr(windows, allow(dead_code))]
     app_id: Option<String>,
     /// Marca de tiempo al entrar a `resumed()`; se consume al loguear el primer frame.
     startup_instant: Option<Instant>,

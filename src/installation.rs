@@ -307,11 +307,6 @@ fn running_as_root() -> bool {
     false
 }
 
-#[cfg(not(unix))]
-fn running_uid() -> u32 {
-    u32::MAX
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
