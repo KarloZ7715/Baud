@@ -2890,6 +2890,17 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             attrs
         };
+        // En Windows el alfa por framebuffer no basta para que el escritorio
+        // se vea a traves: se pide el material Mica al DWM. Ambos ramas leen
+        // el mismo umbral, y `restart_required_fields` ya marca el cruce.
+        #[cfg(windows)]
+        let attrs = match select_windows_backdrop(opacity) {
+            WindowsBackdropChoice::Mica => {
+                use winit::platform::windows::{BackdropType, WindowAttributesExtWindows};
+                attrs.with_system_backdrop(BackdropType::MainWindow)
+            }
+            WindowsBackdropChoice::None => attrs,
+        };
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
@@ -4121,6 +4132,33 @@ static VTABLE: RawWakerVTable = RawWakerVTable::new(
 );
 
 // ---------------------------------------------------------------------------
+// Material de ventana nativo en Windows
+// ---------------------------------------------------------------------------
+
+/// Elección de material DWM para la ventana, derivada solo de la opacidad.
+///
+/// Tipo propio (no de winit) para que la decisión sea testeable en cualquier
+/// SO; el mapeo al `BackdropType` de winit vive en el `cfg(windows)` de
+/// `resumed()`. Fuera de Windows solo existe en tests.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsBackdropChoice {
+    None,
+    Mica,
+}
+
+/// Mismo umbral `< 1.0` que `with_transparent`: con opacidad plena la ventana
+/// queda opaca; por debajo, Mica da el fondo translúcido nativo.
+#[cfg(any(windows, test))]
+fn select_windows_backdrop(opacity: f32) -> WindowsBackdropChoice {
+    if opacity < 1.0 {
+        WindowsBackdropChoice::Mica
+    } else {
+        WindowsBackdropChoice::None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests adversariales
 // ---------------------------------------------------------------------------
 // NO se puede testear el event loop de winit (requiere GPU), pero se puede
@@ -4133,6 +4171,16 @@ mod tests {
     use crate::pty::PtyCommandSender;
     use crate::renderer::limits::pixel_to_cell_coords;
     use std::sync::mpsc;
+
+    #[test]
+    fn backdrop_mica_solo_con_opacidad_menor_a_1() {
+        assert_eq!(select_windows_backdrop(1.0), WindowsBackdropChoice::None);
+        assert_eq!(select_windows_backdrop(0.9), WindowsBackdropChoice::Mica);
+        assert_eq!(select_windows_backdrop(0.0), WindowsBackdropChoice::Mica);
+        // Mismo umbral `< 1.0` que `with_transparent`: ambos se fijan al crear
+        // la ventana y deben moverse juntos.
+        assert_eq!(select_windows_backdrop(0.999), WindowsBackdropChoice::Mica);
+    }
 
     fn test_config_watch() -> Arc<Mutex<WatchState>> {
         Arc::new(Mutex::new(WatchState::new(None)))
