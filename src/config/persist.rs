@@ -211,6 +211,16 @@ mod tests {
     }
 
     #[test]
+    fn config_write_path_resuelve_via_dirs_config_dir() {
+        let expected_fallback = dirs::config_dir()
+            .map(|d| d.join("baud").join("config.toml"))
+            .unwrap_or_else(|| PathBuf::from("baud.toml"));
+        let paths = config_paths();
+        assert_eq!(paths[0], expected_fallback);
+        assert_eq!(paths[1], PathBuf::from("baud.toml"));
+    }
+
+    #[test]
     fn escribe_theme_string_en_raiz() {
         let path = temp_config_path("root");
         cleanup(&path);
