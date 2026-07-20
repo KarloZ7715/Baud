@@ -1512,8 +1512,13 @@ height = 800
     fn test_window_config_defaults() {
         let cfg = Config::default();
         assert_eq!(cfg.window.padding_x, 0);
+        // Decorations activas por defecto en ambos SO: la sensacion compacta
+        // viene de materiales/tema/fuentes, no de chrome sin bordes.
         assert!(cfg.window.decorations);
         assert_eq!(cfg.window.startup, StartupState::Windowed);
+        // Opacidad plena por defecto: la misma clave gobierna el alpha del
+        // compositor en Linux y el material nativo en Windows.
+        assert_eq!(cfg.window.opacity, 1.0);
     }
 
     #[test]
