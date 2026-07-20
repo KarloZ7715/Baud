@@ -105,6 +105,13 @@ impl Default for Keybindings {
             shift: true,
             ..Mods::NONE
         };
+        #[cfg(windows)]
+        let alt_ctrl_shift = Mods {
+            ctrl: true,
+            alt: true,
+            shift: true,
+            ..Mods::NONE
+        };
         Self {
             bindings: vec![
                 (Key::Char('c'), cs, Action::Copy),
@@ -115,6 +122,8 @@ impl Default for Keybindings {
                 (Key::Char('-'), ctrl, Action::FontZoomOut),
                 (Key::Char('0'), ctrl, Action::FontZoomReset),
                 (Key::Char('t'), alt_ctrl, Action::ToggleThemePicker),
+                #[cfg(windows)]
+                (Key::Char('t'), alt_ctrl_shift, Action::ToggleThemePicker),
                 (Key::Char('t'), cs, Action::NewTab),
                 (Key::Char('w'), cs, Action::CloseTab),
                 (Key::PageDown, ctrl, Action::NextTab),
@@ -364,6 +373,24 @@ mod tests {
             ..Mods::NONE
         };
         assert_eq!(kb.lookup(Key::Char('t'), cs), Some(Action::NewTab));
+    }
+
+    #[test]
+    fn test_theme_picker_windows_dual_binding() {
+        let kb = Keybindings::default();
+        let alt_ctrl_shift = Mods {
+            ctrl: true,
+            alt: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        #[cfg(windows)]
+        assert_eq!(
+            kb.lookup(Key::Char('t'), alt_ctrl_shift),
+            Some(Action::ToggleThemePicker)
+        );
+        #[cfg(not(windows))]
+        assert_eq!(kb.lookup(Key::Char('t'), alt_ctrl_shift), None);
     }
 
     #[test]
