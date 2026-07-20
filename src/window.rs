@@ -42,6 +42,8 @@ use winit::event_loop::ActiveEventLoop;
 use winit::event_loop::ControlFlow;
 use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, NamedKey};
+#[cfg(windows)]
+use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, CursorIcon, Fullscreen, Window, WindowId};
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -106,6 +108,16 @@ fn winit_to_key(k: &Key) -> Option<KKey> {
         Key::Character(s) => KKey::Char(s.chars().next()?),
         _ => return None,
     })
+}
+
+/// En Windows, `event.logical_key` puede llegar ya compuesto por el layout
+/// activo (AltGr = Ctrl+Alt fisico compone un caracter de tercer/cuarto nivel
+/// distinto de 't', p.ej. "Þ" en layouts islandeses), asi que el match por
+/// caracter logico en `Keybindings` nunca ve 't'. Se resuelve con la tecla
+/// fisica (independiente del layout) como via alterna, solo para este chord.
+#[cfg(windows)]
+fn is_theme_picker_physical_chord(physical_key: &PhysicalKey, mods: Mods) -> bool {
+    matches!(physical_key, PhysicalKey::Code(KeyCode::KeyT)) && mods.ctrl && mods.alt
 }
 
 fn current_key_modes(term: &Arc<Mutex<Term>>) -> KeyModes {
@@ -3972,6 +3984,11 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
+                    #[cfg(windows)]
+                    if is_theme_picker_physical_chord(&event.physical_key, mods) {
+                        self.run_action(Action::ToggleThemePicker);
+                        return;
+                    }
                     if self.handle_theme_picker_key(&event, shift) {
                         if let Some(window) = &self.window {
                             window.request_redraw();
@@ -4006,6 +4023,11 @@ impl ApplicationHandler<UserEvent> for App {
                             return;
                         }
                     }
+                }
+                #[cfg(windows)]
+                if is_theme_picker_physical_chord(&event.physical_key, mods) {
+                    self.run_action(Action::ToggleThemePicker);
+                    return;
                 }
 
                 // Copy mode: si está activo, las teclas navegan/seleccionan
