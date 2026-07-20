@@ -10,11 +10,11 @@ use unicode_script::Script;
 /// Fallbacks extra tras los especificos por script de `PlatformFallback`.
 #[cfg(target_os = "windows")]
 const COMMON: &[&str] = &[
-    "Segoe UI Symbol",
-    "Segoe UI Emoji",
     "Cascadia Mono",
     "Cascadia Code",
     "Consolas",
+    "Segoe UI Symbol",
+    "Segoe UI Emoji",
 ];
 
 /// Fallbacks extra tras los especificos por script de `PlatformFallback`.
@@ -153,6 +153,15 @@ mod tests {
     fn common_incluye_fallbacks_windows() {
         assert!(COMMON.contains(&"Segoe UI Emoji"));
         assert!(COMMON.contains(&"Consolas"));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn common_prioriza_monoespaciadas_sobre_simbolo_y_emoji() {
+        let pos = |name: &str| COMMON.iter().position(|&n| n == name).unwrap();
+        let consolas = pos("Consolas");
+        assert!(consolas < pos("Segoe UI Symbol"));
+        assert!(consolas < pos("Segoe UI Emoji"));
     }
 
     #[test]
