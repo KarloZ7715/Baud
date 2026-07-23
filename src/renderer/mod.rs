@@ -52,6 +52,17 @@ pub fn builtin_custom_glyph_id(ch: char) -> Option<u16> {
     }
 }
 
+/// Extrae un mensaje legible de un payload de panic capturado con `catch_unwind`.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panic sin mensaje".to_string()
+    }
+}
+
 /// Codepoint asociado a un id de builtin geometrico.
 pub fn char_from_builtin_glyph_id(id: u16) -> Option<char> {
     if (BOX_GLYPH_ID_BASE..BOX_GLYPH_ID_BASE + BOX_GLYPH_ID_COUNT).contains(&id) {
@@ -646,7 +657,7 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
+        let encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
@@ -669,6 +680,59 @@ impl Renderer {
             return Ok(Vec::new());
         }
 
+        // catch_unwind evita que un panic durante la construccion del frame
+        // (p.ej. indexacion de grid en una condicion de carrera con resize)
+        // se propague por event_loop::run hasta el drop de App/Surface: si
+        // eso ocurre con el SurfaceTexture aun sin presentar, wgpu aborta el
+        // proceso al intentar liberar recursos de Vulkan todavia en uso.
+        // Al capturarlo aqui, el frame se descarta de forma segura (ya no
+        // estamos en medio de un panic) y el proceso sigue corriendo.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.render_frame_body(
+                panes,
+                terminal_area,
+                layout,
+                theme,
+                bold_is_bright,
+                window_opacity,
+                preedit,
+                tabs,
+                frame,
+                &view,
+                encoder,
+                t0,
+                get_frame_us,
+            )
+        }))
+        .unwrap_or_else(|payload| {
+            let msg = panic_message(&payload);
+            tracing::error!(
+                "render: panic recuperado al construir el frame, se descarta sin presentar: {msg}"
+            );
+            Ok(Vec::new())
+        })
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "render frame body needs term, theme, overlays"
+    )]
+    fn render_frame_body(
+        &mut self,
+        panes: &[PaneRender],
+        terminal_area: crate::layout::Rect,
+        layout: &crate::layout::Layout,
+        theme: &ThemeConfig,
+        bold_is_bright: bool,
+        window_opacity: f32,
+        preedit: Option<PreeditState>,
+        tabs: Option<&TabBarLayout>,
+        frame: wgpu::SurfaceTexture,
+        view: &wgpu::TextureView,
+        mut encoder: wgpu::CommandEncoder,
+        t0: Instant,
+        get_frame_us: f64,
+    ) -> Result<Vec<SessionId>, String> {
         let focused = panes
             .iter()
             .find(|p| p.focused)
@@ -910,7 +974,7 @@ impl Renderer {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cell renderer pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(clear_color),
@@ -1089,6 +1153,16 @@ impl Renderer {
         let rows_count = limits::clamp_grid_dimension(rows_count);
 
         let active = term.active_grid();
+        // El layout calcula rows_count a partir del tamano de ventana, pero
+        // el grid del PTY se redimensiona de forma asincrona: durante un
+        // resize puede quedar temporalmente mas chico que lo que el layout
+        // ya asumio. Sin este clamp, active.rows[row] (o term.grid.rows[..]
+        // en la rama de scrollback) indexa fuera de rango.
+        let rows_count = if show_scrollback {
+            rows_count.min(term.grid.rows.len())
+        } else {
+            rows_count.min(active.rows.len())
+        };
         let sb_rows: Vec<&[Cell]> = if show_scrollback {
             let sb_offset = term.scrollback_offset as usize;
             let sb_len = term.grid.scrollback.len();
