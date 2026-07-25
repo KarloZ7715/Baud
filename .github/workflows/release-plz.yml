@@ -67,8 +67,27 @@ jobs:
         uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
       - name: Prepare Release PR
+        id: release-pr
         uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
         with:
           command: release-pr
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Regenerate reference docs in the release PR
+        if: steps.release-pr.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ fromJSON(steps.release-pr.outputs.pr).number }}
+        run: |
+          set -Eeuo pipefail
+          gh auth setup-git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          gh pr checkout "$PR_NUMBER"
+          cargo run --bin docs-gen
+          if ! git diff --quiet; then
+            git add -A
+            git commit -m "chore(docs): regenerate reference pages"
+            git push
+          fi
