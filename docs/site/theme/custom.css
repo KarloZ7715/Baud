@@ -1,17 +1,183 @@
 /* Delta visual de Baud sobre el tema mdBook por defecto (KTD: sin fork de
-   plantillas; solo variables.css mas esta hoja). */
+   plantillas; solo variables.css mas esta hoja).
+   Reglas propias: colores siempre via variables del tema, transiciones solo en
+   propiedades concretas, focus instantaneo, motion acotado a no-preference. */
 
-/* Pila de fuentes del sistema: cero fuentes web, cero peticiones externas */
-body {
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+:root {
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --dur-micro: 120ms;
+    --dur-short: 220ms;
+    --dur-long: 420ms;
 }
 
-/* Sidebar: escala y aire entre secciones */
-#sidebar .chapter > li.chapter-item {
-    margin-top: 0.6em;
+/* Base */
+
+body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.65;
+    transition: background-color var(--dur-short) ease, color var(--dur-short) ease;
+}
+
+h1, h2, h3, h4 {
+    letter-spacing: -0.01em;
+}
+
+h2 {
+    margin-top: 2.2em;
+}
+
+/* Los anchors no quedan ocultos tras la barra superior */
+h1[id], h2[id], h3[id], h4[id] {
+    scroll-margin-top: calc(var(--menu-bar-height) + 12px);
+}
+
+::selection {
+    background: color-mix(in srgb, var(--links) 35%, transparent);
+}
+
+/* En mdBook 0.5 el anchor envuelve todo el texto del encabezado */
+a.header {
+    color: inherit;
+    transition: color var(--dur-micro) ease;
+}
+
+a.header:hover {
+    color: var(--links);
+}
+
+/* Enlaces del cuerpo: subrayado solo al hover, desplazado para legibilidad */
+.content a:not(.header):not(.baud-card):not(.baud-button) {
+    text-decoration: underline;
+    text-decoration-color: transparent;
+    text-underline-offset: 3px;
+    transition: text-decoration-color var(--dur-micro) ease, color var(--dur-micro) ease;
+}
+
+.content a:not(.header):not(.baud-card):not(.baud-button):hover {
+    text-decoration-color: var(--links);
+}
+
+/* Sidebar */
+
+/* Las secciones sin pagina (Install, Features...) se leen como cabeceras de grupo */
+.chapter .chapter-link-wrapper > span {
+    display: block;
+    margin-top: 1.2em;
+    font-size: 0.72em;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--sidebar-non-existant);
+}
+
+.chapter li a {
+    border-radius: 4px;
+    transition: background-color var(--dur-micro) ease, color var(--dur-micro) ease;
+}
+
+.chapter li a:hover {
+    background: var(--theme-hover);
+}
+
+.chapter li.active > .chapter-link-wrapper > a {
+    color: var(--sidebar-active);
+    font-weight: 600;
+    background: var(--theme-hover);
+}
+
+.sidebar-scrollbox {
+    scrollbar-width: thin;
+}
+
+.sidebar-scrollbox::-webkit-scrollbar {
+    width: 8px;
+}
+
+.sidebar-scrollbox::-webkit-scrollbar-thumb {
+    background: var(--sidebar-spacer);
+    border-radius: 4px;
+}
+
+/* Admonitions (alertas GitHub): fondo tintado del color de tipo, borde izquierdo */
+.blockquote-tag {
+    border: none;
+    border-left: 3px solid;
+    border-radius: 0 6px 6px 0;
+    padding: 0.6em 1em;
+}
+
+.blockquote-tag-note {
+    border-color: var(--blockquote-note-color);
+    background: color-mix(in srgb, var(--blockquote-note-color) 9%, transparent);
+}
+
+.blockquote-tag-tip {
+    border-color: var(--blockquote-tip-color);
+    background: color-mix(in srgb, var(--blockquote-tip-color) 9%, transparent);
+}
+
+.blockquote-tag-important {
+    border-color: var(--blockquote-important-color);
+    background: color-mix(in srgb, var(--blockquote-important-color) 9%, transparent);
+}
+
+.blockquote-tag-warning {
+    border-color: var(--blockquote-warning-color);
+    background: color-mix(in srgb, var(--blockquote-warning-color) 9%, transparent);
+}
+
+.blockquote-tag-caution {
+    border-color: var(--blockquote-caution-color);
+    background: color-mix(in srgb, var(--blockquote-caution-color) 9%, transparent);
+}
+
+.blockquote-tag-title {
+    font-weight: 600;
+}
+
+/* Codigo */
+
+pre {
+    border: 1px solid var(--quote-border);
+    border-radius: 6px;
+    background: var(--quote-bg);
+}
+
+/* Codigo en linea: contraste legible sin afectar bloques */
+:not(pre) > code {
+    background: var(--quote-bg);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+}
+
+kbd {
+    font-family: var(--mono-font);
+    font-size: 0.8em;
+    padding: 0.15em 0.45em;
+    border: 1px solid var(--quote-border);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    background: var(--quote-bg);
+}
+
+/* Tablas: sin rejilla; header semibold con borde inferior, filas con hairlines */
+table th {
+    font-weight: 600;
+    text-align: left;
+    border: none;
+    border-bottom: 2px solid var(--table-border-color);
+    padding: 0.5em 0.8em;
+}
+
+table td {
+    border: none;
+    border-bottom: 1px solid var(--table-border-color);
+    padding: 0.5em 0.8em;
 }
 
 /* Portada: area "Get started" */
+
 .baud-get-started {
     display: flex;
     gap: 0.75rem;
@@ -19,22 +185,46 @@ body {
     margin: 1.5rem 0;
 }
 
-.baud-button {
+/* Scoped como .content a.baud-* para empatar y ganar por orden al
+   `.content a:link` (0,2,1) de mdBook: custom.css carga al final */
+.content a.baud-button {
     display: inline-block;
     padding: 0.55rem 1.15rem;
     border: 1px solid var(--sidebar-active);
     border-radius: 6px;
     color: var(--fg);
     text-decoration: none;
+    transition: background-color var(--dur-micro) ease, color var(--dur-micro) ease, transform var(--dur-micro) ease;
 }
 
-.baud-button:hover {
-    background: var(--sidebar-active);
-    color: var(--bg);
+.content a.baud-button:hover {
+    background: color-mix(in srgb, var(--sidebar-active) 14%, transparent);
     text-decoration: none;
 }
 
+.content a.baud-button:active {
+    transform: scale(0.96);
+}
+
+/* Jerarquia primary/secondary: una sola accion principal por seccion */
+.content a.baud-button-primary {
+    background: var(--sidebar-active);
+    color: var(--bg);
+    font-weight: 600;
+}
+
+.content a.baud-button-primary:hover {
+    background: color-mix(in srgb, var(--sidebar-active) 88%, white);
+    color: var(--bg);
+}
+
+.content a.baud-button:focus-visible {
+    outline: 2px solid var(--sidebar-active);
+    outline-offset: 2px;
+}
+
 /* Portada: rejilla de tarjetas; auto-fill colapsa a una columna en pantallas angostas */
+
 .baud-cards {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -42,7 +232,7 @@ body {
     margin: 1.5rem 0;
 }
 
-.baud-card {
+.content a.baud-card {
     display: block;
     padding: 1rem 1.25rem;
     border: 1px solid var(--quote-border);
@@ -50,12 +240,19 @@ body {
     background: var(--quote-bg);
     color: var(--fg);
     text-decoration: none;
-    transition: border-color 0.15s ease;
+    transition: background-color var(--dur-micro) ease, border-color var(--dur-micro) ease, transform var(--dur-micro) var(--ease-out);
 }
 
-.baud-card:hover {
+.content a.baud-card:hover {
+    background: var(--theme-hover);
     border-color: var(--sidebar-active);
     text-decoration: none;
+    transform: translateY(-1px);
+}
+
+.content a.baud-card:focus-visible {
+    outline: 2px solid var(--sidebar-active);
+    outline-offset: 2px;
 }
 
 .baud-card h3 {
@@ -68,15 +265,44 @@ body {
     opacity: 0.8;
 }
 
-/* Tablas: bordes mas discretos para las paginas de referencia */
-table th,
-table td {
-    border-color: var(--table-border-color);
+/* Dinamismo: una sola entrada orquestada por pagina; scroll suave en anchors.
+   Las tarjetas de la portada entran escalonadas dentro de la misma secuencia. */
+@media (prefers-reduced-motion: no-preference) {
+    html {
+        scroll-behavior: smooth;
+    }
+
+    .content main > * {
+        animation: baud-reveal var(--dur-long) var(--ease-out) both;
+    }
+
+    .content main > *:nth-child(1) { animation-delay: 0ms; }
+    .content main > *:nth-child(2) { animation-delay: 50ms; }
+    .content main > *:nth-child(3) { animation-delay: 100ms; }
+    .content main > *:nth-child(4) { animation-delay: 150ms; }
+    .content main > *:nth-child(5) { animation-delay: 200ms; }
+    .content main > *:nth-child(6) { animation-delay: 250ms; }
+    .content main > *:nth-child(n+7) { animation-delay: 300ms; }
+
+    .baud-cards .baud-card:nth-child(1) { animation-delay: 150ms; }
+    .baud-cards .baud-card:nth-child(2) { animation-delay: 200ms; }
+    .baud-cards .baud-card:nth-child(3) { animation-delay: 250ms; }
+    .baud-cards .baud-card:nth-child(4) { animation-delay: 300ms; }
 }
 
-/* Codigo en linea: contraste legible sin afectar bloques */
-:not(pre) > code {
-    background: var(--quote-bg);
-    border-radius: 4px;
-    padding: 0.1em 0.35em;
+@keyframes baud-reveal {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+@media print {
+    .content main > * {
+        animation: none !important;
+    }
 }

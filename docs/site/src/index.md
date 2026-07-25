@@ -3,7 +3,7 @@
 Baud is a fast, feature-rich, GPU-accelerated terminal emulator for Linux and Windows. Tabs, splits, themes, and shell integration come built in, configured through a single TOML file.
 
 <div class="baud-get-started">
-  <a class="baud-button" href="install/linux.html">Install Baud</a>
+  <a class="baud-button baud-button-primary" href="install/linux.html">Install Baud</a>
   <a class="baud-button" href="install/source.html">Build from source</a>
 </div>
 
