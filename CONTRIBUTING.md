@@ -81,3 +81,10 @@ Use the pull request template. Keep the change focused on one thing, include tes
 ## Reporting issues
 
 Use the issue templates in `.github/ISSUE_TEMPLATE/`. The bug report template asks for the data the [troubleshooting page](https://karloz7715.github.io/Baud/help/troubleshooting.html) explains how to collect.
+
+## Release checklist
+
+Before a release tag is pushed:
+
+- The documentation gate in `.github/workflows/release.yml` must pass (`docs-gen --check` and the site build).
+- Review the pages affected by the release's user-facing changes, using the `CHANGELOG.md` entries `release-plz` generated for that version.

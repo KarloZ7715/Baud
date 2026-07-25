@@ -26,10 +26,38 @@ jobs:
       - name: Verify Cargo license field
         run: grep -qE '^license\s*=\s*"Apache-2\.0"' Cargo.toml
 
+  docs-gate:
+    name: Documentation gate
+    runs-on: ubuntu-latest
+    needs: license-gate
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+
+      - name: Cache target directory
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+
+      - name: Verify generated reference
+        run: cargo run --bin docs-gen -- --check
+
+      - name: Install mdBook v0.5.4
+        run: |
+          curl -sL https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz | sudo tar xz -C /usr/local/bin
+          mdbook --version
+
+      - name: Build documentation site
+        run: |
+          cp CHANGELOG.md docs/site/src/changelog.md
+          mdbook build docs/site
+
   prepare-release:
     name: Prepare release draft
     runs-on: ubuntu-latest
-    needs: license-gate
+    needs: [license-gate, docs-gate]
     permissions:
       contents: write
     outputs:
