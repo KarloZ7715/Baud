@@ -27,9 +27,11 @@ Launch Baud with debug logging and check for GPU or session errors in the log. O
 LIBGL_ALWAYS_SOFTWARE=1 RUST_LOG=baud=debug,wgpu_core=warn,winit=warn baud
 ```
 
+On Windows, check that your GPU driver supports DX12 and that Windows is at least version 1809.
+
 ### Keybindings not taking effect
 
-Check the log for `keybinding invalido` warnings. The action or chord name must match the strings in the [keybindings reference](../reference/keybindings.md) exactly.
+Check the log for a warning containing the text `keybinding invalido`. The action or chord name must match the strings in the [keybindings reference](../reference/keybindings.md) exactly.
 
 ### Configuration changes not applying
 

@@ -8,7 +8,13 @@ All published documentation and user-facing strings are written in English. Span
 
 ## 2. Voice and tense
 
-Use the second person and the present tense. Write "You can change the theme" rather than "The user can change the theme" or "You will be able to change the theme".
+Use the second person and the present tense.
+
+- Instead of: "The user can change the theme by editing the config file."
+- Write: "You can change the theme by editing the config file."
+
+- Instead of: "You will be able to split the pane after the tab is created."
+- Write: "You can split the pane after you create the tab."
 
 ## 3. Headings
 
@@ -32,6 +38,11 @@ Do not use "window" when you mean "tab", or "terminal" when you mean "session".
 ## 6. No marketing adjectives
 
 Avoid words like "fast", "powerful", "seamless", "modern" or "intuitive" in explanatory prose. State what a feature does and let the reader decide whether it is impressive.
+
+- Instead of: "Baud offers a blazing-fast, modern rendering pipeline."
+- Write: "Baud renders each frame through wgpu and only redraws damaged cells."
+
+Keep paragraphs short: one idea per paragraph. Use code spans for configuration keys, action names, chords and file paths.
 
 ## 7. Cite current sources
 
