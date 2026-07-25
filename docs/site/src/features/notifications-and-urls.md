@@ -8,6 +8,6 @@ Opening a URL currently shells out to `xdg-open`, a Linux desktop utility. On Wi
 
 ## Desktop notifications
 
-Programs can request a desktop notification through [OSC 9](https://iterm2.com/documentation-escape-codes.html) or the rxvt-style `OSC 777;notify;<title>;<body>`. Both are off by default — enable them with `notifications.enabled = true` (see the [configuration reference](../reference/config.md#config-section-notifications)).
+Programs can request a desktop notification through [OSC 9](https://iterm2.com/documentation-escape-codes.html) or the rxvt-style `OSC 777;notify;<title>;<body>`. Both require `notifications.enabled = true` (see the [configuration reference](../reference/config.md#config-section-notifications)).
 
 Like URL opening, notifications currently shell out to a Linux desktop utility (`notify-send`); on Windows, enabling `notifications.enabled` has no effect yet.

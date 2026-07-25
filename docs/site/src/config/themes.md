@@ -8,7 +8,7 @@ The simplest form sets a preset by name at the config root:
 theme = "dracula"
 ```
 
-Every embedded preset is listed in the [themes reference](../reference/themes.md) with its exact colors. `claude-dark` is the default when `theme` is unset.
+Every embedded preset is listed in the [themes reference](../reference/themes.md) with its exact colors.
 
 To override individual colors on top of a preset (or the default), use the `[theme]` table with a `name` key plus any overrides:
 
@@ -36,6 +36,6 @@ Confirming a selection writes the config file in place with the parser [toml_edi
 
 ## Contrast floor
 
-`theme.minimum_contrast` (default `1.0`, range `1.0`–`21.0`) dynamically lightens or darkens the effective foreground of each cell against its background to guarantee a minimum WCAG contrast ratio, using an OKLab-based adjustment rather than a flat color swap. `1.0` disables the adjustment entirely and shows the theme's raw colors. `3.0` is the WCAG floor for large text; `4.5` is the WCAG AA floor for body text. Values outside the range are clamped to the nearest bound.
+`theme.minimum_contrast` dynamically lightens or darkens the effective foreground of each cell against its background to guarantee a minimum WCAG contrast ratio, using an OKLab-based adjustment rather than a flat color swap — see the [configuration reference](../reference/config.md#config-theme-minimum_contrast) for the exact thresholds and default.
 
 `bold_is_bright` (settable at the config root or inside `[theme]`; either one being `true` enables it) maps SGR bold text to the bright variant of its ANSI color instead of just changing weight.

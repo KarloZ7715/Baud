@@ -43,7 +43,7 @@ Without `RUST_LOG` set, Baud logs at `baud=warn,wgpu_core=warn,winit=warn` — w
 
 ## The watchdog
 
-Set `diagnostics.watchdog = true` (off by default) to run a background thread that checks the GUI event loop's heartbeat every 2 seconds. If the loop goes quiet for a full interval — usually a GPU, mutex, or I/O stall — it logs a `baud::watchdog` warning naming the handler that was active when the stall started, which narrows down what to look at next. It only detects and logs; it does not attempt to recover the frozen loop.
+Set `diagnostics.watchdog = true` (requires a restart to take effect) to run a background thread that checks the GUI event loop's heartbeat every 2 seconds. If the loop goes quiet for a full interval — usually a GPU, mutex, or I/O stall — it logs a `baud::watchdog` warning naming the handler that was active when the stall started, which narrows down what to look at next. It only detects and logs; it does not attempt to recover the frozen loop.
 
 ## Display quirks
 

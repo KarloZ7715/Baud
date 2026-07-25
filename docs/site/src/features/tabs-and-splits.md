@@ -28,10 +28,10 @@ Focusing by direction (`focus_pane_*`) picks the geometrically closest neighbor 
 
 ### Orientation
 
-By default (`panes.smart_split = false`), a new split's orientation follows a dwindle-style rule (as in Hyprland): it alternates based on the focused pane's aspect ratio, tuned by `panes.split_width_multiplier`. With `panes.smart_split = true`, the orientation instead follows where your mouse cursor sits inside the pane when you trigger the split — imagine the pane divided into four triangles from its center; the triangle your cursor is in decides both the split axis and which side keeps the existing content.
+With `panes.smart_split = false`, a new split's orientation follows a dwindle-style rule (as in Hyprland): it alternates based on the focused pane's aspect ratio, tuned by `panes.split_width_multiplier`. With `panes.smart_split = true`, the orientation instead follows where your mouse cursor sits inside the pane when you trigger the split — imagine the pane divided into four triangles from its center; the triangle your cursor is in decides both the split axis and which side keeps the existing content.
 
-`panes.preserve_split` (implied `true` whenever `smart_split` is on) stops Baud from recalculating a pane's split orientation when the window is resized, keeping whatever orientation you split it with.
+`panes.preserve_split` (implied whenever `smart_split` is on) stops Baud from recalculating a pane's split orientation when the window is resized, keeping whatever orientation you split it with.
 
-`panes.max` caps how many panes a single tab can hold (default `12`; `0` removes the limit). Splitting past the limit, or into a pane too small to hold two panes, shows a status message instead of silently failing.
+`panes.max` caps how many panes a single tab can hold (`0` removes the limit). Splitting past the limit, or into a pane too small to hold two panes, shows a status message instead of silently failing.
 
 See the [configuration reference](../reference/config.md#config-section-panes) for every `panes.*` key, and [Keybindings](../config/keybindings.md) for rebinding any of the chords above.

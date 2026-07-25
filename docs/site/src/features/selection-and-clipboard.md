@@ -14,7 +14,7 @@ Extend an existing selection from the keyboard:
 
 ## Copying
 
-`ctrl+shift+c` copies the current selection. `selection.copy_on_select` (off by default) additionally copies as soon as you release the mouse button after selecting, after a short delay (`selection.copy_on_select_delay_ms`) that gives a double- or triple-click time to finish extending the selection first. `selection.copy_on_select_target` chooses where that goes: `"clipboard"`, `"primary"`, or `"both"`.
+`ctrl+shift+c` copies the current selection. `selection.copy_on_select` additionally copies as soon as you release the mouse button after selecting, after a short delay (`selection.copy_on_select_delay_ms`) that gives a double- or triple-click time to finish extending the selection first. `selection.copy_on_select_target` chooses where that goes: `"clipboard"`, `"primary"`, or `"both"`.
 
 ## Pasting
 
@@ -22,7 +22,7 @@ Extend an existing selection from the keyboard:
 
 ## Bypassing mouse reporting
 
-Programs that request mouse reporting (like `less` or full-screen editors) normally intercept mouse clicks themselves. Hold one of the modifiers listed in `selection.bypass_mouse_reporting_modifiers` (`shift`, `alt`, or `ctrl`; `shift` is the default) while clicking to select text with the mouse anyway, bypassing the program's own handling for that click.
+Programs that request mouse reporting (like `less` or full-screen editors) normally intercept mouse clicks themselves. Hold one of the modifiers listed in `selection.bypass_mouse_reporting_modifiers` (`shift`, `alt`, or `ctrl`) while clicking to select text with the mouse anyway, bypassing the program's own handling for that click.
 
 ## Clipboard backends
 
