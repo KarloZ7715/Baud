@@ -516,7 +516,6 @@ fn toml_literal(value: &serde_json::Value) -> Option<String> {
             Some(toml_edit::Value::from(arr).to_string())
         }
         serde_json::Value::Null => None,
-        serde_json::Value::Object(map) if map.is_empty() => None,
         serde_json::Value::Object(_) => None,
     }
 }
