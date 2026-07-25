@@ -1,1 +1,82 @@
-/* Estilos propios de Baud. Se completan junto al tema. */
+/* Delta visual de Baud sobre el tema mdBook por defecto (KTD: sin fork de
+   plantillas; solo variables.css mas esta hoja). */
+
+/* Pila de fuentes del sistema: cero fuentes web, cero peticiones externas */
+body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Sidebar: escala y aire entre secciones */
+#sidebar .chapter > li.chapter-item {
+    margin-top: 0.6em;
+}
+
+/* Portada: area "Get started" */
+.baud-get-started {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin: 1.5rem 0;
+}
+
+.baud-button {
+    display: inline-block;
+    padding: 0.55rem 1.15rem;
+    border: 1px solid var(--sidebar-active);
+    border-radius: 6px;
+    color: var(--fg);
+    text-decoration: none;
+}
+
+.baud-button:hover {
+    background: var(--sidebar-active);
+    color: var(--bg);
+    text-decoration: none;
+}
+
+/* Portada: rejilla de tarjetas; auto-fill colapsa a una columna en pantallas angostas */
+.baud-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 1rem;
+    margin: 1.5rem 0;
+}
+
+.baud-card {
+    display: block;
+    padding: 1rem 1.25rem;
+    border: 1px solid var(--quote-border);
+    border-radius: 8px;
+    background: var(--quote-bg);
+    color: var(--fg);
+    text-decoration: none;
+    transition: border-color 0.15s ease;
+}
+
+.baud-card:hover {
+    border-color: var(--sidebar-active);
+    text-decoration: none;
+}
+
+.baud-card h3 {
+    margin: 0 0 0.4rem;
+}
+
+.baud-card p {
+    margin: 0;
+    font-size: 0.95em;
+    opacity: 0.8;
+}
+
+/* Tablas: bordes mas discretos para las paginas de referencia */
+table th,
+table td {
+    border-color: var(--table-border-color);
+}
+
+/* Codigo en linea: contraste legible sin afectar bloques */
+:not(pre) > code {
+    background: var(--quote-bg);
+    border-radius: 4px;
+    padding: 0.1em 0.35em;
+}
