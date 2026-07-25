@@ -27,9 +27,11 @@ tmp/
 
 # Documentacion
 docs/*
+!docs/site/
+docs/site/book/
+docs/site/src/changelog.md
 
 # AI
-src/prompts/*
 .agents/*
 .claude/*
 skills-lock.json
