@@ -42,6 +42,128 @@ pub enum Action {
     ExtendSelectionViewportEnd,
 }
 
+impl Action {
+    /// Nombre canonico aceptado por [`parse_action`]. Es la inversa de
+    /// `parse_action`: para toda `a`, `parse_action(&a.as_str()) == Some(a)`.
+    pub fn as_str(&self) -> String {
+        match self {
+            Action::Copy => "copy".into(),
+            Action::Paste => "paste".into(),
+            Action::PastePrimary => "paste_primary".into(),
+            Action::ToggleCopyMode => "toggle_copy_mode".into(),
+            Action::ToggleSearch => "toggle_search".into(),
+            Action::ScrollLineUp => "scroll_line_up".into(),
+            Action::ScrollLineDown => "scroll_line_down".into(),
+            Action::ScrollPageUp => "scroll_page_up".into(),
+            Action::ScrollPageDown => "scroll_page_down".into(),
+            Action::ScrollToBottom => "scroll_to_bottom".into(),
+            Action::JumpToPrevPrompt => "jump_to_prev_prompt".into(),
+            Action::JumpToNextPrompt => "jump_to_next_prompt".into(),
+            Action::FontZoomIn => "font_zoom_in".into(),
+            Action::FontZoomOut => "font_zoom_out".into(),
+            Action::FontZoomReset => "font_zoom_reset".into(),
+            Action::ToggleThemePicker => "toggle_theme_picker".into(),
+            Action::NewTab => "new_tab".into(),
+            Action::CloseTab => "close_tab".into(),
+            Action::NextTab => "next_tab".into(),
+            Action::PrevTab => "prev_tab".into(),
+            Action::GotoTab(n) => format!("goto_tab_{n}"),
+            Action::SplitPane => "split_pane".into(),
+            Action::ToggleSplit => "toggle_split".into(),
+            Action::SwapSplit => "swap_split".into(),
+            Action::FocusNextPane => "focus_next_pane".into(),
+            Action::FocusPrevPane => "focus_prev_pane".into(),
+            Action::FocusPaneUp => "focus_pane_up".into(),
+            Action::FocusPaneDown => "focus_pane_down".into(),
+            Action::FocusPaneLeft => "focus_pane_left".into(),
+            Action::FocusPaneRight => "focus_pane_right".into(),
+            Action::ClosePane => "close_pane".into(),
+            Action::ToggleFpsCounter => "toggle_fps_counter".into(),
+            Action::ExtendSelectionWordLeft => "extend_selection_word_left".into(),
+            Action::ExtendSelectionWordRight => "extend_selection_word_right".into(),
+            Action::ExtendSelectionLineStart => "extend_selection_line_start".into(),
+            Action::ExtendSelectionLineEnd => "extend_selection_line_end".into(),
+            Action::ExtendSelectionViewportStart => "extend_selection_viewport_start".into(),
+            Action::ExtendSelectionViewportEnd => "extend_selection_viewport_end".into(),
+        }
+    }
+}
+
+/// Plataforma a la que esta condicionado un binding por defecto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Windows,
+}
+
+/// Binding por defecto vinculado solo en una plataforma especifica, fuera
+/// del listado base de [`Keybindings::default`]. Fuente unica para el runtime
+/// (via `#[cfg(windows)]` en `base_bindings`/`Default`) y para el generador
+/// de referencia, que debe poder ver el chord de Windows aun compilando en
+/// Linux (KTD5).
+pub struct ConditionalBinding {
+    pub key: Key,
+    pub mods: Mods,
+    pub action: Action,
+    pub platform: Platform,
+}
+
+pub const CONDITIONAL_BINDINGS: &[ConditionalBinding] = &[ConditionalBinding {
+    key: Key::Char('t'),
+    mods: Mods {
+        ctrl: true,
+        alt: true,
+        shift: true,
+        sup: false,
+    },
+    action: Action::ToggleThemePicker,
+    platform: Platform::Windows,
+}];
+
+/// Letra final del formato canonico de una tecla (inversa de
+/// `parse_key_token`, salvo por los alias no canonicos que ese parser acepta
+/// ademas del canonico).
+fn format_key(key: Key) -> String {
+    match key {
+        Key::Char(c) => c.to_string(),
+        Key::Enter => "enter".into(),
+        Key::Tab => "tab".into(),
+        Key::Backspace => "backspace".into(),
+        Key::Escape => "escape".into(),
+        Key::Up => "up".into(),
+        Key::Down => "down".into(),
+        Key::Left => "left".into(),
+        Key::Right => "right".into(),
+        Key::Home => "home".into(),
+        Key::End => "end".into(),
+        Key::PageUp => "pageup".into(),
+        Key::PageDown => "pagedown".into(),
+        Key::Insert => "insert".into(),
+        Key::Delete => "delete".into(),
+        Key::F(n) => format!("f{n}"),
+    }
+}
+
+/// Formatea una combinacion en la forma canonica que acepta [`parse_binding`]
+/// (por ejemplo `"ctrl+shift+c"`). Orden fijo de modificadores: ctrl, alt,
+/// shift, super.
+pub fn format_binding(key: Key, mods: Mods) -> String {
+    let mut s = String::new();
+    if mods.ctrl {
+        s.push_str("ctrl+");
+    }
+    if mods.alt {
+        s.push_str("alt+");
+    }
+    if mods.shift {
+        s.push_str("shift+");
+    }
+    if mods.sup {
+        s.push_str("super+");
+    }
+    s.push_str(&format_key(key));
+    s
+}
+
 /// Mapa de combinaciones de tecla a acciones del terminal.
 #[derive(Debug, Clone)]
 pub struct Keybindings {
@@ -76,93 +198,116 @@ impl Keybindings {
     }
 }
 
+/// Bindings por defecto validos en todas las plataformas (sin las entradas
+/// condicionales de [`CONDITIONAL_BINDINGS`]). Fuente unica compartida por
+/// `Keybindings::default` y [`all_default_bindings`].
+fn base_bindings() -> Vec<(Key, Mods, Action)> {
+    let cs = Mods {
+        ctrl: true,
+        shift: true,
+        ..Mods::NONE
+    };
+    let ctrl = Mods {
+        ctrl: true,
+        ..Mods::NONE
+    };
+    let shift = Mods {
+        shift: true,
+        ..Mods::NONE
+    };
+    let alt = Mods {
+        alt: true,
+        ..Mods::NONE
+    };
+    let alt_ctrl = Mods {
+        ctrl: true,
+        alt: true,
+        ..Mods::NONE
+    };
+    let alt_shift = Mods {
+        alt: true,
+        shift: true,
+        ..Mods::NONE
+    };
+    vec![
+        (Key::Char('c'), cs, Action::Copy),
+        (Key::Char('v'), cs, Action::Paste),
+        (Key::Char('x'), cs, Action::ToggleCopyMode),
+        (Key::Char('f'), cs, Action::ToggleSearch),
+        (Key::Char('='), ctrl, Action::FontZoomIn),
+        (Key::Char('-'), ctrl, Action::FontZoomOut),
+        (Key::Char('0'), ctrl, Action::FontZoomReset),
+        (Key::Char('t'), alt_ctrl, Action::ToggleThemePicker),
+        (Key::Char('t'), cs, Action::NewTab),
+        (Key::Char('w'), cs, Action::CloseTab),
+        (Key::PageDown, ctrl, Action::NextTab),
+        (Key::PageUp, ctrl, Action::PrevTab),
+        (Key::Up, cs, Action::ScrollLineUp),
+        (Key::Down, cs, Action::ScrollLineDown),
+        (Key::Up, alt, Action::ScrollPageUp),
+        (Key::Down, alt, Action::ScrollPageDown),
+        (Key::PageUp, shift, Action::ScrollPageUp),
+        (Key::PageDown, shift, Action::ScrollPageDown),
+        (Key::PageUp, Mods::NONE, Action::ScrollPageUp),
+        (Key::PageDown, Mods::NONE, Action::ScrollPageDown),
+        (Key::End, ctrl, Action::ScrollToBottom),
+        (Key::Up, alt_ctrl, Action::JumpToPrevPrompt),
+        (Key::Down, alt_ctrl, Action::JumpToNextPrompt),
+        (Key::Char('d'), cs, Action::SplitPane),
+        (Key::Char('|'), cs, Action::ToggleSplit),
+        (Key::Char('s'), cs, Action::SwapSplit),
+        // Ctrl+Shift+] / Ctrl+Shift+[ (convencion de kitty): ciclar foco de
+        // panel. Libera Ctrl+Shift+Left/Right para extender seleccion por
+        // palabra (convencion universal de editores/terminales).
+        (Key::Char(']'), cs, Action::FocusNextPane),
+        (Key::Char('['), cs, Action::FocusPrevPane),
+        (Key::Up, alt_shift, Action::FocusPaneUp),
+        (Key::Down, alt_shift, Action::FocusPaneDown),
+        (Key::Left, alt_shift, Action::FocusPaneLeft),
+        (Key::Right, alt_shift, Action::FocusPaneRight),
+        (Key::Char('q'), cs, Action::ClosePane),
+        (Key::F(12), cs, Action::ToggleFpsCounter),
+        (Key::Left, cs, Action::ExtendSelectionWordLeft),
+        (Key::Right, cs, Action::ExtendSelectionWordRight),
+        (Key::Home, shift, Action::ExtendSelectionLineStart),
+        (Key::End, shift, Action::ExtendSelectionLineEnd),
+        (Key::Home, cs, Action::ExtendSelectionViewportStart),
+        (Key::End, cs, Action::ExtendSelectionViewportEnd),
+        (Key::Insert, shift, Action::PastePrimary),
+    ]
+}
+
 impl Default for Keybindings {
     fn default() -> Self {
-        let cs = Mods {
-            ctrl: true,
-            shift: true,
-            ..Mods::NONE
-        };
-        let ctrl = Mods {
-            ctrl: true,
-            ..Mods::NONE
-        };
-        let shift = Mods {
-            shift: true,
-            ..Mods::NONE
-        };
-        let alt = Mods {
-            alt: true,
-            ..Mods::NONE
-        };
-        let alt_ctrl = Mods {
-            ctrl: true,
-            alt: true,
-            ..Mods::NONE
-        };
-        let alt_shift = Mods {
-            alt: true,
-            shift: true,
-            ..Mods::NONE
-        };
+        #[allow(unused_mut)]
+        let mut bindings = base_bindings();
         #[cfg(windows)]
-        let alt_ctrl_shift = Mods {
-            ctrl: true,
-            alt: true,
-            shift: true,
-            ..Mods::NONE
-        };
-        Self {
-            bindings: vec![
-                (Key::Char('c'), cs, Action::Copy),
-                (Key::Char('v'), cs, Action::Paste),
-                (Key::Char('x'), cs, Action::ToggleCopyMode),
-                (Key::Char('f'), cs, Action::ToggleSearch),
-                (Key::Char('='), ctrl, Action::FontZoomIn),
-                (Key::Char('-'), ctrl, Action::FontZoomOut),
-                (Key::Char('0'), ctrl, Action::FontZoomReset),
-                (Key::Char('t'), alt_ctrl, Action::ToggleThemePicker),
-                #[cfg(windows)]
-                (Key::Char('t'), alt_ctrl_shift, Action::ToggleThemePicker),
-                (Key::Char('t'), cs, Action::NewTab),
-                (Key::Char('w'), cs, Action::CloseTab),
-                (Key::PageDown, ctrl, Action::NextTab),
-                (Key::PageUp, ctrl, Action::PrevTab),
-                (Key::Up, cs, Action::ScrollLineUp),
-                (Key::Down, cs, Action::ScrollLineDown),
-                (Key::Up, alt, Action::ScrollPageUp),
-                (Key::Down, alt, Action::ScrollPageDown),
-                (Key::PageUp, shift, Action::ScrollPageUp),
-                (Key::PageDown, shift, Action::ScrollPageDown),
-                (Key::PageUp, Mods::NONE, Action::ScrollPageUp),
-                (Key::PageDown, Mods::NONE, Action::ScrollPageDown),
-                (Key::End, ctrl, Action::ScrollToBottom),
-                (Key::Up, alt_ctrl, Action::JumpToPrevPrompt),
-                (Key::Down, alt_ctrl, Action::JumpToNextPrompt),
-                (Key::Char('d'), cs, Action::SplitPane),
-                (Key::Char('|'), cs, Action::ToggleSplit),
-                (Key::Char('s'), cs, Action::SwapSplit),
-                // Ctrl+Shift+] / Ctrl+Shift+[ (convencion de kitty): ciclar foco de
-                // panel. Libera Ctrl+Shift+Left/Right para extender seleccion por
-                // palabra (convencion universal de editores/terminales).
-                (Key::Char(']'), cs, Action::FocusNextPane),
-                (Key::Char('['), cs, Action::FocusPrevPane),
-                (Key::Up, alt_shift, Action::FocusPaneUp),
-                (Key::Down, alt_shift, Action::FocusPaneDown),
-                (Key::Left, alt_shift, Action::FocusPaneLeft),
-                (Key::Right, alt_shift, Action::FocusPaneRight),
-                (Key::Char('q'), cs, Action::ClosePane),
-                (Key::F(12), cs, Action::ToggleFpsCounter),
-                (Key::Left, cs, Action::ExtendSelectionWordLeft),
-                (Key::Right, cs, Action::ExtendSelectionWordRight),
-                (Key::Home, shift, Action::ExtendSelectionLineStart),
-                (Key::End, shift, Action::ExtendSelectionLineEnd),
-                (Key::Home, cs, Action::ExtendSelectionViewportStart),
-                (Key::End, cs, Action::ExtendSelectionViewportEnd),
-                (Key::Insert, shift, Action::PastePrimary),
-            ],
-        }
+        bindings.extend(
+            CONDITIONAL_BINDINGS
+                .iter()
+                .filter(|c| c.platform == Platform::Windows)
+                .map(|c| (c.key, c.mods, c.action)),
+        );
+        Self { bindings }
     }
+}
+
+/// Todas las combinaciones por defecto documentables (base + condicionales de
+/// [`CONDITIONAL_BINDINGS`]), con su plataforma (`None` = todas). A
+/// diferencia de `Keybindings::default`, no depende del target de
+/// compilacion: el generador de referencia ve el chord de Windows aun
+/// corriendo en Linux.
+pub fn all_default_bindings() -> Vec<(Key, Mods, Action, Option<Platform>)> {
+    let mut all: Vec<(Key, Mods, Action, Option<Platform>)> = base_bindings()
+        .into_iter()
+        .map(|(k, m, a)| (k, m, a, None))
+        .collect();
+    all.extend(
+        CONDITIONAL_BINDINGS
+            .iter()
+            .map(|c| (c.key, c.mods, c.action, Some(c.platform))),
+    );
+    all
 }
 
 pub fn parse_binding(s: &str) -> Option<(Key, Mods)> {
@@ -287,6 +432,91 @@ pub fn normalize_binding_key(key: Key, mods: Mods) -> Key {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ALL_ACTIONS: &[Action] = &[
+        Action::Copy,
+        Action::Paste,
+        Action::PastePrimary,
+        Action::ToggleCopyMode,
+        Action::ToggleSearch,
+        Action::ScrollLineUp,
+        Action::ScrollLineDown,
+        Action::ScrollPageUp,
+        Action::ScrollPageDown,
+        Action::ScrollToBottom,
+        Action::JumpToPrevPrompt,
+        Action::JumpToNextPrompt,
+        Action::FontZoomIn,
+        Action::FontZoomOut,
+        Action::FontZoomReset,
+        Action::ToggleThemePicker,
+        Action::NewTab,
+        Action::CloseTab,
+        Action::NextTab,
+        Action::PrevTab,
+        Action::GotoTab(3),
+        Action::SplitPane,
+        Action::ToggleSplit,
+        Action::SwapSplit,
+        Action::FocusNextPane,
+        Action::FocusPrevPane,
+        Action::FocusPaneUp,
+        Action::FocusPaneDown,
+        Action::FocusPaneLeft,
+        Action::FocusPaneRight,
+        Action::ClosePane,
+        Action::ToggleFpsCounter,
+        Action::ExtendSelectionWordLeft,
+        Action::ExtendSelectionWordRight,
+        Action::ExtendSelectionLineStart,
+        Action::ExtendSelectionLineEnd,
+        Action::ExtendSelectionViewportStart,
+        Action::ExtendSelectionViewportEnd,
+    ];
+
+    /// Round-trip R11: `as_str` es la inversa de `parse_action` para toda accion.
+    #[test]
+    fn action_as_str_round_trips_through_parse_action() {
+        for action in ALL_ACTIONS {
+            assert_eq!(
+                parse_action(&action.as_str()),
+                Some(*action),
+                "as_str/parse_action no coinciden para {action:?}"
+            );
+        }
+    }
+
+    /// Round-trip R11: `format_binding` es la inversa de `parse_binding` para
+    /// todo binding por defecto documentable (incluye entradas condicionales).
+    #[test]
+    fn format_binding_round_trips_through_parse_binding_for_all_default_bindings() {
+        for (key, mods, action, _platform) in all_default_bindings() {
+            let chord = format_binding(key, mods);
+            assert_eq!(
+                parse_binding(&chord),
+                Some((key, mods)),
+                "chord '{chord}' (accion {action:?}) no vuelve a parsear igual"
+            );
+        }
+    }
+
+    /// La tabla de condicionales es la unica fuente: en Windows,
+    /// `Keybindings::default` debe contener exactamente esas entradas ademas
+    /// de la base; en el resto, ninguna.
+    #[test]
+    fn conditional_bindings_platform_table_matches_runtime_default() {
+        let kb = Keybindings::default();
+        for c in CONDITIONAL_BINDINGS {
+            let present = kb.lookup(c.key, c.mods) == Some(c.action);
+            #[cfg(windows)]
+            assert!(present, "binding condicional de Windows ausente en runtime");
+            #[cfg(not(windows))]
+            assert!(
+                !present,
+                "binding condicional de Windows presente fuera de Windows"
+            );
+        }
+    }
 
     #[test]
     fn test_default_bindings_copy_paste() {

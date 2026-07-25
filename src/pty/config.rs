@@ -1,5 +1,5 @@
 /// Tipo de sesión soportada por el backend de PTY.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionKind {
     /// Sesión nativa de la plataforma (shell por defecto).

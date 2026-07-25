@@ -67,6 +67,20 @@ pub fn available_presets() -> &'static [&'static str] {
     PRESET_NAMES
 }
 
+/// Catalogo de presets resueltos: nombre y su `ThemeConfig` parseado. Fuente
+/// unica para el generador de referencia (R3): itera esto, no duplica la
+/// lista de nombres ni transcribe paletas a mano.
+pub fn preset_entries() -> Vec<(&'static str, ThemeConfig)> {
+    PRESET_NAMES
+        .iter()
+        .map(|&name| {
+            let theme = try_preset(name)
+                .unwrap_or_else(|e| panic!("preset embebido '{name}' invalido: {e:?}"));
+            (name, theme)
+        })
+        .collect()
+}
+
 /// Contraste mínimo exigido para texto legible sobre el fondo del tema.
 pub const MIN_LEGIBLE_CONTRAST: f64 = 3.0;
 

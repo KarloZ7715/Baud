@@ -24,18 +24,20 @@ pub mod watch;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub use crate::color::contrast_ratio_hex as contrast_ratio;
 pub use themes::MIN_COMMENT_CONTRAST;
-pub use themes::{available_presets, preset, try_preset, PresetError, MIN_LEGIBLE_CONTRAST};
+pub use themes::{
+    available_presets, preset, preset_entries, try_preset, PresetError, MIN_LEGIBLE_CONTRAST,
+};
 
 // ---------------------------------------------------------------------------
 // Estructuras principales
 // ---------------------------------------------------------------------------
 
 /// Configuración global del emulador.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(from = "RawConfig")]
 pub struct Config {
     #[serde(default)]
@@ -78,7 +80,7 @@ pub struct Config {
 }
 
 /// Opciones de depuración (off por defecto).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct DebugConfig {
     /// Permite activar el contador de FPS con el atajo de teclado.
     #[serde(default)]
@@ -86,7 +88,7 @@ pub struct DebugConfig {
 }
 
 /// Diagnósticos locales: watchdog y logging.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct DiagnosticsConfig {
     /// Activa el hilo watchdog del event loop. Requiere reinicio.
     #[serde(default)]
@@ -100,7 +102,7 @@ pub struct DiagnosticsConfig {
 }
 
 /// Configuración de reporte remoto de errores (Sentry).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ReportingConfig {
     /// `None` = no se ha decidido aún; `Some(true)` = aceptado; `Some(false)` = rechazado.
     #[serde(default)]
@@ -111,7 +113,7 @@ pub struct ReportingConfig {
 }
 
 /// Configuración de render de la GUI.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RenderConfig {
     /// FPS máximo de redraw. `0` desactiva el límite.
     #[serde(default = "default_render_max_fps")]
@@ -148,14 +150,14 @@ impl RenderConfig {
 }
 
 /// Notificaciones de escritorio via OSC 9 / OSC 777. Off por defecto.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct NotificationsConfig {
     #[serde(default)]
     pub enabled: bool,
 }
 
 /// Apariencia del overlay de status (duración y colores opcionales).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StatusConfig {
     /// Duración del overlay en ms (`0` = sin auto-dismiss).
     #[serde(default = "default_status_duration")]
@@ -183,7 +185,7 @@ impl Default for StatusConfig {
 }
 
 /// Configuración de selección de texto.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SelectionConfig {
     /// Copiar al soltar el boton izquierdo. Off por defecto.
     #[serde(default)]
@@ -207,7 +209,7 @@ pub struct SelectionConfig {
 }
 
 /// Configuración del copy mode.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CopyModeConfig {
     /// Habilitar copy mode. On por defecto.
     #[serde(default = "default_true")]
@@ -215,7 +217,7 @@ pub struct CopyModeConfig {
 }
 
 /// Colores del tema de terminal (ANSI de 16 colores + extras).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct ThemeConfig {
     #[serde(default = "default_foreground")]
     pub foreground: String,
@@ -446,7 +448,7 @@ impl Default for Config {
 }
 
 /// Configuración de la fuente (tipografía y tamaño).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FontConfig {
     #[serde(default = "default_font_family")]
     pub family: String,
@@ -469,7 +471,7 @@ pub struct FontConfig {
 }
 
 /// Desplazamiento fino del glifo dentro de la celda.
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
 pub struct GlyphOffset {
     #[serde(default)]
     pub x: f32,
@@ -478,7 +480,7 @@ pub struct GlyphOffset {
 }
 
 /// Estado inicial de la ventana al arrancar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StartupState {
     #[default]
@@ -488,7 +490,7 @@ pub enum StartupState {
 }
 
 /// Configuración de la ventana (opacidad, padding, decoraciones, tamaño).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WindowConfig {
     /// 0..=1. Valores menores a 1 dejan ver el escritorio a través del fondo por defecto.
     #[serde(default = "default_opacity")]
@@ -518,7 +520,7 @@ fn default_win_height() -> u32 {
 }
 
 /// Layout de panes (dwindle Hyprland).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PanesConfig {
     /// Máximo de panes por tab. 0 = sin límite.
     #[serde(default = "default_max_panes")]
@@ -554,7 +556,7 @@ impl Default for PanesConfig {
 }
 
 /// Límite de líneas en scrollback (configurable; ver `unlimited`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ScrollbackConfig {
     /// Máximo de líneas guardadas. Con `0` no se almacena scrollback.
     #[serde(default = "default_scrollback_lines")]
@@ -595,7 +597,7 @@ impl Default for ScrollbackConfig {
 }
 
 /// Apariencia del cursor (color, forma, parpadeo).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CursorConfig {
     /// `None` usa `theme.cursor`.
     #[serde(default)]
@@ -633,7 +635,7 @@ impl Default for CursorConfig {
 }
 
 /// Proceso hijo del PTY (`[process]` en TOML).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ProcessSection {
     pub program: Option<String>,
     #[serde(default)]
@@ -1206,6 +1208,46 @@ mod tests {
         assert!(!config.selection.bypass_contains("alt"));
         // Copy mode habilitado por defecto
         assert!(config.copy_mode.enabled);
+    }
+
+    /// U1/R10: `Serialize` es aditivo. El TOML que produce `Config::default()`
+    /// debe re-parsear a los mismos valores observables.
+    #[test]
+    fn serialized_default_round_trips_through_toml() {
+        let original = Config::default();
+        let serialized =
+            toml::to_string(&original).expect("Config::default() debe serializar a TOML");
+        let roundtripped: Config =
+            toml::from_str(&serialized).expect("el TOML serializado debe re-parsear");
+
+        assert_eq!(roundtripped.theme, original.theme);
+        assert_eq!(roundtripped.font.family, original.font.family);
+        assert_eq!(roundtripped.font.size, original.font.size);
+        assert_eq!(roundtripped.window.opacity, original.window.opacity);
+        assert_eq!(roundtripped.window.width, original.window.width);
+        assert_eq!(
+            roundtripped.selection.copy_on_select_target,
+            original.selection.copy_on_select_target
+        );
+        assert_eq!(roundtripped.scrollback.lines, original.scrollback.lines);
+        assert_eq!(roundtripped.cursor.style, original.cursor.style);
+        assert_eq!(roundtripped.bold_is_bright, original.bold_is_bright);
+        assert_eq!(roundtripped.allow_osc52_read, original.allow_osc52_read);
+        assert_eq!(
+            roundtripped.notifications.enabled,
+            original.notifications.enabled
+        );
+        assert_eq!(roundtripped.panes.max, original.panes.max);
+        assert_eq!(roundtripped.status.duration_ms, original.status.duration_ms);
+        assert_eq!(
+            roundtripped.diagnostics.watchdog,
+            original.diagnostics.watchdog
+        );
+        assert_eq!(
+            roundtripped.debug.fps_counter_enabled,
+            original.debug.fps_counter_enabled
+        );
+        assert_eq!(roundtripped.render.max_fps, original.render.max_fps);
     }
 
     #[test]
