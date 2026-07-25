@@ -35,6 +35,9 @@ jobs:
       - name: Clippy (sin warnings)
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Verificar paginas de referencia generadas
+        run: cargo run --bin docs-gen -- --check
+
   # Job 2: tests
   test:
     name: tests
