@@ -191,11 +191,15 @@ jobs:
           fi
 
       # Solo enlaces internos (--offline): los externos quedan excluidos a
-      # proposito para no fallar por caidas de terceros
+      # proposito para no fallar por caidas de terceros. Se excluye
+      # "/Baud/" porque mdBook inyecta un <base href="/Baud/"> absoluto en
+      # 404.html (a partir de site-url en book.toml) para que la pagina 404
+      # funcione bajo cualquier profundidad de ruta en GitHub Pages; ese
+      # href solo es resoluble una vez publicado bajo el subpath real.
       - name: Link check interno
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
-          args: --offline --no-progress --root-dir docs/site/book 'docs/site/book/**/*.html'
+          args: --offline --no-progress --root-dir docs/site/book --exclude '^/Baud/$' 'docs/site/book/**/*.html'
 
       - name: Subir artifact de Pages
         if: github.event_name != 'pull_request'
