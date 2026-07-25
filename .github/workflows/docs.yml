@@ -45,6 +45,151 @@ jobs:
       - name: Compilar libro
         run: mdbook build docs/site
 
+      # Genera sitemap.xml, robots.txt, meta descripciones por pagina, el
+      # banner de version y el footer de retroalimentacion.
+      - name: Post-procesar HTML para descubrimiento y feedback
+        env:
+          SITE_URL: "https://karloz7715.github.io/Baud/"
+        run: |
+          python3 - <<'PY'
+          import html
+          import os
+          import re
+          import urllib.parse
+          from html.parser import HTMLParser
+          from pathlib import Path
+
+          BOOK = Path("docs/site/book")
+          SITE_URL = os.environ["SITE_URL"].rstrip("/") + "/"
+          SUMMARY = Path("docs/site/src/SUMMARY.md")
+          REPO = "https://github.com/KarloZ7715/Baud"
+
+          # ---- sitemap y robots ----
+          links = []
+          for line in SUMMARY.read_text(encoding="utf-8").splitlines():
+              m = re.match(r"^\s*(?:-\s+)?\[([^\]]+)\]\(([^)]+)\)", line)
+              if not m:
+                  continue
+              path = m.group(2).strip()
+              if not path or path.startswith("http") or not path.endswith(".md"):
+                  continue
+              if path == "index.md":
+                  links.append("")
+              else:
+                  links.append(path[:-3] + ".html")
+
+          sitemap = ['<?xml version="1.0" encoding="UTF-8"?>']
+          sitemap.append('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">')
+          for rel in links:
+              sitemap.append(f"  <url><loc>{SITE_URL}{rel}</loc></url>")
+          sitemap.append("</urlset>")
+          (BOOK / "sitemap.xml").write_text("\n".join(sitemap) + "\n", encoding="utf-8")
+
+          robots = f"""User-agent: *
+          Allow: /
+          Sitemap: {SITE_URL}sitemap.xml
+          """
+          (BOOK / "robots.txt").write_text(robots, encoding="utf-8")
+
+          # ---- parser para el primer parrafo fuera de blockquote ----
+          class FirstParagraphParser(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.in_main = False
+                  self.blockquote_depth = 0
+                  self.in_target_p = False
+                  self.text = []
+                  self.done = False
+
+              def handle_starttag(self, tag, attrs):
+                  if self.done:
+                      return
+                  if tag == "main":
+                      self.in_main = True
+                  elif self.in_main and tag == "blockquote":
+                      self.blockquote_depth += 1
+                  elif self.in_main and tag == "p" and self.blockquote_depth == 0 and not self.text:
+                      self.in_target_p = True
+
+              def handle_endtag(self, tag):
+                  if self.done:
+                      return
+                  if tag == "main" and self.in_main:
+                      self.in_main = False
+                  elif tag == "blockquote" and self.blockquote_depth > 0:
+                      self.blockquote_depth -= 1
+                  elif tag == "p" and self.in_target_p:
+                      self.in_target_p = False
+                      self.done = True
+
+              def handle_data(self, data):
+                  if self.in_target_p and not self.done:
+                      self.text.append(data)
+
+          def first_paragraph(page_html):
+              parser = FirstParagraphParser()
+              parser.feed(page_html)
+              text = html.unescape("".join(parser.text))
+              text = re.sub(r"\s+", " ", text).strip()
+              return text
+
+          # ---- inyectar descripcion, banner y footer ----
+          meta_re = re.compile(r'<meta name="description" content="[^"]*">')
+
+          for html_path in sorted(BOOK.rglob("*.html")):
+              rel = html_path.relative_to(BOOK)
+              if rel.name == "print.html":
+                  continue
+
+              page_html = html_path.read_text(encoding="utf-8")
+              source_md = str(rel.with_suffix(".md"))
+
+              desc = first_paragraph(page_html)
+              if not desc:
+                  desc = f"Baud documentation page for {source_md}"
+              if len(desc) > 160:
+                  desc = desc[:157].rstrip() + "..."
+
+              page_html = meta_re.sub(f'<meta name="description" content="{html.escape(desc)}">', page_html, count=1)
+
+              # Banner con enlace relativo al changelog
+              depth = len(rel.parent.parts)
+              changelog_link = ("../" * depth) + "changelog.html" if depth else "changelog.html"
+              banner = (
+                  f'<div class="baud-banner">'
+                  f'This site tracks the <code>master</code> branch. '
+                  f'Baud is pre-1.0 software. See the <a href="{changelog_link}">changelog</a>.'
+                  f'</div>'
+              )
+              page_html = page_html.replace("<main>", f"<main>\n{banner}", 1)
+
+              # Footer con enlace al issue template y la ruta del fuente
+              issue_url = f"{REPO}/issues/new?template=docs_issue.yml&page={urllib.parse.quote(source_md)}"
+              footer = (
+                  f'<div class="baud-feedback">'
+                  f'Found a problem on this page? '
+                  f'<a href="{issue_url}">Open a documentation issue</a> '
+                  f'(page: <code>{html.escape(source_md)}</code>).'
+                  f'</div>'
+              )
+              page_html = page_html.replace("</main>", f"\n{footer}\n</main>", 1)
+
+              html_path.write_text(page_html, encoding="utf-8")
+          PY
+
+      # Un enlace interno escrito como URL absoluta romperia el dia que el
+      # sitio se mueva bajo un prefijo de version, asi que fallamos si existe.
+      # Se excluye changelog.html y print.html porque el encabezado del
+      # changelog cita deliberadamente la URL publica de la documentacion.
+      - name: Rechazar enlaces internos absolutos
+        run: |
+          if grep -R -E 'href="https://karloz7715\.github\.io/Baud/|src="https://karloz7715\.github\.io/Baud/' \
+            docs/site/book --include='*.html' \
+            --exclude='changelog.html' --exclude='print.html'; then
+            echo "Error: internal links must be relative, not absolute URLs" >&2
+            exit 1
+          fi
+
       # Solo enlaces internos (--offline): los externos quedan excluidos a
       # proposito para no fallar por caidas de terceros
       - name: Link check interno

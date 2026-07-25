@@ -12,6 +12,7 @@ build-dir = "book"
 default-theme = "coal"
 preferred-dark-theme = "coal"
 smart-punctuation = true
+site-url = "/Baud/"
 git-repository-url = "https://github.com/KarloZ7715/Baud"
 edit-url-template = "https://github.com/KarloZ7715/Baud/edit/master/docs/site/{path}"
 additional-css = ["theme/custom.css"]
