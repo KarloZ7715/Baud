@@ -21,7 +21,7 @@ You need a Rust toolchain matching the MSRV declared in `Cargo.toml`:
     libxi-dev libxrandr-dev libvulkan-dev libfontconfig1-dev
   ```
 
-- On Windows, Windows 10 1809+ and a DX12-capable GPU driver are expected. The Windows build links the MSVC C runtime statically, so no separate redistributable is needed.
+- On Windows, Windows 10 1809+ and a DX12-capable GPU driver are expected. Release artifacts are built with `RUSTFLAGS="-C target-feature=+crt-static"`, so they do not need a separate Visual C++ Redistributable; local debug builds use the default dynamic CRT.
 
 Clone the repository and install the git hooks once:
 
@@ -72,7 +72,7 @@ LIBGL_ALWAYS_SOFTWARE=1 RUST_LOG=baud=debug,wgpu_core=warn,winit=warn baud
 Use Conventional Commits with one of these types:
 
 ```
-feat|fix|chore|docs|style|refactor|perf|test|build|ci
+feat|fix|chore|docs|style|refactor|perf|test|build|ci|security
 ```
 
 Examples:

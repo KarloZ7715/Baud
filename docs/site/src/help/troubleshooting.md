@@ -31,7 +31,7 @@ On Windows, check that your GPU driver supports DX12 and that Windows is at leas
 
 ### Keybindings not taking effect
 
-Check the log for a warning containing the text `keybinding invalido`. The action or chord name must match the strings in the [keybindings reference](../reference/keybindings.md) exactly.
+Check the log for a warning containing the text `keybinding invalid`. The action or chord name must match the strings in the [keybindings reference](../reference/keybindings.md) exactly.
 
 ### Configuration changes not applying
 
