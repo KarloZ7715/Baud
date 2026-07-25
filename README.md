@@ -6,7 +6,7 @@ A terminal emulator written from scratch in Rust. GPU-accelerated rendering, PTY
 
 ## Documentacion
 
-*(in development)*
+Full documentation: **<https://karloz7715.github.io/Baud/>**
 
 ## Experimental Installation (Linux x86_64)
 
