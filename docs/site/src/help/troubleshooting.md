@@ -36,3 +36,21 @@ Check the log for a warning containing the text `keybinding invalid`. The action
 ### Configuration changes not applying
 
 Baud hot-reloads the config file when it changes. If the file fails to parse, Baud keeps the previous config and shows a brief status message. Check the log for parse errors.
+
+## Logging
+
+Without `RUST_LOG` set, Baud logs at `baud=warn,wgpu_core=warn,winit=warn` — warnings and errors only. Set `RUST_LOG` to raise the level for any of those targets, as in the debug-logging example above.
+
+## The watchdog
+
+Set `diagnostics.watchdog = true` (off by default) to run a background thread that checks the GUI event loop's heartbeat every 2 seconds. If the loop goes quiet for a full interval — usually a GPU, mutex, or I/O stall — it logs a `baud::watchdog` warning naming the handler that was active when the stall started, which narrows down what to look at next. It only detects and logs; it does not attempt to recover the frozen loop.
+
+## Display quirks
+
+At startup Baud detects your display backend (Wayland or X11) and, on Wayland, the compositor family (from `XDG_CURRENT_DESKTOP`, `DESKTOP_SESSION`, or `HYPRLAND_INSTANCE_SIGNATURE`), and adjusts a few behaviors accordingly:
+
+- **Hyprland**: forces an initial redraw request, since Hyprland windows have a documented hang if the first frame isn't presented promptly.
+- **Any Wayland session**: also forces that initial redraw (the surface otherwise doesn't appear until the first present), and moving the mouse out of the window stops delivering motion events (a Wayland protocol limitation, not a Baud bug).
+- **Primary selection**: assumed usable on X11 and on Wayland under Hyprland, wlroots-based compositors (Sway and similar), and KDE — but assumed *not* usable under GNOME Wayland, which often doesn't expose a working primary selection.
+
+These are heuristics from environment variables, resolved once at startup and logged at `info` level — see them in your log as `display quirks resueltos`.
