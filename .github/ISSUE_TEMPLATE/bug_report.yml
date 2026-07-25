@@ -1,0 +1,89 @@
+name: Bug report
+description: Report a problem with Baud.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill every field below; the [troubleshooting page](https://karloz7715.github.io/Baud/help/troubleshooting.html) explains how to collect each item.
+
+  - type: input
+    id: version
+    attributes:
+      label: Baud version
+      description: Output of `baud version`.
+      placeholder: "0.0.7"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and version
+      description: For example, "Fedora 42", "Ubuntu 24.04", "Windows 11 23H2".
+      placeholder: "Fedora 42"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: session
+    attributes:
+      label: Session type
+      description: Which display session was Baud running under?
+      options:
+        - Wayland
+        - X11
+        - Windows
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      description: For example, "Intel UHD 620 / Mesa 24.1", "NVIDIA RTX 3060 / 555.58".
+      placeholder: "Intel UHD 620 / Mesa 24.1"
+    validations:
+      required: true
+
+  - type: input
+    id: term
+    attributes:
+      label: TERM
+      description: Value of the `TERM` environment variable inside Baud.
+      placeholder: "xterm-256color"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: |
+        1. Launch Baud with `baud`.
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log excerpt
+      description: |
+        Run Baud with debug logging and paste the relevant lines:
+
+        ```sh
+        RUST_LOG=baud=debug,wgpu_core=warn,winit=warn baud
+        ```
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I read the [troubleshooting page](https://karloz7715.github.io/Baud/help/troubleshooting.html) and collected the items above.
+          required: true

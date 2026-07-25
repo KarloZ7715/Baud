@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://karloz7715.github.io/Baud/
+    about: Read the documentation before opening an issue.
+  - name: Troubleshooting
+    url: https://karloz7715.github.io/Baud/help/troubleshooting.html
+    about: Collect the data a bug report needs.
