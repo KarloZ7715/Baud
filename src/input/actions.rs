@@ -272,7 +272,7 @@ impl Keybindings {
         for (combo, action) in overrides {
             match (parse_binding(combo), parse_action(action)) {
                 (Some((k, m)), Some(a)) => kb.set(k, m, a),
-                _ => tracing::warn!("keybinding invalido: '{}' -> '{}'", combo, action),
+                _ => tracing::warn!("keybinding invalid: '{}' -> '{}'", combo, action),
             }
         }
         kb
