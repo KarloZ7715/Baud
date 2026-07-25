@@ -1,0 +1,49 @@
+.TH BAUD 1 "" "baud 0.0.7" "User Commands"
+.SH NAME
+baud \- A fast, feature\-rich, GPU\-accelerated, cross\-platform terminal emulator
+.SH SYNOPSIS
+.B baud
+[\fIOPTIONS\fR] [\fICOMMAND\fR]
+.SH DESCRIPTION
+A fast, feature\-rich, GPU\-accelerated, cross\-platform terminal emulator
+With no arguments, baud launches the graphical terminal. The commands and options below are resolved before the graphical backend starts, so they also work in a broken graphical session.
+.SH OPTIONS
+.TP
+\fBupdate\fR
+Update Baud to the latest release
+.TP
+\fBversion\fR
+Print the installed Baud version
+.TP
+\fBhelp\fR
+Show this help message
+.TP
+\fB\-e <command> [args...]\fR
+Execute command and its arguments in the PTY
+.TP
+\fB\-\-working\-directory <dir>\fR
+Set the initial working directory for the child process
+.TP
+\fB\-\-title <text>\fR
+Set the initial window title
+.TP
+\fB\-\-app\-id <id>\fR
+Set the Wayland app_id / X11 WM_CLASS instance
+.TP
+\fB\-\-hold\fR
+Keep the window open after the command exits
+.TP
+\fB\-v, \-\-version\fR
+Print the installed Baud version
+.TP
+\fB\-h, \-\-help\fR
+Show this help message
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/baud/config.toml
+or ~/.config/baud/config.toml on Linux; %APPDATA%\\baud\\config.toml on Windows.
+.TP
+.I ./baud.toml
+Working\-directory fallback, checked if the file above is not found.
+.SH SEE ALSO
+Full documentation: \fIhttps://github.com/KarloZ7715/Baud\fR

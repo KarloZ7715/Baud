@@ -15,11 +15,13 @@ setup_staging() {
     mkdir -p "$tmpdir/staging/share/applications"
     mkdir -p "$tmpdir/staging/share/icons/hicolor/48x48/apps"
     mkdir -p "$tmpdir/staging/share/icons/hicolor/256x256/apps"
+    mkdir -p "$tmpdir/staging/share/man/man1"
     printf '#!/bin/sh\necho fixture\n' > "$tmpdir/staging/baud"
     chmod 755 "$tmpdir/staging/baud"
     printf '[Desktop Entry]\nName=Fixture\nExec=baud\nIcon=baud\n' > "$tmpdir/staging/share/applications/baud.desktop"
     printf 'fake48png' > "$tmpdir/staging/share/icons/hicolor/48x48/apps/baud.png"
     printf 'fake256png' > "$tmpdir/staging/share/icons/hicolor/256x256/apps/baud.png"
+    printf '.TH BAUD 1\n' > "$tmpdir/staging/share/man/man1/baud.1"
 }
 
 make_bundle() {
@@ -85,6 +87,17 @@ make_manifest
 sign_manifest
 if "$repo_root/tools/packaging/verify_release_assets.sh" "$dist"; then
     echo "Error: missing 256 px icon unexpectedly passed" >&2
+    exit 1
+fi
+
+# ── negative: missing man page ──
+setup_staging
+rm -f "$tmpdir/staging/share/man/man1/baud.1"
+make_bundle
+make_manifest
+sign_manifest
+if "$repo_root/tools/packaging/verify_release_assets.sh" "$dist"; then
+    echo "Error: missing man page unexpectedly passed" >&2
     exit 1
 fi
 

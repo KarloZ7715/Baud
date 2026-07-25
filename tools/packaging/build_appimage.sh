@@ -45,6 +45,7 @@ trap 'rm -rf -- "$APPDIR"' EXIT
 
 ICON_48="$REPO_ROOT/assets/icons/hicolor/48x48/apps/baud.png"
 LICENSE_FILE="$REPO_ROOT/LICENSE"
+MAN_FILE="$REPO_ROOT/packaging/man/baud.1"
 
 if [[ ! -f "$ICON_48" ]]; then
     echo "Error: 48x48 icon not found at $ICON_48" >&2
@@ -56,6 +57,11 @@ if [[ ! -f "$LICENSE_FILE" ]]; then
     exit 1
 fi
 
+if [[ ! -f "$MAN_FILE" ]]; then
+    echo "Error: man page not found at $MAN_FILE" >&2
+    exit 1
+fi
+
 echo "Creating AppDir at $APPDIR..."
 
 mkdir -p "$APPDIR/usr/bin"
@@ -63,12 +69,14 @@ mkdir -p "$APPDIR/usr/share/applications"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/48x48/apps"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 mkdir -p "$APPDIR/usr/share/doc/baud"
+mkdir -p "$APPDIR/usr/share/man/man1"
 
 cp "$BINARY" "$APPDIR/usr/bin/baud"
 cp "$DESKTOP_FILE" "$APPDIR/usr/share/applications/baud.desktop"
 cp "$ICON_48" "$APPDIR/usr/share/icons/hicolor/48x48/apps/baud.png"
 cp "$ICON_256" "$APPDIR/usr/share/icons/hicolor/256x256/apps/baud.png"
 cp "$LICENSE_FILE" "$APPDIR/usr/share/doc/baud/LICENSE"
+cp "$MAN_FILE" "$APPDIR/usr/share/man/man1/baud.1"
 
 LINUXDEPLOY="$REPO_ROOT/tools/packaging/.cache/linuxdeploy-x86_64.AppImage"
 if [[ ! -f "$LINUXDEPLOY" ]]; then

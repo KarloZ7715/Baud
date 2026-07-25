@@ -18,8 +18,9 @@ fi
 DESKTOP_SRC="$REPO_ROOT/packaging/linux/baud.desktop"
 ICON_48_SRC="$REPO_ROOT/assets/icons/hicolor/48x48/apps/baud.png"
 ICON_256_SRC="$REPO_ROOT/assets/icons/hicolor/256x256/apps/baud.png"
+MAN_SRC="$REPO_ROOT/packaging/man/baud.1"
 
-for src in "$DESKTOP_SRC" "$ICON_48_SRC" "$ICON_256_SRC"; do
+for src in "$DESKTOP_SRC" "$ICON_48_SRC" "$ICON_256_SRC" "$MAN_SRC"; do
     if [[ ! -f "$src" ]]; then
         echo "Error: packaging resource not found: $src" >&2
         exit 1
@@ -62,6 +63,9 @@ cp "$ICON_48_SRC" "$staging/share/icons/hicolor/48x48/apps/baud.png"
 
 mkdir -p "$staging/share/icons/hicolor/256x256/apps"
 cp "$ICON_256_SRC" "$staging/share/icons/hicolor/256x256/apps/baud.png"
+
+mkdir -p "$staging/share/man/man1"
+cp "$MAN_SRC" "$staging/share/man/man1/baud.1"
 
 mkdir -p "$DIST_DIR"
 tar czf "$DIST_DIR/$TARBALL_NAME" -C "$staging" baud share

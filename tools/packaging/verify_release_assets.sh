@@ -70,6 +70,7 @@ expected_files=(
     "share/applications/baud.desktop"
     "share/icons/hicolor/48x48/apps/baud.png"
     "share/icons/hicolor/256x256/apps/baud.png"
+    "share/man/man1/baud.1"
 )
 
 tar_entries="$(tar tzf "$dist_dir/$required_tarball")"

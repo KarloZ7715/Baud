@@ -42,7 +42,88 @@ pub enum Action {
     ExtendSelectionViewportEnd,
 }
 
+/// Familia de una accion, usada para agrupar el cheatsheet (R13b) por tema
+/// en vez de por orden de declaracion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionFamily {
+    Scrolling,
+    Tabs,
+    Panes,
+    Selection,
+    Search,
+    Appearance,
+}
+
+impl ActionFamily {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ActionFamily::Scrolling => "Scrolling",
+            ActionFamily::Tabs => "Tabs",
+            ActionFamily::Panes => "Panes",
+            ActionFamily::Selection => "Selection",
+            ActionFamily::Search => "Search",
+            ActionFamily::Appearance => "Appearance",
+        }
+    }
+}
+
+/// Orden de despliegue de las familias en el cheatsheet.
+pub const ACTION_FAMILY_ORDER: &[ActionFamily] = &[
+    ActionFamily::Scrolling,
+    ActionFamily::Tabs,
+    ActionFamily::Panes,
+    ActionFamily::Selection,
+    ActionFamily::Search,
+    ActionFamily::Appearance,
+];
+
 impl Action {
+    /// Familia tematica de la accion. El match es exhaustivo a proposito y
+    /// sin brazo comodin: una accion nueva sin familia asignada no compila
+    /// (R13b: "an action with no family assigned is a hard error").
+    pub fn family(&self) -> ActionFamily {
+        match self {
+            Action::ScrollLineUp
+            | Action::ScrollLineDown
+            | Action::ScrollPageUp
+            | Action::ScrollPageDown
+            | Action::ScrollToBottom
+            | Action::JumpToPrevPrompt
+            | Action::JumpToNextPrompt => ActionFamily::Scrolling,
+            Action::NewTab
+            | Action::CloseTab
+            | Action::NextTab
+            | Action::PrevTab
+            | Action::GotoTab(_) => ActionFamily::Tabs,
+            Action::SplitPane
+            | Action::ToggleSplit
+            | Action::SwapSplit
+            | Action::FocusNextPane
+            | Action::FocusPrevPane
+            | Action::FocusPaneUp
+            | Action::FocusPaneDown
+            | Action::FocusPaneLeft
+            | Action::FocusPaneRight
+            | Action::ClosePane => ActionFamily::Panes,
+            Action::Copy
+            | Action::Paste
+            | Action::PastePrimary
+            | Action::ToggleCopyMode
+            | Action::ExtendSelectionWordLeft
+            | Action::ExtendSelectionWordRight
+            | Action::ExtendSelectionLineStart
+            | Action::ExtendSelectionLineEnd
+            | Action::ExtendSelectionViewportStart
+            | Action::ExtendSelectionViewportEnd => ActionFamily::Selection,
+            Action::ToggleSearch => ActionFamily::Search,
+            Action::FontZoomIn
+            | Action::FontZoomOut
+            | Action::FontZoomReset
+            | Action::ToggleThemePicker
+            | Action::ToggleFpsCounter => ActionFamily::Appearance,
+        }
+    }
+
     /// Nombre canonico aceptado por [`parse_action`]. Es la inversa de
     /// `parse_action`: para toda `a`, `parse_action(&a.as_str()) == Some(a)`.
     pub fn as_str(&self) -> String {
@@ -484,6 +565,22 @@ mod tests {
                 "as_str/parse_action no coinciden para {action:?}"
             );
         }
+    }
+
+    /// R13b: cada binding por defecto documentable tiene una familia (el
+    /// match exhaustivo de `Action::family` ya lo garantiza en compilacion;
+    /// esto fija el mapeo esperado para las acciones mas representativas).
+    #[test]
+    fn action_family_covers_default_bindings() {
+        for (_, _, action, _) in all_default_bindings() {
+            let _ = action.family();
+        }
+        assert_eq!(Action::ScrollLineUp.family(), ActionFamily::Scrolling);
+        assert_eq!(Action::NewTab.family(), ActionFamily::Tabs);
+        assert_eq!(Action::SplitPane.family(), ActionFamily::Panes);
+        assert_eq!(Action::Copy.family(), ActionFamily::Selection);
+        assert_eq!(Action::ToggleSearch.family(), ActionFamily::Search);
+        assert_eq!(Action::ToggleThemePicker.family(), ActionFamily::Appearance);
     }
 
     /// Round-trip R11: `format_binding` es la inversa de `parse_binding` para
