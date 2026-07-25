@@ -20,7 +20,7 @@ If a chord or action name in `[keys]` fails to parse, that single entry is skipp
 
 ## Platform-specific chords
 
-Almost every default binding is identical on Linux and Windows. The one exception today is the theme picker: `ctrl+alt+t` opens it on both platforms, but Windows also binds `ctrl+alt+shift+t` to the same action, since `ctrl+alt+t` can be intercepted by other software on some Windows setups. The [keybindings reference](../reference/keybindings.md) marks every row's platform explicitly, so you can tell at a glance whether a chord is universal or Windows-only.
+Almost every default binding is identical on Linux and Windows. The one exception today is the theme picker: `ctrl+alt+t` opens it on both platforms, but on some Windows keyboard layouts (AltGr-based ones, like Icelandic) that physical combination composes an entirely different character instead of `t`, so matching by logical character alone can miss it. Windows additionally binds `ctrl+alt+shift+t` to the same action as a layout-independent alternative. The [keybindings reference](../reference/keybindings.md) marks every row's platform explicitly, so you can tell at a glance whether a chord is universal or Windows-only.
 
 ## Discovering action names
 
