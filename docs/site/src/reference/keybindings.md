@@ -32,7 +32,7 @@ Every default binding, as the exact chord and action strings `parse_binding` and
 | `ctrl+alt+up` | `jump_to_prev_prompt` | All |
 | `ctrl+alt+down` | `jump_to_next_prompt` | All |
 | `ctrl+shift+d` | `split_pane` | All |
-| `ctrl+shift+|` | `toggle_split` | All |
+| `ctrl+shift+\|` | `toggle_split` | All |
 | `ctrl+shift+s` | `swap_split` | All |
 | `ctrl+shift+]` | `focus_next_pane` | All |
 | `ctrl+shift+[` | `focus_prev_pane` | All |

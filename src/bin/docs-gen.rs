@@ -247,6 +247,15 @@ fn code_span(content: &str) -> String {
     }
 }
 
+/// Code span seguro dentro de una celda de tabla Markdown. mdBook parte las
+/// filas de tabla en celdas por `|` antes de reconocer code spans, asi que
+/// un pipe crudo (por ejemplo la chord `ctrl+shift+|`) rompe la fila aunque
+/// vaya entre backticks; escaparlo a `\|` lo deja intacto (pulldown-cmark
+/// desescapa el pipe de vuelta antes de renderizar el span).
+fn table_cell_code(content: &str) -> String {
+    code_span(&content.replace('|', "\\|"))
+}
+
 fn value_default(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => code_span(&format!("{s:?}")),
@@ -376,9 +385,9 @@ fn render_keybindings_md() -> String {
             Some(baud::input::actions::Platform::Windows) => "Windows",
         };
         out.push_str(&format!(
-            "| `{}` | `{}` | {} |\n",
-            chord,
-            action.as_str(),
+            "| {} | {} | {} |\n",
+            table_cell_code(&chord),
+            table_cell_code(&action.as_str()),
             platform_str
         ));
     }
@@ -482,9 +491,9 @@ fn render_cheatsheet_md() -> String {
                 Some(baud::input::actions::Platform::Windows) => "Windows",
             };
             out.push_str(&format!(
-                "| `{}` | `{}` | {} |\n",
-                chord,
-                action.as_str(),
+                "| {} | {} | {} |\n",
+                table_cell_code(&chord),
+                table_cell_code(&action.as_str()),
                 platform_str
             ));
         }
@@ -881,5 +890,20 @@ mod tests {
         let rendered = render_keybindings_md();
         assert!(rendered.contains("| Windows |"));
         assert!(rendered.contains("| All |"));
+    }
+
+    /// A raw `|` in a chord (`ctrl+shift+|`, toggle_split) breaks the
+    /// Markdown table row: mdBook splits cells on `|` before recognizing
+    /// code spans, so an unescaped pipe leaks into the next column even
+    /// inside backticks. Must render as `\|`, not a bare `|`.
+    #[test]
+    fn table_cells_escape_pipe_in_chord() {
+        for rendered in [render_keybindings_md(), render_cheatsheet_md()] {
+            assert!(
+                rendered.contains("`ctrl+shift+\\|`"),
+                "chord con pipe sin escapar en celda de tabla"
+            );
+            assert!(!rendered.contains("| `ctrl+shift+|` |"));
+        }
     }
 }

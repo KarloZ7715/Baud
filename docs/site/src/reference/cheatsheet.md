@@ -36,7 +36,7 @@ The same default bindings as the keybindings reference, grouped by what they're 
 | Chord | Action | Platform |
 | --- | --- | --- |
 | `ctrl+shift+d` | `split_pane` | All |
-| `ctrl+shift+|` | `toggle_split` | All |
+| `ctrl+shift+\|` | `toggle_split` | All |
 | `ctrl+shift+s` | `swap_split` | All |
 | `ctrl+shift+]` | `focus_next_pane` | All |
 | `ctrl+shift+[` | `focus_prev_pane` | All |
