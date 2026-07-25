@@ -732,8 +732,7 @@ mod tests {
         assert_eq!(encode_key(Key::Right, ctrl, d), Some(b"\x1b[1;5C".to_vec()));
     }
 
-    /// Table-driven: recorre la fila "Chords de nueva linea" de
-    /// docs/references/keybinding-matrix.md (columnas Baud clasico/kitty).
+    /// Table-driven: recorre la fila "Chords de nueva linea"
     /// Un cambio en esta tabla debe reflejarse tambien en el doc.
     #[test]
     fn test_matrix_newline_chords_table_driven() {

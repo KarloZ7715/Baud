@@ -1,0 +1,22 @@
+[book]
+title = "Baud"
+authors = ["KarloZ7715"]
+description = "A fast, feature-rich, GPU-accelerated, cross-platform terminal emulator"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "coal"
+preferred-dark-theme = "coal"
+smart-punctuation = true
+git-repository-url = "https://github.com/KarloZ7715/Baud"
+edit-url-template = "https://github.com/KarloZ7715/Baud/edit/master/docs/site/{path}"
+additional-css = ["theme/custom.css"]
+
+[output.html.search]
+enable = true
+use-boolean-and = true
+boost-title = 2
