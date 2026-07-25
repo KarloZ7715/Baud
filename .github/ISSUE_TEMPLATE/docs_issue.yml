@@ -1,6 +1,6 @@
 name: Documentation issue
 description: Report a mistake or gap in the documentation site.
-labels: ["docs"]
+labels: ["documentation"]
 body:
   - type: input
     id: page
