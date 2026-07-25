@@ -1,0 +1,77 @@
+name: Docs
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "docs/site/**"
+      - "CHANGELOG.md"
+      - "src/bin/docs-gen.rs"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "docs/site/**"
+      - "CHANGELOG.md"
+      - "src/bin/docs-gen.rs"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+# Un solo deploy de Pages a la vez; los pushes nuevos esperan, no cancelan
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build + link check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Instalar mdBook v0.5.4
+        run: |
+          curl -sL https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz | sudo tar xz -C /usr/local/bin
+          mdbook --version
+
+      # changelog.md tiene un unico hogar (CHANGELOG.md); se copia al fuente
+      # del libro antes de compilar y la copia esta ignorada por git
+      - name: Copiar changelog al libro
+        run: cp CHANGELOG.md docs/site/src/changelog.md
+
+      - name: Compilar libro
+        run: mdbook build docs/site
+
+      # Solo enlaces internos (--offline): los externos quedan excluidos a
+      # proposito para no fallar por caidas de terceros
+      - name: Link check interno
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: --offline --no-progress --root-dir docs/site/book 'docs/site/book/**/*.html'
+
+      - name: Configurar Pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+
+      - name: Subir artifact de Pages
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: docs/site/book
+
+  deploy:
+    name: deploy Pages
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Desplegar en GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
