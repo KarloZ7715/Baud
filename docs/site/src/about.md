@@ -4,7 +4,7 @@ Baud is a terminal emulator written from scratch in Rust. It renders through the
 
 ## Status
 
-Baud is pre-1.0 software (currently `0.0.7`). Linux x86_64 is the primary, actively tested platform. Windows support is experimental: it works, but the runtime CI gate that verifies ConPTY sessions on Windows still runs in soft mode (failures do not block a release), so regressions can slip through before that gate hardens. See [Platform notes](help/platform-notes.md) for the details.
+Baud is pre-1.0 software, see the [changelog](changelog.md) for the current version. Linux x86_64 is the primary, actively tested platform. Windows support is experimental: it works, but the runtime CI gate that verifies ConPTY sessions on Windows still runs in soft mode (failures do not block a release), so regressions can slip through before that gate hardens. See [Platform notes](help/platform-notes.md) for the details.
 
 There is no macOS build. The self-update command (`baud update`) and the install script only target Linux x86_64; Windows users update by downloading a new release manually.
 
