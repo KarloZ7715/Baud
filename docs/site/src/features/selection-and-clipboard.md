@@ -18,7 +18,7 @@ Extend an existing selection from the keyboard:
 
 ## Pasting
 
-`ctrl+shift+v` pastes from the clipboard. `shift+insert` pastes from the primary selection (X11/Wayland's separate "last selected text" buffer).
+`ctrl+shift+v` pastes from the clipboard. `shift+insert` pastes from the primary selection (X11/Wayland's separate "last selected text" buffer); on Windows, where there is no primary selection, it falls back to the regular clipboard instead of doing nothing.
 
 ## Bypassing mouse reporting
 

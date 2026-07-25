@@ -6,7 +6,7 @@ A consolidated list of things Baud does not do yet, gathered from the rest of th
 
 - **No macOS build.** Linux x86_64 and Windows are the only targets.
 - **Windows is experimental**, and self-update (`baud update`) doesn't work on Windows at all — see [Platform notes](platform-notes.md).
-- On Windows, only the theme picker, its persistence, and basic rendering have been confirmed in a real Windows session at the time of writing; several other surfaces (copy mode, the search overlay, pane/tab actions, clipboard, config reload, the status line) are expected to work the same as Linux but haven't been explicitly re-verified there.
+- On Windows, the theme picker, copy mode, the search overlay, pane/tab actions, clipboard, config reload, and the status line have all been confirmed working in a real Windows session.
 
 ## Rendering
 
