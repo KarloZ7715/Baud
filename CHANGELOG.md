@@ -6,6 +6,10 @@ Full documentation is published at <https://karloz7715.github.io/Baud/>.
 
 ## [Unreleased]
 
+### Fixed
+
+- *(windows)* embed app icon in exe and fix MSI external cab dependency
+
 ## [0.0.8](https://github.com/KarloZ7715/Baud/compare/v0.0.7...v0.0.8) - 2026-07-25
 
 ### Added
