@@ -50,6 +50,10 @@
       <ComponentRef Id="BaudShortcut" />
     </Feature>
 
+    <!-- Sin esto, WiX genera un cabinet externo (cab1.cab) que el instalador
+         busca junto al .msi; al descargar solo el .msi desde el release, falla. -->
+    <MediaTemplate EmbedCab="yes" />
+
     <ui:WixUI Id="WixUI_Minimal" />
     <WixVariable Id="WixUILicenseRtf" Value="$(var.BaudLicenseRtfPath)" />
 
