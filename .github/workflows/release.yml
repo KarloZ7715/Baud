@@ -253,8 +253,8 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Push-Location dist
-          $assets = Get-ChildItem -Filter '*.zip' -File
-          $assets += Get-ChildItem -Filter '*.msi' -File
+          $assets = @(Get-ChildItem -Filter '*.zip' -File)
+          $assets += @(Get-ChildItem -Filter '*.msi' -File)
           if ($assets.Count -eq 0) {
             Write-Error "No Windows release assets were produced"
           }
