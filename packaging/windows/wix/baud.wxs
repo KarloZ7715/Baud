@@ -14,7 +14,7 @@
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of Baud is already installed." />
 
-    <Icon Id="BaudIcon" SourceFile="..\baud.ico" />
+    <Icon Id="BaudIcon" SourceFile="$(var.BaudIconPath)" />
     <Property Id="ARPPRODUCTICON" Value="BaudIcon" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/KarloZ7715/Baud" />
 
@@ -51,7 +51,7 @@
     </Feature>
 
     <ui:WixUI Id="WixUI_Minimal" />
-    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.BaudLicenseRtfPath)" />
 
   </Package>
 </Wix>

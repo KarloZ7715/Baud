@@ -13,6 +13,8 @@ $WixSource = Join-Path $RepoRoot 'packaging\windows\wix\baud.wxs'
 $BinaryPath = Join-Path $RepoRoot 'target\release\baud.exe'
 $LicensePath = Join-Path $RepoRoot 'LICENSE'
 $CargoToml = Join-Path $RepoRoot 'Cargo.toml'
+$IconPath = Join-Path $RepoRoot 'packaging\windows\baud.ico'
+$LicenseRtfPath = Join-Path $RepoRoot 'packaging\windows\wix\license.rtf'
 
 if (-not (Get-Command 'wix' -ErrorAction SilentlyContinue)) {
     Write-Error "wix CLI not found on PATH. Install with: dotnet tool install --global wix --version 4.0.5"
@@ -40,6 +42,8 @@ $MsiPath = Join-Path $DistDir "baud-$Version-windows-x64.msi"
     -d "BaudVersion=$MsiVersion" `
     -d "BaudExePath=$BinaryPath" `
     -d "BaudLicensePath=$LicensePath" `
+    -d "BaudIconPath=$IconPath" `
+    -d "BaudLicenseRtfPath=$LicenseRtfPath" `
     -out $MsiPath
 
 if ($LASTEXITCODE -ne 0) {
