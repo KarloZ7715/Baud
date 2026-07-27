@@ -1,26 +1,28 @@
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::Layer;
-
-fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("baud=warn,wgpu_core=warn,winit=warn"));
-
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_filter(filter))
-        .with(baud::diagnostics::hooks::ReporterLayer)
-        .init();
-}
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Con el subsistema GUI no hay consola por defecto en Windows: sin esto,
+    // `--version`/`--help` no imprimirian nada visible al lanzar desde cmd o
+    // PowerShell.
+    #[cfg(windows)]
+    let attached_console = baud::console::attach_parent_console();
+    #[cfg(not(windows))]
+    let attached_console = true;
+
     // Los comandos CLI informativos y de actualizacion se ejecutan antes de
     // inicializar cualquier subsistema grafico o de diagnostico.
     match baud::cli::run()? {
-        baud::cli::CliOutcome::Exit(code) => std::process::exit(code),
+        baud::cli::CliOutcome::Exit(code) => {
+            // Sin esto la salida queda pegada al prompt de la consola adjunta.
+            #[cfg(windows)]
+            if attached_console {
+                println!();
+            }
+            std::process::exit(code)
+        }
         baud::cli::CliOutcome::LaunchGui(opts) => {
             baud::diagnostics::hooks::install_panic_hook();
-            init_tracing();
+            let _log_guard = baud::diagnostics::logging::init(attached_console);
 
             tracing::info!("baud starting");
 

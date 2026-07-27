@@ -4,6 +4,8 @@ pub mod cli;
 pub mod clipboard;
 pub mod color;
 pub mod config;
+#[cfg(windows)]
+pub mod console;
 pub mod copy_mode;
 pub mod cursor;
 pub mod diagnostics;
