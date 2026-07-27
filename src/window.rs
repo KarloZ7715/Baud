@@ -3005,16 +3005,33 @@ impl ApplicationHandler<UserEvent> for App {
 
         let t_device = Instant::now();
         tracing::info!("wgpu: solicitando device...");
-        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        // Performance es el default de wgpu; MemoryUsage pide bloques de
+        // suballocacion menores y el buffer de glifos se recrea a menudo.
+        let make_desc = |limits: wgpu::Limits| wgpu::DeviceDescriptor {
             label: None,
             required_features: wgpu::Features::empty(),
-            required_limits:
-                wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
+            required_limits: limits,
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            memory_hints: wgpu::MemoryHints::MemoryUsage,
+            memory_hints: wgpu::MemoryHints::Performance,
             trace: wgpu::Trace::Off,
-        }))
-        .expect("no se pudo crear el device GPU");
+        };
+        // downlevel_defaults() es el piso nativo garantizado; si una GPU vieja
+        // no lo satisface se degrada al piso WebGL2 en vez de paniquear.
+        let (device, queue) = match block_on(adapter.request_device(&make_desc(
+            wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+        ))) {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::warn!(
+                    "wgpu: device con downlevel_defaults fallo ({err}); \
+                     reintentando con el piso WebGL2"
+                );
+                block_on(adapter.request_device(&make_desc(
+                    wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
+                )))
+                .expect("no se pudo crear el device GPU")
+            }
+        };
         tracing::info!(
             "wgpu: device listo en {}ms (init GPU total {}ms)",
             t_device.elapsed().as_millis(),
@@ -3028,6 +3045,16 @@ impl ApplicationHandler<UserEvent> for App {
         let mut config = surface
             .get_default_config(&adapter, surface_w, surface_h)
             .expect("no se encontro formato de surface compatible");
+        // Las variantes Auto* degradan solas si el backend no soporta
+        // Mailbox/Immediate; las crudas pueden paniquear en configure.
+        config.present_mode = if self.config.render.vsync {
+            wgpu::PresentMode::AutoVsync
+        } else {
+            wgpu::PresentMode::AutoNoVsync
+        };
+        // Una GUI con poco trabajo GPU por frame no necesita 2 frames en cola;
+        // a 60 Hz el default suma ~33 ms de latencia a cada eco.
+        config.desired_maximum_frame_latency = 1;
         // Si hay transparencia, asegurar que el alpha mode sea compatible
         if opacity < 1.0 {
             let alpha_modes = surface.get_capabilities(&adapter).alpha_modes;
