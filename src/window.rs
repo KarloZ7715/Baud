@@ -341,13 +341,51 @@ fn open_url(url: &str) {
         tracing::warn!("open_url: esquema no permitido: {}", normalized);
         return;
     }
+    open_url_with_default_handler(&normalized);
+}
+
+#[cfg(not(windows))]
+fn open_url_with_default_handler(normalized: &str) {
     if let Err(e) = std::process::Command::new("xdg-open")
-        .arg(&normalized)
+        .arg(normalized)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
     {
         tracing::warn!("open_url: xdg-open fallo para {}: {e}", normalized);
+    }
+}
+
+#[cfg(windows)]
+fn open_url_with_default_handler(normalized: &str) {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide: Vec<u16> = OsStr::new(normalized)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // Devuelve un HINSTANCE que en la práctica es un código de error cuando
+    // vale <= 32; ShellExecuteW no expone un HRESULT real aquí.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if (result as isize) <= 32 {
+        tracing::warn!(
+            "open_url: ShellExecuteW fallo para {}: code {}",
+            normalized,
+            result as isize
+        );
     }
 }
 
