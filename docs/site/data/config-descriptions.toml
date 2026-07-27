@@ -122,3 +122,4 @@ keys = "User-defined keybinding overrides, mapping a chord string to an action n
 "debug.fps_counter_enabled" = "Allows the FPS counter overlay to be toggled with its keybinding."
 
 "render.max_fps" = "Maximum redraw rate in frames per second. `0` removes the cap."
+"render.vsync" = "Synchronize presentation with the monitor refresh rate. Disabling it lowers input latency at the cost of possible tearing."

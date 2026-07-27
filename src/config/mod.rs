@@ -118,16 +118,25 @@ pub struct RenderConfig {
     /// FPS máximo de redraw. `0` desactiva el límite.
     #[serde(default = "default_render_max_fps")]
     pub max_fps: u32,
+    /// Sincroniza el present con el refresco del monitor. Desactivarlo baja
+    /// la latencia de entrada a costa de posible tearing.
+    #[serde(default = "default_render_vsync")]
+    pub vsync: bool,
 }
 
 fn default_render_max_fps() -> u32 {
     60
 }
 
+fn default_render_vsync() -> bool {
+    true
+}
+
 impl Default for RenderConfig {
     fn default() -> Self {
         Self {
             max_fps: default_render_max_fps(),
+            vsync: default_render_vsync(),
         }
     }
 }
@@ -1743,6 +1752,13 @@ dim_alpha = true
         assert_eq!(uncapped.render.max_fps, 0);
         assert_eq!(uncapped.render.redraw_interval_nanos(), 0);
         assert!(uncapped.render.redraw_interval().is_none());
+    }
+
+    #[test]
+    fn test_render_vsync_default_and_parse() {
+        assert!(Config::default().render.vsync);
+        let p: Config = toml::from_str("[render]\nvsync = false\n").unwrap();
+        assert!(!p.render.vsync);
     }
 
     #[test]

@@ -9,6 +9,8 @@ Windows support is experimental — see [About](../about.md) and [Install on Win
 
 Setting `window.opacity` below `1.0` requests the native Mica translucent backdrop material from the Windows compositor (Windows 11's "frosted glass" look), rather than plain alpha blending.
 
+That look costs input latency: with `window.opacity < 1.0` frames go through DirectComposition, which always presents at the DWM's own cadence. Setting `render.vsync = false` does not recover that latency.
+
 ### Console behavior
 
 `baud.exe` opens a single window — launching it from the Explorer or the Start Menu shortcut no longer opens a second console window alongside it. Running a CLI subcommand (`baud --version`, `baud --help`, or an unrecognized flag) from `cmd.exe` or PowerShell still prints in that same console, by reattaching to it on startup.
