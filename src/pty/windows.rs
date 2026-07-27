@@ -5,22 +5,34 @@ use std::io::{self, ErrorKind};
 use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, FALSE, HANDLE, INVALID_HANDLE_VALUE, S_OK, TRUE, WAIT_OBJECT_0,
+    CloseHandle, LocalFree, ERROR_BROKEN_PIPE, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING,
+    ERROR_PIPE_NOT_CONNECTED, FALSE, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, S_OK, TRUE,
+    WAIT_OBJECT_0,
 };
-use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+};
+use windows_sys::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
+    OPEN_EXISTING, PIPE_ACCESS_INBOUND,
+};
 use windows_sys::Win32::System::Console::{
     ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
 };
-use windows_sys::Win32::System::Pipes::{CreatePipe, PeekNamedPipe};
+use windows_sys::Win32::System::Pipes::{
+    CreateNamedPipeW, CreatePipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
+};
 use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateProcessW, DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
-    ResetEvent, SetEvent, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+    ResetEvent, SetEvent, TerminateProcess, UpdateProcThreadAttribute, WaitForMultipleObjects,
+    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
+use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 
 use super::contract::{SessionBackend, WakeSource};
 use super::{ProcessConfig, SessionKind};
@@ -33,10 +45,137 @@ pub struct Pty {
     hpcon: HPCON,
     /// El host escribe aquí (stdin del hijo vía ConPTY).
     conin: HANDLE,
-    /// El host lee aquí (stdout del hijo vía ConPTY).
+    /// El host lee aquí (stdout del hijo vía ConPTY). Admite I/O superpuesta.
     conout: HANDLE,
     process: HANDLE,
     thread: HANDLE,
+    /// Lectura superpuesta permanente sobre `conout`.
+    pending: PendingRead,
+}
+
+/// Estado de la lectura superpuesta sobre conout: un ReadFile siempre en
+/// vuelo cuyo evento se espera con WaitForMultipleObjects, sin polling.
+struct PendingRead {
+    overlapped: OVERLAPPED,
+    /// Evento manual-reset de la lectura en vuelo.
+    event: HANDLE,
+    buf: Vec<u8>,
+    in_flight: bool,
+    /// Bytes completados pendientes de entregar (`delivered..ready`).
+    ready: usize,
+    delivered: usize,
+    /// Pipe roto (el hijo terminó): la próxima lectura devuelve EOF.
+    eof: bool,
+}
+
+impl PendingRead {
+    fn new() -> io::Result<Self> {
+        let event = unsafe { CreateEventW(ptr::null(), TRUE, FALSE, ptr::null()) };
+        if event.is_null() || event == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
+        overlapped.hEvent = event;
+        Ok(Self {
+            overlapped,
+            event,
+            buf: vec![0u8; 64 * 1024],
+            in_flight: false,
+            ready: 0,
+            delivered: 0,
+            eof: false,
+        })
+    }
+
+    fn has_ready(&self) -> bool {
+        self.ready > self.delivered
+    }
+
+    /// Emite la lectura superpuesta si no hay una en vuelo ni bytes listos.
+    fn issue(&mut self, conout: HANDLE) -> io::Result<()> {
+        if self.in_flight || self.has_ready() || self.eof {
+            return Ok(());
+        }
+        unsafe {
+            let _ = ResetEvent(self.event);
+        }
+        let ok = unsafe {
+            ReadFile(
+                conout,
+                self.buf.as_mut_ptr() as *mut _,
+                self.buf.len() as u32,
+                ptr::null_mut(),
+                &mut self.overlapped,
+            )
+        };
+        if ok == FALSE {
+            let err = io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(code) if code == ERROR_IO_PENDING as i32 => {}
+                Some(code)
+                    if code == ERROR_BROKEN_PIPE as i32
+                        || code == ERROR_PIPE_NOT_CONNECTED as i32 =>
+                {
+                    self.eof = true;
+                    return Ok(());
+                }
+                _ => return Err(err),
+            }
+        }
+        // La lectura completada en línea y la pendiente se resuelven por el
+        // mismo camino: GetOverlappedResult en try_complete.
+        self.in_flight = true;
+        Ok(())
+    }
+
+    /// `Some(n)` si la lectura en vuelo completó (0 = pipe roto), `None` si
+    /// sigue pendiente.
+    fn try_complete(&mut self, conout: HANDLE) -> io::Result<Option<usize>> {
+        debug_assert!(self.in_flight);
+        let mut n = 0u32;
+        let ok = unsafe { GetOverlappedResult(conout, &self.overlapped, &mut n, FALSE) };
+        if ok == FALSE {
+            let err = io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(code) if code == ERROR_IO_INCOMPLETE as i32 => return Ok(None),
+                Some(code)
+                    if code == ERROR_BROKEN_PIPE as i32
+                        || code == ERROR_PIPE_NOT_CONNECTED as i32 =>
+                {
+                    self.in_flight = false;
+                    self.eof = true;
+                    return Ok(Some(0));
+                }
+                _ => return Err(err),
+            }
+        }
+        self.in_flight = false;
+        self.ready = n as usize;
+        self.delivered = 0;
+        Ok(Some(n as usize))
+    }
+
+    fn take_into(&mut self, out: &mut [u8]) -> usize {
+        let n = (self.ready - self.delivered).min(out.len());
+        out[..n].copy_from_slice(&self.buf[self.delivered..self.delivered + n]);
+        self.delivered += n;
+        if self.delivered == self.ready {
+            self.ready = 0;
+            self.delivered = 0;
+        }
+        n
+    }
+}
+
+impl Drop for PendingRead {
+    fn drop(&mut self) {
+        if self.event != INVALID_HANDLE_VALUE && !self.event.is_null() {
+            unsafe {
+                CloseHandle(self.event);
+            }
+            self.event = INVALID_HANDLE_VALUE;
+        }
+    }
 }
 
 unsafe impl Send for Pty {}
@@ -56,44 +195,35 @@ impl Pty {
     }
 
     /// Bloquea hasta que conout tenga datos o `wake` esté señalizado.
-    pub fn wait_ready(&self, wake: &ConPtyWake) -> io::Result<WaitReady> {
-        loop {
-            let mut avail = 0u32;
-            let peek_ok = unsafe {
-                PeekNamedPipe(
-                    self.conout,
-                    ptr::null_mut(),
-                    0,
-                    ptr::null_mut(),
-                    &mut avail,
-                    ptr::null_mut(),
-                )
-            };
-            if peek_ok == FALSE {
-                let err = io::Error::last_os_error();
-                // ERROR_BROKEN_PIPE
-                if err.raw_os_error() == Some(109) {
-                    return Ok(WaitReady {
-                        output: true,
-                        wake: wake.is_signaled(),
-                    });
-                }
-                return Err(err);
-            }
-            let woke = wake.is_signaled();
-            if avail > 0 || woke {
-                return Ok(WaitReady {
-                    output: avail > 0,
-                    wake: woke,
-                });
-            }
-            let wait = unsafe { WaitForSingleObject(wake.handle(), 50) };
-            if wait == WAIT_OBJECT_0 {
-                return Ok(WaitReady {
-                    output: false,
-                    wake: true,
-                });
-            }
+    ///
+    /// Sin polling: la lectura superpuesta permanente y el evento de wake se
+    /// esperan juntos con WaitForMultipleObjects, así el hilo dormido no
+    /// despierta 20 veces por segundo ni añade hasta 50 ms por tecla.
+    pub fn wait_ready(&mut self, wake: &ConPtyWake) -> io::Result<WaitReady> {
+        if self.pending.has_ready() || self.pending.eof {
+            return Ok(WaitReady {
+                output: true,
+                wake: wake.is_signaled(),
+            });
+        }
+        self.pending.issue(self.conout)?;
+        let handles = [self.pending.event, wake.handle()];
+        let r = unsafe {
+            WaitForMultipleObjects(handles.len() as u32, handles.as_ptr(), FALSE, INFINITE)
+        };
+        if r == WAIT_OBJECT_0 {
+            self.pending.try_complete(self.conout)?;
+            Ok(WaitReady {
+                output: true,
+                wake: wake.is_signaled(),
+            })
+        } else if r == WAIT_OBJECT_0 + 1 {
+            Ok(WaitReady {
+                output: false,
+                wake: true,
+            })
+        } else {
+            Err(io::Error::last_os_error())
         }
     }
 }
@@ -141,56 +271,30 @@ impl SessionBackend for Pty {
     }
 
     fn read_output(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // Solo leer lo disponible: ReadFile bloqueante en un pipe vacío
-        // colgaría el hilo PTY y congelaría input/resize/shutdown.
-        let mut avail = 0u32;
-        let peek_ok = unsafe {
-            PeekNamedPipe(
-                self.conout,
-                ptr::null_mut(),
-                0,
-                ptr::null_mut(),
-                &mut avail,
-                ptr::null_mut(),
-            )
-        };
-        if peek_ok == FALSE {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(109) {
+        loop {
+            // Entregar primero los bytes de una lectura ya completada.
+            if self.pending.has_ready() {
+                return Ok(self.pending.take_into(buf));
+            }
+            if self.pending.eof {
                 return Ok(0);
             }
-            return Err(err);
-        }
-        if avail == 0 {
-            return Err(io::Error::new(ErrorKind::WouldBlock, "conout sin datos"));
-        }
-
-        let to_read = (avail as usize).min(buf.len()) as u32;
-        let mut read = 0u32;
-        let ok = unsafe {
-            ReadFile(
-                self.conout,
-                buf.as_mut_ptr() as *mut _,
-                to_read,
-                &mut read,
-                ptr::null_mut(),
-            )
-        };
-        if ok == FALSE {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(232) || err.kind() == ErrorKind::WouldBlock {
-                return Err(io::Error::new(ErrorKind::WouldBlock, err));
+            if self.pending.in_flight {
+                match self.pending.try_complete(self.conout)? {
+                    Some(_) => continue,
+                    None => {
+                        return Err(io::Error::new(ErrorKind::WouldBlock, "conout sin datos"));
+                    }
+                }
             }
-            if err.raw_os_error() == Some(109) {
-                return Ok(0);
-            }
-            return Err(err);
+            // Sin lectura en vuelo: emitir una; puede completar en línea y la
+            // resuelve la siguiente iteración.
+            self.pending.issue(self.conout)?;
         }
-        Ok(read as usize)
     }
 
     fn set_nonblocking(&mut self) -> io::Result<()> {
-        // La lectura acota con PeekNamedPipe; no hace falta cambiar el modo del pipe.
+        // La lectura superpuesta ya es no bloqueante por diseño.
         Ok(())
     }
 }
@@ -198,10 +302,16 @@ impl SessionBackend for Pty {
 impl Drop for Pty {
     fn drop(&mut self) {
         self.force_kill();
-        // Cerrar conout antes de ClosePseudoConsole para no deadlockear
-        // esperando un pipe de lectura aún vivo en este mismo hilo.
+        // Cancelar la lectura superpuesta antes de cerrar: sin CancelIoEx el
+        // kernel podría completarla sobre el buffer/OVERLAPPED ya liberados.
         if self.conout != INVALID_HANDLE_VALUE {
             unsafe {
+                let _ = CancelIoEx(self.conout, ptr::null());
+                if self.pending.in_flight {
+                    let mut n = 0u32;
+                    let _ =
+                        GetOverlappedResult(self.conout, &self.pending.overlapped, &mut n, TRUE);
+                }
                 CloseHandle(self.conout);
             }
             self.conout = INVALID_HANDLE_VALUE;
@@ -306,7 +416,16 @@ pub fn spawn_with(cfg: &ProcessConfig) -> io::Result<Pty> {
     };
 
     let (conin_read, conin_write) = create_pipe_pair()?;
-    let (conout_read, conout_write) = create_pipe_pair()?;
+    let (conout_read, conout_write) = match create_overlapped_read_pipe() {
+        Ok(pair) => pair,
+        Err(e) => {
+            unsafe {
+                CloseHandle(conin_read);
+                CloseHandle(conin_write);
+            }
+            return Err(e);
+        }
+    };
 
     let mut hpcon: HPCON = 0;
     let hr = unsafe { CreatePseudoConsole(size, conin_read, conout_write, 0, &mut hpcon) };
@@ -324,6 +443,18 @@ pub fn spawn_with(cfg: &ProcessConfig) -> io::Result<Pty> {
         CloseHandle(conin_read);
         CloseHandle(conout_write);
     }
+
+    let pending = match PendingRead::new() {
+        Ok(p) => p,
+        Err(e) => {
+            unsafe {
+                ClosePseudoConsole(hpcon);
+                CloseHandle(conin_write);
+                CloseHandle(conout_read);
+            }
+            return Err(e);
+        }
+    };
 
     let mut attr_size: usize = 0;
     unsafe {
@@ -433,7 +564,100 @@ pub fn spawn_with(cfg: &ProcessConfig) -> io::Result<Pty> {
         conout: conout_read,
         process: proc_info.hProcess,
         thread: proc_info.hThread,
+        pending,
     })
+}
+
+/// Crea el par de pipes de conout con nombre único. `CreatePipe` no admite
+/// `FILE_FLAG_OVERLAPPED`, así que el extremo de lectura (el nuestro) es un
+/// named pipe superpuesto; el de escritura (para ConPTY) sigue síncrono.
+fn create_overlapped_read_pipe() -> io::Result<(HANDLE, HANDLE)> {
+    // DACL que solo concede acceso al propietario (el usuario actual).
+    let sddl = wide_null(OsStr::new("D:P(A;;GA;;;OW)"));
+    let mut sd: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut sd,
+            ptr::null_mut(),
+        )
+    };
+    if ok == FALSE {
+        return Err(io::Error::last_os_error());
+    }
+    let result = create_overlapped_read_pipe_with_sd(sd);
+    unsafe {
+        let _ = LocalFree(sd);
+    }
+    result
+}
+
+fn create_overlapped_read_pipe_with_sd(sd: PSECURITY_DESCRIPTOR) -> io::Result<(HANDLE, HANDLE)> {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    for _ in 0..4 {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let name = format!(r"\\.\pipe\baud-{}-{n}-{nanos}", std::process::id());
+        let wide = wide_null(OsStr::new(&name));
+        let sa = SECURITY_ATTRIBUTES {
+            nLength: mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd,
+            bInheritHandle: FALSE,
+        };
+        let read = unsafe {
+            CreateNamedPipeW(
+                wide.as_ptr(),
+                PIPE_ACCESS_INBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                1,
+                64 * 1024,
+                64 * 1024,
+                0,
+                &sa,
+            )
+        };
+        if read == INVALID_HANDLE_VALUE {
+            let err = io::Error::last_os_error();
+            // Nombre ocupado (colisión o squatting): reintentar con otro.
+            if err.raw_os_error() == Some(231) || err.raw_os_error() == Some(5) {
+                continue;
+            }
+            return Err(err);
+        }
+        // El extremo que recibe ConPTY se abre síncrono y heredable.
+        let sa_inherit = SECURITY_ATTRIBUTES {
+            nLength: mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: sd,
+            bInheritHandle: TRUE,
+        };
+        let write = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_WRITE,
+                0,
+                &sa_inherit,
+                OPEN_EXISTING,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        if write == INVALID_HANDLE_VALUE {
+            let err = io::Error::last_os_error();
+            unsafe {
+                CloseHandle(read);
+            }
+            return Err(err);
+        }
+        return Ok((read, write));
+    }
+    Err(io::Error::new(
+        ErrorKind::AddrInUse,
+        "sin nombre de pipe disponible",
+    ))
 }
 
 fn create_pipe_pair() -> io::Result<(HANDLE, HANDLE)> {
