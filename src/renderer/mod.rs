@@ -605,6 +605,9 @@ impl Renderer {
     }
 
     /// Cambia el tamano de la surface y recrea buffers auxiliares.
+    /// Las metricas de celda no dependen del tamano de la ventana, asi que el
+    /// pipeline de glifos solo se reinicia si realmente cambiaron: recrearlo en
+    /// cada evento de resize recompila los PSO y vacia caches sin necesidad.
     pub fn resize(&mut self, width: u32, height: u32, _rows_count: usize) {
         self.config.width = width.clamp(1, 16_384);
         self.config.height = height.clamp(1, 16_384);
@@ -613,7 +616,9 @@ impl Renderer {
             .update(&self.queue, glyphon::Resolution { width, height });
 
         self.refresh_cell_metrics();
-        self.reset_glyph_pipeline();
+        if self.glyph_cache.metrics_changed(&self.cell_metrics) {
+            self.reset_glyph_pipeline();
+        }
         self.reset_aux_buffers();
     }
 
