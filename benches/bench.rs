@@ -94,6 +94,7 @@ fn bench_display_list_build(c: &mut Criterion) {
         c.bench_function(name, |b| {
             let palette = Palette::from_theme(&theme);
             let mut contrast_cache = ContrastCache::default();
+            let mut strings = baud::renderer::GlyphStrings::new();
             b.iter(|| {
                 let mut list = DisplayList::default();
                 DisplayListBuilder::build(
@@ -114,6 +115,7 @@ fn bench_display_list_build(c: &mut Criterion) {
                     &mut None,
                     &mut None,
                     &mut contrast_cache,
+                    &mut strings,
                 );
             });
         });

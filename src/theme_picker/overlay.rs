@@ -156,6 +156,7 @@ pub fn build_sample_custom_glyphs(
     font_system: &mut FontSystem,
     swash_cache: &mut glyphon::SwashCache,
     glyph_cache: &mut crate::renderer::GlyphCache,
+    glyph_strings: &mut crate::renderer::GlyphStrings,
     contrast_cache: &mut ContrastCache,
 ) -> Result<Vec<glyphon::CustomGlyph>, String> {
     use crate::grid::DamageSnapshot;
@@ -193,6 +194,7 @@ pub fn build_sample_custom_glyphs(
         &mut None,
         &mut None,
         contrast_cache,
+        glyph_strings,
     );
 
     let mut glyphs = Vec::new();
@@ -201,8 +203,8 @@ pub fn build_sample_custom_glyphs(
         metrics,
         &palette,
         theme.dim_alpha,
-        font_family,
         glyph_cache,
+        glyph_strings,
         font_system,
         swash_cache,
         contrast_cache,
@@ -489,6 +491,7 @@ mod tests {
         let mut fs = FontSystem::new();
         let mut swash = glyphon::SwashCache::new();
         let mut glyph_cache = GlyphCache::new();
+        let mut glyph_strings = crate::renderer::GlyphStrings::new();
         let mut contrast_cache = ContrastCache::default();
         let metrics = picker_cell_metrics(&mut fs, "monospace");
 
@@ -504,6 +507,7 @@ mod tests {
                 &mut fs,
                 &mut swash,
                 &mut glyph_cache,
+                &mut glyph_strings,
                 &mut contrast_cache,
             )
             .unwrap_or_else(|e| panic!("{name}: {e}"));

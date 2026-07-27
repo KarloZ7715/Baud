@@ -8,7 +8,7 @@ use crate::grid::{Cell, DamageSnapshot};
 
 use super::contrast::ContrastCache;
 use super::decorations::cursor_glyph;
-use super::glyph::{is_wide_continuation, resolve_glyph_key, GlyphKey};
+use super::glyph::{is_wide_continuation, resolve_glyph_key, GlyphKey, GlyphStrings};
 use super::metrics::CellMetrics;
 use super::palette::Palette;
 use super::runs::{group_ligature_runs, shape_run};
@@ -268,6 +268,7 @@ impl DisplayListBuilder {
         font_system: &mut Option<&mut glyphon::FontSystem>,
         swash_cache: &mut Option<&mut glyphon::SwashCache>,
         contrast_cache: &mut ContrastCache,
+        strings: &mut GlyphStrings,
     ) {
         if damage.is_full() {
             for row in 0..rows {
@@ -288,6 +289,7 @@ impl DisplayListBuilder {
                     font_system,
                     swash_cache,
                     contrast_cache,
+                    strings,
                 );
             }
         } else {
@@ -313,6 +315,7 @@ impl DisplayListBuilder {
                     font_system,
                     swash_cache,
                     contrast_cache,
+                    strings,
                 );
             }
         }
@@ -327,6 +330,7 @@ impl DisplayListBuilder {
             rows,
             font_family,
             show_scrollback,
+            strings,
         );
     }
 
@@ -356,6 +360,7 @@ impl DisplayListBuilder {
         rows: usize,
         font_family: &str,
         show_scrollback: bool,
+        strings: &mut GlyphStrings,
     ) {
         list.cursor = None;
         if let Some(ref cm) = term.copy_mode {
@@ -378,11 +383,11 @@ impl DisplayListBuilder {
                         style,
                         glyph_key: GlyphKey {
                             ch,
-                            extra: String::new(),
+                            extra: 0,
                             bold: false,
                             italic: false,
                             dim: false,
-                            family: font_family.to_string(),
+                            family: strings.intern_family(font_family),
                         },
                     });
                 }
@@ -416,6 +421,7 @@ impl DisplayListBuilder {
         font_system: &mut Option<&mut glyphon::FontSystem>,
         swash_cache: &mut Option<&mut glyphon::SwashCache>,
         contrast_cache: &mut ContrastCache,
+        strings: &mut GlyphStrings,
     ) {
         let source_row = row_sources.get(row).copied().unwrap_or(&[]);
         let cursor_on_row = !show_scrollback
@@ -455,6 +461,7 @@ impl DisplayListBuilder {
                     builtin_box_drawing,
                     blink_on,
                     contrast_cache,
+                    strings,
                 ),
                 _ => HashSet::new(),
             }
@@ -646,16 +653,16 @@ impl DisplayListBuilder {
             }
 
             let Some(glyph_key) =
-                resolve_glyph_key(source_row, col, font_family, &term.grapheme_extras)
+                resolve_glyph_key(source_row, col, font_family, &term.grapheme_extras, strings)
             else {
                 if cursor_rendered && cell.ch == ' ' {
                     let mut space_key = GlyphKey {
                         ch: ' ',
-                        extra: String::new(),
+                        extra: 0,
                         bold: false,
                         italic: false,
                         dim: false,
-                        family: font_family.to_string(),
+                        family: strings.intern_family(font_family),
                     };
                     if bold {
                         space_key.bold = true;
@@ -716,6 +723,7 @@ impl DisplayListBuilder {
         _builtin_box_drawing: bool,
         blink_on: bool,
         _contrast_cache: &mut ContrastCache,
+        strings: &mut GlyphStrings,
     ) -> HashSet<usize> {
         use super::glyph_cache::cache_key_rasterizes;
 
@@ -803,11 +811,11 @@ impl DisplayListBuilder {
                 };
                 let glyph_key = GlyphKey {
                     ch: run.text.chars().nth(g.col_in_run).unwrap_or(' '),
-                    extra: String::new(),
+                    extra: 0,
                     bold,
                     italic: cell.attrs.italic,
                     dim: cell.attrs.dim,
-                    family: format!("{font_family}#lig:{}:{gi}", run.text),
+                    family: strings.intern_family(&format!("{font_family}#lig:{}:{gi}", run.text)),
                 };
                 list.text_glyphs.push(TextGlyph {
                     row,
@@ -892,6 +900,7 @@ mod tests {
         let palette = test_palette(theme);
         let mut list = DisplayList::default();
         let mut contrast_cache = ContrastCache::default();
+        let mut strings = GlyphStrings::new();
         DisplayListBuilder::build(
             &mut list,
             term,
@@ -910,6 +919,7 @@ mod tests {
             &mut None,
             &mut None,
             &mut contrast_cache,
+            &mut strings,
         );
         list
     }
@@ -929,6 +939,7 @@ mod tests {
         let palette = test_palette(theme);
         let mut list = DisplayList::default();
         let mut contrast_cache = ContrastCache::default();
+        let mut strings = GlyphStrings::new();
         DisplayListBuilder::build(
             &mut list,
             term,
@@ -947,6 +958,7 @@ mod tests {
             &mut None,
             &mut None,
             &mut contrast_cache,
+            &mut strings,
         );
         list
     }
@@ -966,6 +978,7 @@ mod tests {
         let palette = test_palette(theme);
         let mut list = DisplayList::default();
         let mut contrast_cache = ContrastCache::default();
+        let mut strings = GlyphStrings::new();
         DisplayListBuilder::build(
             &mut list,
             term,
@@ -984,6 +997,7 @@ mod tests {
             &mut None,
             &mut None,
             &mut contrast_cache,
+            &mut strings,
         );
         list
     }
@@ -1455,6 +1469,7 @@ mod tests {
         let palette = test_palette(&theme);
         let mut list = DisplayList::default();
         let mut contrast_cache = ContrastCache::default();
+        let mut strings = GlyphStrings::new();
 
         DisplayListBuilder::build(
             &mut list,
@@ -1474,6 +1489,7 @@ mod tests {
             &mut None,
             &mut None,
             &mut contrast_cache,
+            &mut strings,
         );
         let full_glyphs = list.text_glyphs.len();
         assert_eq!(full_glyphs, 8);
@@ -1501,6 +1517,7 @@ mod tests {
             &mut None,
             &mut None,
             &mut contrast_cache,
+            &mut strings,
         );
 
         assert_eq!(list.text_glyphs.len(), full_glyphs);

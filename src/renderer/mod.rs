@@ -121,7 +121,9 @@ pub use builtin::{
 pub use cell_renderer::CellRenderer;
 pub use display_list::{DisplayList, DisplayListBuilder};
 pub use geometry::CellGeometry;
-pub use glyph::{is_wide_continuation, resolve_glyph_key, shape_glyph, GlyphKey, ShapedGlyph};
+pub use glyph::{
+    is_wide_continuation, resolve_glyph_key, shape_glyph, GlyphKey, GlyphStrings, ShapedGlyph,
+};
 pub use glyph_cache::{CachedGlyph, CachedRaster, GlyphCache};
 pub use metrics::CellMetrics;
 
@@ -225,6 +227,9 @@ pub struct Renderer {
     cell_metrics: CellMetrics,
     /// Cache de glifos para el renderer celda-determinista.
     glyph_cache: GlyphCache,
+    /// Interning de las cadenas de `GlyphKey` (familias y extras de grafema).
+    /// Vive aqui y no en `Term` porque el cache es compartido entre sessions.
+    glyph_strings: GlyphStrings,
     /// Display list por sesion, reutilizada entre frames para damage parcial.
     pane_display_lists: HashMap<SessionId, DisplayList>,
     line_height: f32,
@@ -478,6 +483,7 @@ impl Renderer {
             font_size,
             cell_metrics,
             glyph_cache: GlyphCache::new(),
+            glyph_strings: GlyphStrings::new(),
             pane_display_lists: HashMap::new(),
             line_height,
             glyph_offset,
@@ -1046,8 +1052,8 @@ impl Renderer {
             metrics,
             palette,
             theme.dim_alpha,
-            &self.font_family,
             &mut self.glyph_cache,
+            &mut self.glyph_strings,
             &mut self.font_system,
             &mut self.swash_cache,
             &mut self.contrast_cache,
@@ -1252,6 +1258,7 @@ impl Renderer {
             &mut font_system,
             &mut swash_cache,
             &mut self.contrast_cache,
+            &mut self.glyph_strings,
         );
 
         let mut pane_glyphs = Vec::new();
@@ -1260,8 +1267,8 @@ impl Renderer {
             metrics,
             &palette,
             theme.dim_alpha,
-            &self.font_family,
             &mut self.glyph_cache,
+            &mut self.glyph_strings,
             &mut self.font_system,
             &mut self.swash_cache,
             &mut self.contrast_cache,
@@ -1341,6 +1348,7 @@ impl Renderer {
             &mut self.font_system,
             &mut self.swash_cache,
             &mut self.glyph_cache,
+            &mut self.glyph_strings,
             &mut self.contrast_cache,
         )?;
         custom_glyphs.extend(sample_glyphs);

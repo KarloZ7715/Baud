@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use glyphon::cosmic_text::FontSystem;
 use glyphon::{ContentType, SwashCache, SwashContent};
 
-use super::glyph::{shape_glyph, GlyphKey, ShapedGlyph};
+use super::glyph::{shape_glyph, GlyphKey, GlyphStrings, ShapedGlyph, ShapedOverlay};
 use super::limits::{self, MAX_RASTER_BYTES};
 use super::metrics::CellMetrics;
 
@@ -103,61 +103,76 @@ impl GlyphCache {
         self.by_id.clear();
     }
 
-    /// Devuelve el glifo cacheado o lo shapea, rasteriza e inserta.
+    /// Devuelve el id del glifo cacheado o lo shapea, rasteriza e inserta.
+    ///
+    /// Devuelve el id (no `&CachedGlyph`) para que el llamador pueda leer los
+    /// datos con [`GlyphCache::get_by_custom_id`] y [`GlyphCache::overlays`]
+    /// sin mantener un prestamo mientras inserta overlays en el mismo cache.
     pub fn get_or_insert(
         &mut self,
         font_system: &mut FontSystem,
         swash_cache: &mut SwashCache,
         metrics: &CellMetrics,
-        family: &str,
+        strings: &GlyphStrings,
         key: GlyphKey,
-    ) -> &CachedGlyph {
+    ) -> u16 {
         use std::collections::hash_map::Entry;
 
         self.ensure_metrics(metrics);
 
         match self.entries.entry(key) {
-            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Occupied(entry) => entry.into_mut().custom_glyph_id,
             Entry::Vacant(vacant) => {
-                let shaped = shape_glyph(font_system, metrics, vacant.key(), family);
+                let shaped = shape_glyph(
+                    font_system,
+                    metrics,
+                    vacant.key(),
+                    strings.family(key.family),
+                    strings.extra(key.extra),
+                );
                 let raster = rasterize_shaped(font_system, swash_cache, &shaped);
                 let custom_glyph_id = self.next_id;
                 self.next_id = self.next_id.saturating_add(1);
-                self.by_id.insert(custom_glyph_id, vacant.key().clone());
-                vacant.insert(CachedGlyph {
-                    custom_glyph_id,
-                    shaped,
-                    raster,
-                })
+                self.by_id.insert(custom_glyph_id, *vacant.key());
+                vacant
+                    .insert(CachedGlyph {
+                        custom_glyph_id,
+                        shaped,
+                        raster,
+                    })
+                    .custom_glyph_id
             }
         }
     }
 
     /// Inserta o devuelve un glifo ya shaped (p. ej. de un run con ligaduras).
+    /// `shaped` solo se clona si la entrada no existia.
     pub fn get_or_insert_shaped(
         &mut self,
         font_system: &mut FontSystem,
         swash_cache: &mut SwashCache,
         metrics: &CellMetrics,
         key: GlyphKey,
-        shaped: ShapedGlyph,
-    ) -> &CachedGlyph {
+        shaped: &ShapedGlyph,
+    ) -> u16 {
         use std::collections::hash_map::Entry;
 
         self.ensure_metrics(metrics);
 
         match self.entries.entry(key) {
-            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Occupied(entry) => entry.into_mut().custom_glyph_id,
             Entry::Vacant(vacant) => {
-                let raster = rasterize_shaped(font_system, swash_cache, &shaped);
+                let raster = rasterize_shaped(font_system, swash_cache, shaped);
                 let custom_glyph_id = self.next_id;
                 self.next_id = self.next_id.saturating_add(1);
-                self.by_id.insert(custom_glyph_id, vacant.key().clone());
-                vacant.insert(CachedGlyph {
-                    custom_glyph_id,
-                    shaped,
-                    raster,
-                })
+                self.by_id.insert(custom_glyph_id, *vacant.key());
+                vacant
+                    .insert(CachedGlyph {
+                        custom_glyph_id,
+                        shaped: shaped.clone(),
+                        raster,
+                    })
+                    .custom_glyph_id
             }
         }
     }
@@ -183,6 +198,13 @@ impl GlyphCache {
 
     pub fn get_by_custom_id(&self, id: u16) -> Option<&CachedGlyph> {
         self.by_id.get(&id).and_then(|key| self.entries.get(key))
+    }
+
+    /// Capas overlay del glifo con ese id (vacio si no tiene o no existe).
+    pub fn overlays(&self, id: u16) -> &[ShapedOverlay] {
+        self.get_by_custom_id(id)
+            .map(|c| c.shaped.overlays.as_slice())
+            .unwrap_or(&[])
     }
 }
 
@@ -340,6 +362,17 @@ mod tests {
 
     use super::super::terminal_fallback::create_font_system;
 
+    fn test_key(strings: &mut GlyphStrings, ch: char, family: &str) -> GlyphKey {
+        GlyphKey {
+            ch,
+            extra: 0,
+            bold: false,
+            italic: false,
+            dim: false,
+            family: strings.intern_family(family),
+        }
+    }
+
     #[test]
     fn cache_hit_on_second_lookup() {
         let mut font_system = create_font_system();
@@ -353,36 +386,16 @@ mod tests {
             font_config.glyph_offset,
         );
         let mut cache = GlyphCache::new();
-        let key = GlyphKey {
-            ch: 'X',
-            extra: String::new(),
-            bold: false,
-            italic: false,
-            dim: false,
-            family: font_config.family.clone(),
-        };
+        let mut strings = GlyphStrings::new();
+        let key = test_key(&mut strings, 'X', &font_config.family);
 
-        let first_id = cache
-            .get_or_insert(
-                &mut font_system,
-                &mut swash_cache,
-                &metrics,
-                &font_config.family,
-                key.clone(),
-            )
-            .custom_glyph_id;
+        let first_id =
+            cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &strings, key);
         assert_eq!(cache.len(), 1);
         assert_eq!(first_id, 8);
 
-        let second_id = cache
-            .get_or_insert(
-                &mut font_system,
-                &mut swash_cache,
-                &metrics,
-                &font_config.family,
-                key,
-            )
-            .custom_glyph_id;
+        let second_id =
+            cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &strings, key);
         assert_eq!(first_id, second_id);
         assert_eq!(cache.len(), 1);
     }
@@ -415,27 +428,17 @@ mod tests {
             font_config.glyph_offset,
         );
         let mut cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
         let prompt = "baud master ● ? ❯ hola";
 
         for ch in prompt.chars() {
             if ch == ' ' {
                 continue;
             }
-            let key = GlyphKey {
-                ch,
-                extra: String::new(),
-                bold: false,
-                italic: false,
-                dim: false,
-                family: font_config.family.clone(),
-            };
-            let cached = cache.get_or_insert(
-                &mut font_system,
-                &mut swash_cache,
-                &metrics,
-                &font_config.family,
-                key,
-            );
+            let key = test_key(&mut strings, ch, &font_config.family);
+            let id =
+                cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &strings, key);
+            let cached = cache.get_by_custom_id(id).expect("glifo cacheado");
             assert!(
                 !cached.raster.missing,
                 "char {:?} debe rasterizar con fallback avanzado",
@@ -465,32 +468,27 @@ mod tests {
         let offset = GlyphOffset { x: 0.0, y: 0.0 };
         let metrics_12 = CellMetrics::measure(&mut font_system, &family, 12.0, 1.0, offset);
         let metrics_14 = CellMetrics::measure(&mut font_system, &family, 14.0, 1.3, offset);
-        let key = GlyphKey {
-            ch: 'M',
-            extra: String::new(),
-            bold: false,
-            italic: false,
-            dim: false,
-            family: family.clone(),
-        };
+        let mut strings = GlyphStrings::new();
+        let key = test_key(&mut strings, 'M', &family);
         let mut cache = GlyphCache::new();
         assert!(cache.metrics_changed(&metrics_12));
-        let a = cache.get_or_insert(
+        let id_a = cache.get_or_insert(
             &mut font_system,
             &mut swash_cache,
             &metrics_12,
-            &family,
-            key.clone(),
+            &strings,
+            key,
         );
-        let h_12 = a.raster.height;
+        let h_12 = cache.get_by_custom_id(id_a).expect("glifo").raster.height;
         assert!(cache.metrics_changed(&metrics_14));
-        let b = cache.get_or_insert(
+        let id_b = cache.get_or_insert(
             &mut font_system,
             &mut swash_cache,
             &metrics_14,
-            &family,
+            &strings,
             key,
         );
+        let b = cache.get_by_custom_id(id_b).expect("glifo");
         assert_ne!(
             h_12, b.raster.height,
             "altura bitmap debe reflejar nuevo tamaño"
@@ -516,22 +514,12 @@ mod tests {
             font_config.glyph_offset,
         );
         let mut cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
         for ch in ['😀', '中'] {
-            let key = GlyphKey {
-                ch,
-                extra: String::new(),
-                bold: false,
-                italic: false,
-                dim: false,
-                family: font_config.family.clone(),
-            };
-            let cached = cache.get_or_insert(
-                &mut font_system,
-                &mut swash_cache,
-                &metrics,
-                &font_config.family,
-                key,
-            );
+            let key = test_key(&mut strings, ch, &font_config.family);
+            let id =
+                cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &strings, key);
+            let cached = cache.get_by_custom_id(id).expect("glifo cacheado");
             assert!(
                 !cached.raster.missing,
                 "char {:?} debe rasterizar (fallback emoji/CJK)",
@@ -561,24 +549,14 @@ mod tests {
             font_config.glyph_offset,
         );
         let mut cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
         let chars = ['┌', '─', '│', '┐', '\u{e0b0}', '\u{f0239}'];
 
         for ch in chars {
-            let key = GlyphKey {
-                ch,
-                extra: String::new(),
-                bold: false,
-                italic: false,
-                dim: false,
-                family: font_config.family.clone(),
-            };
-            let cached = cache.get_or_insert(
-                &mut font_system,
-                &mut swash_cache,
-                &metrics,
-                &font_config.family,
-                key,
-            );
+            let key = test_key(&mut strings, ch, &font_config.family);
+            let id =
+                cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &strings, key);
+            let cached = cache.get_by_custom_id(id).expect("glifo cacheado");
             assert!(
                 !cached.raster.missing,
                 "char {ch:?} (U+{:04X}) no debe ser tofu",

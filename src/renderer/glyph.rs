@@ -1,5 +1,7 @@
 //! Resolucion y shaping de glifos por celda.
 
+use std::collections::HashMap;
+
 use glyphon::cosmic_text::{FontSystem, Hinting, LayoutGlyph, Metrics, Shaping, Style, Weight};
 use glyphon::CacheKey;
 
@@ -9,19 +11,81 @@ use super::metrics::CellMetrics;
 use super::resolve_family;
 
 /// Clave de cache para un glifo con estilo tipografico.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Es `Copy`: las cadenas viven internadas en [`GlyphStrings`] y la clave
+/// solo guarda indices, asi copiarla (varias veces por celda y frame) no
+/// asigna memoria en el heap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
     pub ch: char,
-    /// Codepoints del grafema mas alla de `ch` (vacio si es un solo codepoint).
-    pub extra: String,
+    /// Indice del grafema extra en [`GlyphStrings`] (0 = sin extra).
+    pub extra: u32,
     pub bold: bool,
     pub italic: bool,
     pub dim: bool,
-    pub family: String,
+    /// Indice de la familia tipografica en [`GlyphStrings`].
+    pub family: u16,
+}
+
+/// Tablas de interning para las cadenas de [`GlyphKey`].
+///
+/// Viven en el `Renderer`, no en `Term`: el glyph cache es compartido entre
+/// panes y sessions, asi que los indices deben ser unicos a nivel de
+/// `Renderer`. Reusar los indices de `Term::grapheme_extras` produciria
+/// colisiones entre sessions.
+#[derive(Debug, Default)]
+pub struct GlyphStrings {
+    families: Vec<String>,
+    family_ids: HashMap<String, u16>,
+    /// El indice 0 es siempre el extra vacio.
+    extras: Vec<String>,
+    extra_ids: HashMap<String, u32>,
+}
+
+impl GlyphStrings {
+    pub fn new() -> Self {
+        Self {
+            families: Vec::new(),
+            family_ids: HashMap::new(),
+            extras: vec![String::new()],
+            extra_ids: HashMap::new(),
+        }
+    }
+
+    pub fn intern_family(&mut self, family: &str) -> u16 {
+        if let Some(&id) = self.family_ids.get(family) {
+            return id;
+        }
+        let id = self.families.len() as u16;
+        self.families.push(family.to_string());
+        self.family_ids.insert(family.to_string(), id);
+        id
+    }
+
+    pub fn intern_extra(&mut self, extra: &str) -> u32 {
+        if extra.is_empty() {
+            return 0;
+        }
+        if let Some(&id) = self.extra_ids.get(extra) {
+            return id;
+        }
+        let id = self.extras.len() as u32;
+        self.extras.push(extra.to_string());
+        self.extra_ids.insert(extra.to_string(), id);
+        id
+    }
+
+    pub fn family(&self, id: u16) -> &str {
+        &self.families[id as usize]
+    }
+
+    pub fn extra(&self, id: u32) -> &str {
+        &self.extras[id as usize]
+    }
 }
 
 /// Capa adicional de un cluster multi-glifo (misma celda que la base).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShapedOverlay {
     pub cache_key: CacheKey,
     pub bitmap_w: f32,
@@ -81,6 +145,7 @@ pub fn resolve_glyph_key(
     col: usize,
     family: &str,
     grapheme_extras: &[String],
+    strings: &mut GlyphStrings,
 ) -> Option<GlyphKey> {
     if is_wide_continuation(row, col) {
         return None;
@@ -91,15 +156,16 @@ pub fn resolve_glyph_key(
     }
     let extra = cell
         .extra_codepoints
-        .and_then(|idx| grapheme_extras.get(idx as usize).cloned())
-        .unwrap_or_default();
+        .and_then(|idx| grapheme_extras.get(idx as usize))
+        .map(|s| strings.intern_extra(s))
+        .unwrap_or(0);
     Some(GlyphKey {
         ch: cell.ch,
         extra,
         bold: cell.attrs.bold,
         italic: cell.attrs.italic,
         dim: cell.attrs.dim,
-        family: family.to_string(),
+        family: strings.intern_family(family),
     })
 }
 
@@ -109,17 +175,18 @@ pub fn shape_glyph(
     metrics: &CellMetrics,
     key: &GlyphKey,
     family: &str,
+    extra: &str,
 ) -> ShapedGlyph {
     if key.bold {
-        let bold = shape_with_style(font_system, metrics, key, family, true);
+        let bold = shape_with_style(font_system, metrics, key, family, extra, true);
         if is_bold_weight(bold.cache_key.font_weight) {
             return bold;
         }
-        let mut regular = shape_with_style(font_system, metrics, key, family, false);
+        let mut regular = shape_with_style(font_system, metrics, key, family, extra, false);
         regular.used_bold_fallback = true;
         return regular;
     }
-    shape_with_style(font_system, metrics, key, family, false)
+    shape_with_style(font_system, metrics, key, family, extra, false)
 }
 
 fn is_bold_weight(weight: Weight) -> bool {
@@ -131,6 +198,7 @@ fn shape_with_style(
     metrics: &CellMetrics,
     key: &GlyphKey,
     family: &str,
+    extra: &str,
     use_bold: bool,
 ) -> ShapedGlyph {
     let ct_metrics = Metrics::new(metrics.font_size, metrics.cell_h);
@@ -149,10 +217,10 @@ fn shape_with_style(
         attrs = attrs.style(Style::Italic);
     }
 
-    let ch_str = if key.extra.is_empty() {
+    let ch_str = if extra.is_empty() {
         key.ch.to_string()
     } else {
-        format!("{}{}", key.ch, key.extra)
+        format!("{}{}", key.ch, extra)
     };
     buf.set_text(font_system, &ch_str, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
@@ -260,19 +328,24 @@ mod tests {
         (font_system, metrics)
     }
 
+    fn test_key(strings: &mut GlyphStrings, ch: char, extra: &str, family: &str) -> GlyphKey {
+        GlyphKey {
+            ch,
+            extra: strings.intern_extra(extra),
+            bold: false,
+            italic: false,
+            dim: false,
+            family: strings.intern_family(family),
+        }
+    }
+
     #[test]
     fn m_advance_equals_cell_w() {
         let (mut font_system, metrics) = test_metrics();
         let family = FontConfig::default().family;
-        let key = GlyphKey {
-            ch: 'M',
-            extra: String::new(),
-            bold: false,
-            italic: false,
-            dim: false,
-            family: family.clone(),
-        };
-        let shaped = shape_glyph(&mut font_system, &metrics, &key, &family);
+        let mut strings = GlyphStrings::new();
+        let key = test_key(&mut strings, 'M', "", &family);
+        let shaped = shape_glyph(&mut font_system, &metrics, &key, &family, "");
         assert!(
             (shaped.advance - metrics.cell_w).abs() < 0.5,
             "advance {} debe coincidir con cell_w {}",
@@ -286,21 +359,21 @@ mod tests {
         let (mut font_system, metrics) = test_metrics();
         let mut swash_cache = glyphon::SwashCache::new();
         let family = FontConfig::default().family;
+        let mut strings = GlyphStrings::new();
         let mut cache = super::super::glyph_cache::GlyphCache::new();
 
         let anchors: Vec<f32> = "holaesto"
             .chars()
             .map(|ch| {
-                let key = GlyphKey {
-                    ch,
-                    extra: String::new(),
-                    bold: false,
-                    italic: false,
-                    dim: false,
-                    family: family.clone(),
-                };
-                let cached =
-                    cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &family, key);
+                let key = test_key(&mut strings, ch, "", &family);
+                let id = cache.get_or_insert(
+                    &mut font_system,
+                    &mut swash_cache,
+                    &metrics,
+                    &strings,
+                    key,
+                );
+                let cached = cache.get_by_custom_id(id).expect("glifo cacheado");
                 metrics.glyph_offset_y + cached.shaped.line_y + cached.shaped.top
             })
             .collect();
@@ -319,20 +392,20 @@ mod tests {
         let (mut font_system, metrics) = test_metrics();
         let family = FontConfig::default().family;
         let mut swash_cache = glyphon::SwashCache::new();
+        let mut strings = GlyphStrings::new();
         let mut cache = super::super::glyph_cache::GlyphCache::new();
         let anchors: Vec<f32> = "baud"
             .chars()
             .map(|ch| {
-                let key = GlyphKey {
-                    ch,
-                    extra: String::new(),
-                    bold: false,
-                    italic: false,
-                    dim: false,
-                    family: family.clone(),
-                };
-                let cached =
-                    cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &family, key);
+                let key = test_key(&mut strings, ch, "", &family);
+                let id = cache.get_or_insert(
+                    &mut font_system,
+                    &mut swash_cache,
+                    &metrics,
+                    &strings,
+                    key,
+                );
+                let cached = cache.get_by_custom_id(id).expect("glifo cacheado");
                 metrics.glyph_offset_y + cached.shaped.line_y.round() + cached.shaped.top
             })
             .collect();
@@ -355,52 +428,49 @@ mod tests {
     #[test]
     fn wide_char_continuation_returns_none() {
         let family = FontConfig::default().family;
+        let mut strings = GlyphStrings::new();
         let mut row = vec![Cell::default(); 4];
         row[0].ch = '\u{4e2d}';
         row[0].width = 2;
 
-        let key = resolve_glyph_key(&row, 0, &family, &[]);
+        let key = resolve_glyph_key(&row, 0, &family, &[], &mut strings);
         assert!(key.is_some(), "col 0 debe producir clave");
         assert_eq!(key.unwrap().ch, '\u{4e2d}');
 
         assert!(is_wide_continuation(&row, 1));
-        assert!(resolve_glyph_key(&row, 1, &family, &[]).is_none());
+        assert!(resolve_glyph_key(&row, 1, &family, &[], &mut strings).is_none());
     }
 
     #[test]
     fn glyph_key_incluye_extra_codepoints_en_el_texto_a_shapear() {
         let extras = vec!["\u{0301}".to_string()];
+        let mut strings = GlyphStrings::new();
         let mut row = vec![Cell::default(); 2];
         row[0].ch = 'e';
         row[0].width = 1;
         row[0].extra_codepoints = Some(0);
-        let key = resolve_glyph_key(&row, 0, "monospace", &extras).expect("key");
-        assert_eq!(key.extra, "\u{0301}");
+        let key = resolve_glyph_key(&row, 0, "monospace", &extras, &mut strings).expect("key");
+        assert_eq!(strings.extra(key.extra), "\u{0301}");
     }
 
     #[test]
     fn glyph_key_extra_vacio_sin_extra_codepoints() {
         let extras: Vec<String> = vec![];
+        let mut strings = GlyphStrings::new();
         let mut row = vec![Cell::default(); 1];
         row[0].ch = 'a';
         row[0].width = 1;
-        let key = resolve_glyph_key(&row, 0, "monospace", &extras).expect("key");
-        assert_eq!(key.extra, "");
+        let key = resolve_glyph_key(&row, 0, "monospace", &extras, &mut strings).expect("key");
+        assert_eq!(strings.extra(key.extra), "");
     }
 
     #[test]
     fn cluster_shaped_incluye_todas_las_capas_del_run() {
         let (mut font_system, metrics) = test_metrics();
         let family = FontConfig::default().family;
-        let key = GlyphKey {
-            ch: 'e',
-            extra: "\u{0301}".to_string(),
-            bold: false,
-            italic: false,
-            dim: false,
-            family: family.clone(),
-        };
-        let shaped = shape_glyph(&mut font_system, &metrics, &key, &family);
+        let mut strings = GlyphStrings::new();
+        let key = test_key(&mut strings, 'e', "\u{0301}", &family);
+        let shaped = shape_glyph(&mut font_system, &metrics, &key, &family, "\u{0301}");
         // Fuente puede componer a 1 glifo (overlays vacio) o emitir base+marca.
         // Lo importante: no se descarta el cluster; hay al menos la capa base.
         assert!(shaped.bitmap_w > 0.0 || !shaped.overlays.is_empty() || shaped.advance > 0.0);

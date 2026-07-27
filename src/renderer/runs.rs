@@ -379,18 +379,20 @@ mod tests {
             .into_iter()
             .next()
             .expect("glifo");
+        let mut strings = crate::renderer::GlyphStrings::new();
         let cell_g = crate::renderer::glyph::shape_glyph(
             &mut fs,
             &m,
             &crate::renderer::glyph::GlyphKey {
                 ch: '=',
-                extra: String::new(),
+                extra: 0,
                 bold: false,
                 italic: false,
                 dim: false,
-                family: fam.clone(),
+                family: strings.intern_family(&fam),
             },
             &fam,
+            "",
         );
         let run_anchor = run_g.line_y + run_g.top;
         let cell_anchor = cell_g.line_y + cell_g.top;
@@ -469,18 +471,20 @@ mod tests {
             crate::config::GlyphOffset { x: 0.0, y: 0.0 },
         );
         let mut swash = glyphon::SwashCache::new();
+        let mut strings = crate::renderer::GlyphStrings::new();
         let cell = crate::renderer::glyph::shape_glyph(
             &mut fs,
             &m,
             &crate::renderer::glyph::GlyphKey {
                 ch: '=',
-                extra: String::new(),
+                extra: 0,
                 bold: false,
                 italic: false,
                 dim: false,
-                family: "Fira Code".into(),
+                family: strings.intern_family("Fira Code"),
             },
             "Fira Code",
+            "",
         );
         let run_g = super::shape_run(&mut fs, &m, "Fira Code", "==", false, false, false);
         assert!(
@@ -518,6 +522,7 @@ mod tests {
         );
         let mut swash = glyphon::SwashCache::new();
         let mut cache = crate::renderer::glyph_cache::GlyphCache::new();
+        let mut strings = crate::renderer::GlyphStrings::new();
 
         for pattern in ["==", "===", ".."] {
             let glyphs = super::shape_run(&mut fs, &m, "Fira Code", pattern, false, false, false);
@@ -534,13 +539,14 @@ mod tests {
                 let gi = g.col_in_run;
                 let key = crate::renderer::glyph::GlyphKey {
                     ch: pattern.chars().nth(g.col_in_run).unwrap_or(' '),
-                    extra: String::new(),
+                    extra: 0,
                     bold: false,
                     italic: false,
                     dim: false,
-                    family: format!("Fira Code#lig:{pattern}:{gi}"),
+                    family: strings.intern_family(&format!("Fira Code#lig:{pattern}:{gi}")),
                 };
-                let cached = cache.get_or_insert_shaped(&mut fs, &mut swash, &m, key, shaped);
+                let id = cache.get_or_insert_shaped(&mut fs, &mut swash, &m, key, &shaped);
+                let cached = cache.get_by_custom_id(id).expect("glifo cacheado");
                 assert!(!cached.raster.missing, "patron={pattern} gi={gi}");
                 assert!(cached.raster.width > 0 && cached.raster.height > 0);
             }
@@ -636,6 +642,7 @@ mod ligature_probe {
         let Some(run_glyph) = run_glyphs.first() else {
             return false;
         };
+        let mut strings = crate::renderer::GlyphStrings::new();
         let per_char_ids: Vec<u16> = pattern
             .chars()
             .map(|ch| {
@@ -644,13 +651,14 @@ mod ligature_probe {
                     metrics,
                     &crate::renderer::glyph::GlyphKey {
                         ch,
-                        extra: String::new(),
+                        extra: 0,
                         bold: false,
                         italic: false,
                         dim: false,
-                        family: family.to_string(),
+                        family: strings.intern_family(family),
                     },
                     family,
+                    "",
                 )
                 .cache_key
                 .glyph_id

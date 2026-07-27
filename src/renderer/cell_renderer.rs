@@ -13,7 +13,7 @@ use super::decorations::{
 };
 use super::display_list::{resolve_fg_glyphon, CursorGlyph, DisplayList, LineQuad, TextGlyph};
 use super::geometry::cell_origin;
-use super::glyph::{GlyphKey, ShapedGlyph};
+use super::glyph::{GlyphKey, GlyphStrings, ShapedGlyph};
 use super::glyph_cache::GlyphCache;
 use super::limits::{self, MAX_CUSTOM_GLYPH_PIXELS};
 use super::metrics::CellMetrics;
@@ -49,8 +49,8 @@ impl CellRenderer {
         metrics: &CellMetrics,
         palette: &Palette<'_>,
         dim_alpha: bool,
-        font_family: &str,
         glyph_cache: &mut GlyphCache,
+        glyph_strings: &mut GlyphStrings,
         font_system: &mut glyphon::FontSystem,
         swash_cache: &mut glyphon::SwashCache,
         contrast_cache: &mut ContrastCache,
@@ -91,8 +91,8 @@ impl CellRenderer {
                 metrics,
                 palette,
                 dim_alpha,
-                font_family,
                 glyph_cache,
+                glyph_strings,
                 font_system,
                 swash_cache,
                 contrast_cache,
@@ -108,8 +108,8 @@ impl CellRenderer {
                 cursor,
                 metrics,
                 palette,
-                font_family,
                 glyph_cache,
+                glyph_strings,
                 font_system,
                 swash_cache,
             )? {
@@ -217,8 +217,8 @@ fn text_glyph_to_customs(
     metrics: &CellMetrics,
     palette: &Palette<'_>,
     dim_alpha: bool,
-    font_family: &str,
     glyph_cache: &mut GlyphCache,
+    glyph_strings: &mut GlyphStrings,
     font_system: &mut glyphon::FontSystem,
     swash_cache: &mut glyphon::SwashCache,
     contrast_cache: &mut ContrastCache,
@@ -267,42 +267,43 @@ fn text_glyph_to_customs(
         }]);
     }
 
-    let cached = if let Some(shaped) = text.run_shaped.clone() {
-        glyph_cache.get_or_insert_shaped(
-            font_system,
-            swash_cache,
-            metrics,
-            text.glyph_key.clone(),
-            shaped,
-        )
+    let base_id = if let Some(shaped) = &text.run_shaped {
+        glyph_cache.get_or_insert_shaped(font_system, swash_cache, metrics, text.glyph_key, shaped)
     } else {
         glyph_cache.get_or_insert(
             font_system,
             swash_cache,
             metrics,
-            font_family,
-            text.glyph_key.clone(),
+            glyph_strings,
+            text.glyph_key,
         )
     };
 
-    let overlays = cached.shaped.overlays.clone();
-    let line_y = cached.shaped.line_y;
     let mut out = Vec::new();
 
-    if let Some(cg) =
-        cached_text_to_custom(text, metrics, palette, dim_alpha, contrast_cache, cached)
-    {
-        out.push(cg);
+    if let Some(cached) = glyph_cache.get_by_custom_id(base_id) {
+        if let Some(cg) =
+            cached_text_to_custom(text, metrics, palette, dim_alpha, contrast_cache, cached)
+        {
+            out.push(cg);
+        }
     }
 
-    for (i, overlay) in overlays.into_iter().enumerate() {
+    let line_y = glyph_cache
+        .get_by_custom_id(base_id)
+        .map(|c| c.shaped.line_y)
+        .unwrap_or(0.0);
+    let overlay_count = glyph_cache.overlays(base_id).len();
+    for i in 0..overlay_count {
+        let overlay = glyph_cache.overlays(base_id)[i];
+        let tagged = format!("{}\u{0001}ov{i}", glyph_strings.extra(text.glyph_key.extra));
         let overlay_key = GlyphKey {
             ch: text.glyph_key.ch,
-            extra: format!("{}\u{0001}ov{i}", text.glyph_key.extra),
+            extra: glyph_strings.intern_extra(&tagged),
             bold: text.glyph_key.bold,
             italic: text.glyph_key.italic,
             dim: text.glyph_key.dim,
-            family: text.glyph_key.family.clone(),
+            family: text.glyph_key.family,
         };
         let overlay_shaped = ShapedGlyph {
             cache_key: overlay.cache_key,
@@ -315,22 +316,24 @@ fn text_glyph_to_customs(
             used_bold_fallback: false,
             overlays: Vec::new(),
         };
-        let overlay_cached = glyph_cache.get_or_insert_shaped(
+        let overlay_id = glyph_cache.get_or_insert_shaped(
             font_system,
             swash_cache,
             metrics,
             overlay_key,
-            overlay_shaped,
+            &overlay_shaped,
         );
-        if let Some(cg) = cached_text_to_custom(
-            text,
-            metrics,
-            palette,
-            dim_alpha,
-            contrast_cache,
-            overlay_cached,
-        ) {
-            out.push(cg);
+        if let Some(overlay_cached) = glyph_cache.get_by_custom_id(overlay_id) {
+            if let Some(cg) = cached_text_to_custom(
+                text,
+                metrics,
+                palette,
+                dim_alpha,
+                contrast_cache,
+                overlay_cached,
+            ) {
+                out.push(cg);
+            }
         }
     }
 
@@ -408,18 +411,22 @@ fn cursor_glyph_to_custom(
     cursor: &CursorGlyph,
     metrics: &CellMetrics,
     palette: &Palette<'_>,
-    font_family: &str,
     glyph_cache: &mut GlyphCache,
+    glyph_strings: &GlyphStrings,
     font_system: &mut glyphon::FontSystem,
     swash_cache: &mut glyphon::SwashCache,
 ) -> Result<Option<CustomGlyph>, String> {
-    let cached = glyph_cache.get_or_insert(
+    let cached_id = glyph_cache.get_or_insert(
         font_system,
         swash_cache,
         metrics,
-        font_family,
-        cursor.glyph_key.clone(),
+        glyph_strings,
+        cursor.glyph_key,
     );
+
+    let Some(cached) = glyph_cache.get_by_custom_id(cached_id) else {
+        return Ok(None);
+    };
 
     if cached.raster.missing {
         return Ok(None);
@@ -609,6 +616,7 @@ mod tests {
         let mut swash_cache = glyphon::SwashCache::new();
         let font_config = FontConfig::default();
         let mut cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
         let theme = crate::config::ThemeConfig::default();
         let palette = Palette::from_theme(&theme);
         let metrics = CellMetrics {
@@ -633,11 +641,11 @@ mod tests {
             width_cells: 1,
             glyph_key: GlyphKey {
                 ch,
-                extra: String::new(),
+                extra: 0,
                 bold: false,
                 italic: false,
                 dim: false,
-                family: font_config.family.clone(),
+                family: strings.intern_family(&font_config.family),
             },
             fg: Color::Green,
             bold: false,
@@ -656,8 +664,8 @@ mod tests {
             &metrics,
             &palette,
             theme.dim_alpha,
-            &font_config.family,
             &mut cache,
+            &mut strings,
             &mut font_system,
             &mut swash_cache,
             &mut contrast_cache,
@@ -682,6 +690,7 @@ mod tests {
         let mut swash_cache = glyphon::SwashCache::new();
         let font_config = FontConfig::default();
         let mut cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
         let theme = crate::config::ThemeConfig::default();
         let palette = Palette::from_theme(&theme);
         let metrics = CellMetrics {
@@ -706,11 +715,11 @@ mod tests {
             width_cells: 1,
             glyph_key: GlyphKey {
                 ch,
-                extra: String::new(),
+                extra: 0,
                 bold: false,
                 italic: false,
                 dim: false,
-                family: font_config.family.clone(),
+                family: strings.intern_family(&font_config.family),
             },
             fg: Color::Green,
             bold: false,
@@ -729,8 +738,8 @@ mod tests {
             &metrics,
             &palette,
             theme.dim_alpha,
-            &font_config.family,
             &mut cache,
+            &mut strings,
             &mut font_system,
             &mut swash_cache,
             &mut contrast_cache,
@@ -807,6 +816,7 @@ mod tests {
         let mut swash_cache = glyphon::SwashCache::new();
         let font_config = FontConfig::default();
         let mut cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
         let theme = crate::config::ThemeConfig::default();
         let palette = Palette::from_theme(&theme);
         let bg = crate::config::parse_hex(&theme.background);
@@ -818,11 +828,11 @@ mod tests {
             width_cells: 1,
             glyph_key: GlyphKey {
                 ch: 'A',
-                extra: String::new(),
+                extra: 0,
                 bold: false,
                 italic: false,
                 dim: false,
-                family: font_config.family.clone(),
+                family: strings.intern_family(&font_config.family),
             },
             fg: Color::Default,
             bold: false,
@@ -841,8 +851,8 @@ mod tests {
             &metrics,
             &palette,
             theme.dim_alpha,
-            &font_config.family,
             &mut cache,
+            &mut strings,
             &mut font_system,
             &mut swash_cache,
             &mut contrast_cache,
@@ -867,6 +877,7 @@ mod tests {
         let mut swash_cache = glyphon::SwashCache::new();
         let font_config = FontConfig::default();
         let mut cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
         let theme = crate::config::ThemeConfig::default();
         let palette = Palette::from_theme(&theme);
         let bg = crate::config::parse_hex(&theme.background);
@@ -878,11 +889,11 @@ mod tests {
             width_cells: 1,
             glyph_key: GlyphKey {
                 ch: 'W',
-                extra: String::new(),
+                extra: 0,
                 bold: true,
                 italic: false,
                 dim: false,
-                family: font_config.family.clone(),
+                family: strings.intern_family(&font_config.family),
             },
             fg: Color::Default,
             bold: true,
@@ -901,8 +912,8 @@ mod tests {
             &metrics,
             &palette,
             theme.dim_alpha,
-            &font_config.family,
             &mut cache,
+            &mut strings,
             &mut font_system,
             &mut swash_cache,
             &mut contrast_cache,
@@ -964,6 +975,7 @@ mod tests {
         let mut swash_cache = glyphon::SwashCache::new();
         let font_config = FontConfig::default();
         let mut cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
         let theme = crate::config::ThemeConfig::default();
         let palette = Palette::from_theme(&theme);
         let bg = crate::config::parse_hex(&theme.background);
@@ -976,11 +988,11 @@ mod tests {
             width_cells: 1,
             glyph_key: GlyphKey {
                 ch: 'A',
-                extra: String::new(),
+                extra: 0,
                 bold: false,
                 italic: false,
                 dim: false,
-                family: font_config.family.clone(),
+                family: strings.intern_family(&font_config.family),
             },
             fg: Color::Default,
             bold: false,
@@ -999,8 +1011,8 @@ mod tests {
             &metrics,
             &palette,
             theme.dim_alpha,
-            &font_config.family,
             &mut cache,
+            &mut strings,
             &mut font_system,
             &mut swash_cache,
             &mut contrast_cache,
@@ -1027,6 +1039,7 @@ mod tests {
         let mut swash_cache = glyphon::SwashCache::new();
         let font_config = FontConfig::default();
         let mut cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
         let theme = crate::config::ThemeConfig::default();
         let palette = Palette::from_theme(&theme);
         let bg = crate::config::parse_hex(&theme.background);
@@ -1038,11 +1051,11 @@ mod tests {
             width_cells: 2,
             glyph_key: GlyphKey {
                 ch: '😀',
-                extra: String::new(),
+                extra: 0,
                 bold: false,
                 italic: false,
                 dim: false,
-                family: font_config.family.clone(),
+                family: strings.intern_family(&font_config.family),
             },
             fg: Color::Default,
             bold: false,
@@ -1061,8 +1074,8 @@ mod tests {
             &metrics,
             &palette,
             theme.dim_alpha,
-            &font_config.family,
             &mut cache,
+            &mut strings,
             &mut font_system,
             &mut swash_cache,
             &mut contrast_cache,
@@ -1084,25 +1097,21 @@ mod tests {
         let mut swash_cache = glyphon::SwashCache::new();
         let font_config = FontConfig::default();
         let mut cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
         let key = GlyphKey {
             ch: '😀',
-            extra: String::new(),
+            extra: 0,
             bold: false,
             italic: false,
             dim: false,
-            family: font_config.family.clone(),
+            family: strings.intern_family(&font_config.family),
         };
-        let cached = cache.get_or_insert(
-            &mut font_system,
-            &mut swash_cache,
-            &metrics,
-            &font_config.family,
-            key,
-        );
+        let glyph_id =
+            cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &strings, key);
+        let cached = cache.get_by_custom_id(glyph_id).expect("glifo cacheado");
         assert!(!cached.raster.missing);
         let raster_w = cached.raster.width;
         let raster_h = cached.raster.height;
-        let glyph_id = cached.custom_glyph_id;
         let out = rasterize_custom_glyph(
             RasterizeCustomGlyphRequest {
                 id: glyph_id,
@@ -1131,25 +1140,21 @@ mod tests {
         let mut swash_cache = glyphon::SwashCache::new();
         let font_config = FontConfig::default();
         let mut cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
         let key = GlyphKey {
             ch: '中',
-            extra: String::new(),
+            extra: 0,
             bold: false,
             italic: false,
             dim: false,
-            family: font_config.family.clone(),
+            family: strings.intern_family(&font_config.family),
         };
-        let cached = cache.get_or_insert(
-            &mut font_system,
-            &mut swash_cache,
-            &metrics,
-            &font_config.family,
-            key,
-        );
+        let glyph_id =
+            cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &strings, key);
+        let cached = cache.get_by_custom_id(glyph_id).expect("glifo cacheado");
         assert!(!cached.raster.missing);
         let raster_w = cached.raster.width;
         let raster_h = cached.raster.height;
-        let glyph_id = cached.custom_glyph_id;
         let out = rasterize_custom_glyph(
             RasterizeCustomGlyphRequest {
                 id: glyph_id,
