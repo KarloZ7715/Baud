@@ -616,7 +616,7 @@ impl Term {
         self.title_dirty = true;
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, not(test)))]
     fn init_notification_thread_com() -> impl Drop {
         use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 
