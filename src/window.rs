@@ -3223,46 +3223,50 @@ impl ApplicationHandler<UserEvent> for App {
                     new_rows,
                     new_cols,
                 );
-                if let Ok(guard) = self.focused_term().lock() {
-                    let g = guard.active_grid();
-                    let n = g.rows.len().min(5);
-                    let mut summary_top = String::new();
-                    for r in 0..n {
-                        let s: String = g.rows[r].iter().take(20).map(|c| c.ch).collect();
-                        let cont = if r < g.row_continuations.len() && g.row_continuations[r] {
-                            "~"
-                        } else {
-                            "|"
-                        };
-                        summary_top.push_str(&format!("{}{}", cont, s));
+                // El resumen de grid toma un lock bloqueante del term y construye
+                // strings por fila; solo se justifica si el log debug esta activo.
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    if let Ok(guard) = self.focused_term().lock() {
+                        let g = guard.active_grid();
+                        let n = g.rows.len().min(5);
+                        let mut summary_top = String::new();
+                        for r in 0..n {
+                            let s: String = g.rows[r].iter().take(20).map(|c| c.ch).collect();
+                            let cont = if r < g.row_continuations.len() && g.row_continuations[r] {
+                                "~"
+                            } else {
+                                "|"
+                            };
+                            summary_top.push_str(&format!("{}{}", cont, s));
+                        }
+                        let rows_len = g.rows.len();
+                        let mut summary_bot = String::new();
+                        let bot_start = rows_len.saturating_sub(5);
+                        for r in bot_start..rows_len {
+                            let s: String = g.rows[r].iter().take(20).map(|c| c.ch).collect();
+                            let cont = if r < g.row_continuations.len() && g.row_continuations[r] {
+                                "~"
+                            } else {
+                                "|"
+                            };
+                            summary_bot.push_str(&format!("{}{}", cont, s));
+                        }
+                        let non_empty = g
+                            .rows
+                            .iter()
+                            .filter(|r| r.iter().any(|c| *c != Cell::default()))
+                            .count();
+                        tracing::debug!(
+                            "[RESIZE] grid: {}x{} sb={} filled={}/{} top=[{}] bot=[{}]",
+                            g.rows_count,
+                            g.cols_count,
+                            guard.grid.scrollback.len(),
+                            non_empty,
+                            rows_len,
+                            summary_top,
+                            summary_bot,
+                        );
                     }
-                    let rows_len = g.rows.len();
-                    let mut summary_bot = String::new();
-                    let bot_start = rows_len.saturating_sub(5);
-                    for r in bot_start..rows_len {
-                        let s: String = g.rows[r].iter().take(20).map(|c| c.ch).collect();
-                        let cont = if r < g.row_continuations.len() && g.row_continuations[r] {
-                            "~"
-                        } else {
-                            "|"
-                        };
-                        summary_bot.push_str(&format!("{}{}", cont, s));
-                    }
-                    let non_empty = g
-                        .rows
-                        .iter()
-                        .filter(|r| r.iter().any(|c| *c != Cell::default()))
-                        .count();
-                    tracing::debug!(
-                        "[RESIZE] grid: {}x{} sb={} filled={}/{} top=[{}] bot=[{}]",
-                        g.rows_count,
-                        g.cols_count,
-                        guard.grid.scrollback.len(),
-                        non_empty,
-                        rows_len,
-                        summary_top,
-                        summary_bot,
-                    );
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();
