@@ -827,6 +827,8 @@ impl App {
         let prev = self.config.clone();
         let restart_fields = Self::restart_required_fields(&prev, &new_cfg);
 
+        crate::diagnostics::logging::apply_log_level(new_cfg.diagnostics.log_level.as_deref());
+
         self.keybindings = new_cfg.keybindings();
         self.font_size = new_cfg.font.size;
 

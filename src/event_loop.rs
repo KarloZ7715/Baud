@@ -693,6 +693,7 @@ fn merge_launch_options(cfg: &Config, opts: &LaunchOptions) -> ProcessConfig {
 pub fn run(opts: LaunchOptions) -> Result<(), Box<dyn std::error::Error>> {
     let load_result = Config::load();
     let app_config = load_result.config;
+    crate::diagnostics::logging::apply_log_level(app_config.diagnostics.log_level.as_deref());
     let process_cfg = merge_launch_options(&app_config, &opts);
     let startup_command = process_cfg.startup_command.clone();
 

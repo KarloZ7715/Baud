@@ -26,15 +26,15 @@ pub fn set_reporter(handle: ReporterHandle) {
 pub fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        // Enviar al reporter si está disponible
-        if let Some(reporter) = REPORTER.get() {
-            let msg = panic_message(info);
-            let backtrace = panic_backtrace();
-            reporter.send(ReportEvent {
-                level: EventLevel::Error,
-                message: format!("panic: {msg}\n{backtrace}"),
-                timestamp: now_secs(),
-            });
+        let msg = panic_message(info);
+        let backtrace = panic_backtrace();
+
+        // Vía el registry de tracing: llega al log de archivo (único rastro
+        // que sobrevive con subsistema GUI y sin consola visible) y, a
+        // través de `ReporterLayer`, al reporter remoto si está activo.
+        tracing::error!("panic: {msg}\n{backtrace}");
+
+        if REPORTER.get().is_some() {
             // Dar tiempo al worker para enviar antes de que el proceso muera
             std::thread::sleep(std::time::Duration::from_millis(PANIC_FLUSH_GRACE_MS));
         }
