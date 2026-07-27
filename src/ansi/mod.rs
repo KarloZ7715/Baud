@@ -625,15 +625,22 @@ impl Term {
             tracing::debug!("notificación de escritorio ignorada: {title}: {body}");
         } else {
             #[cfg(not(test))]
-            match std::process::Command::new("notify-send")
-                .arg(title)
-                .arg(body)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
             {
-                Ok(_) => {}
-                Err(e) => tracing::warn!("notify-send no disponible: {e}"),
+                // En un hilo aparte: show() bloquea en el roundtrip a D-Bus
+                // (Linux) o al activar el toast (Windows), y no debe frenar
+                // el parseo de la sesión.
+                let title = title.to_owned();
+                let body = body.to_owned();
+                std::thread::spawn(move || {
+                    if let Err(e) = notify_rust::Notification::new()
+                        .appname("Baud")
+                        .summary(&title)
+                        .body(&body)
+                        .show()
+                    {
+                        tracing::warn!("notificación de escritorio fallo: {e}");
+                    }
+                });
             }
         }
     }
