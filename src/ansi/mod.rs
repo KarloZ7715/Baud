@@ -616,6 +616,26 @@ impl Term {
         self.title_dirty = true;
     }
 
+    #[cfg(windows)]
+    fn init_notification_thread_com() -> impl Drop {
+        use windows_sys::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+
+        struct ComApartment(bool);
+        impl Drop for ComApartment {
+            fn drop(&mut self) {
+                if self.0 {
+                    unsafe { windows_sys::Win32::System::Com::CoUninitialize() };
+                }
+            }
+        }
+
+        // ToastNotificationManager (activado por notify-rust) es WinRT, y un
+        // hilo recién creado no hereda ningún apartment COM/WinRT del hilo
+        // que lo generó.
+        let hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+        ComApartment(hr >= 0)
+    }
+
     fn emit_notification(&mut self, title: &str, body: &str) {
         #[cfg(test)]
         {
@@ -632,6 +652,8 @@ impl Term {
                 let title = title.to_owned();
                 let body = body.to_owned();
                 std::thread::spawn(move || {
+                    #[cfg(windows)]
+                    let _com = Self::init_notification_thread_com();
                     if let Err(e) = notify_rust::Notification::new()
                         .appname("Baud")
                         .summary(&title)
