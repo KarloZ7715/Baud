@@ -1,25 +1,25 @@
-//! Benches de Criterion para el hot path de inbound del PTY en Linux.
+//! Benches de Criterion para el hot path de inbound del PTY.
 //!
 //! Nota de base: `inbound_coalesced_256k` mide spawn+drain de una carga fija.
 //! Gate: sin regresión frente a esta bench tras cambios en el inbound;
 //! la ruta de producción no debe hacer `to_vec` por cada chunk leído.
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn main() {
-    eprintln!("pty_hot_path: benches solo disponibles en Unix");
+    eprintln!("pty_hot_path: benches solo disponibles en Unix y Windows");
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::hint::black_box;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::time::Duration;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use baud::pty::{spawn_with, ProcessConfig, SessionBackend};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 const PAYLOAD: usize = 256 * 1024;
 
 #[cfg(unix)]
@@ -65,7 +65,49 @@ fn drain_coalesced(master: &mut baud::pty::Pty) -> usize {
     total
 }
 
-#[cfg(unix)]
+#[cfg(windows)]
+fn spawn_writer() -> baud::pty::Pty {
+    let cfg = ProcessConfig {
+        shell: "powershell.exe".into(),
+        args: vec![
+            "-NoProfile".into(),
+            "-Command".into(),
+            format!("[Console]::Out.Write('0' * {PAYLOAD})"),
+        ],
+        ..ProcessConfig::default()
+    };
+    spawn_with(&cfg).expect("spawn PTY para bench")
+}
+
+/// Variante Windows: el master no es non-blocking en el mismo sentido, así
+/// que WouldBlock solo reintenta hasta completar la carga o agotar el plazo.
+#[cfg(windows)]
+fn drain_coalesced(master: &mut baud::pty::Pty) -> usize {
+    let mut scratch = [0u8; 4096];
+    let mut total = 0usize;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        match master.read_output(&mut scratch) {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
+                if total >= PAYLOAD {
+                    break;
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            Err(_) => break,
+        }
+    }
+    total
+}
+
+#[cfg(any(unix, windows))]
 fn bench_pty_inbound_coalesced(c: &mut Criterion) {
     let mut group = c.benchmark_group("pty_hot_path");
     group.throughput(Throughput::Bytes(PAYLOAD as u64));
@@ -82,16 +124,36 @@ fn bench_pty_inbound_coalesced(c: &mut Criterion) {
 }
 
 #[cfg(unix)]
+fn spawn_echo_shell() -> baud::pty::Pty {
+    spawn_with(&ProcessConfig {
+        shell: "bash".into(),
+        args: Vec::new(),
+        ..ProcessConfig::default()
+    })
+    .expect("spawn")
+}
+
+#[cfg(windows)]
+fn spawn_echo_shell() -> baud::pty::Pty {
+    spawn_with(&ProcessConfig {
+        shell: std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()),
+        args: Vec::new(),
+        ..ProcessConfig::default()
+    })
+    .expect("spawn")
+}
+
+#[cfg(unix)]
+const ECHO_LINE: &[u8] = b"echo BENCH_OK\n";
+#[cfg(windows)]
+const ECHO_LINE: &[u8] = b"echo BENCH_OK\r";
+
+#[cfg(any(unix, windows))]
 fn bench_pty_write_echo(c: &mut Criterion) {
     c.bench_function("pty_write_echo_line", |b| {
         b.iter(|| {
-            let mut master = spawn_with(&ProcessConfig {
-                shell: "bash".into(),
-                args: Vec::new(),
-                ..ProcessConfig::default()
-            })
-            .expect("spawn");
-            master.write_input(b"echo BENCH_OK\n").expect("write");
+            let mut master = spawn_echo_shell();
+            master.write_input(ECHO_LINE).expect("write");
             let mut scratch = [0u8; 4096];
             let mut found = false;
             for _ in 0..200 {
@@ -112,7 +174,7 @@ fn bench_pty_write_echo(c: &mut Criterion) {
     });
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 criterion_group!(benches, bench_pty_inbound_coalesced, bench_pty_write_echo);
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 criterion_main!(benches);
