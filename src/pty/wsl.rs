@@ -119,10 +119,10 @@ pub fn list_distros() -> io::Result<Vec<String>> {
         .args(["-l", "-q"])
         .output()?;
     if !out.status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            format!("wsl -l -q fallo: {}", String::from_utf8_lossy(&out.stderr)),
-        ));
+        return Err(io::Error::other(format!(
+            "wsl -l -q fallo: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )));
     }
     Ok(distros_from_output(&out.stdout))
 }

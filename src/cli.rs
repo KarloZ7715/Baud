@@ -167,7 +167,7 @@ fn run_update() -> Result<CliOutcome, Box<dyn std::error::Error>> {
     #[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
     {
         eprintln!("Error: self-update is only supported on Linux x86_64.");
-        return Ok(CliOutcome::Exit(EXIT_ERR));
+        Ok(CliOutcome::Exit(EXIT_ERR))
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

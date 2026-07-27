@@ -128,9 +128,8 @@ mod tests {
             // Clipboard bloqueado en CI u otro proceso — no fallar el suite.
             return;
         }
-        match backend.get(false) {
-            Ok(got) => assert_eq!(got, marker),
-            Err(_) => {}
+        if let Ok(got) = backend.get(false) {
+            assert_eq!(got, marker)
         }
     }
 }
