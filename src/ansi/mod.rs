@@ -1245,6 +1245,26 @@ impl Term {
         self.selection = None;
     }
 
+    /// Reset de vista ligado al input del usuario: vuelve al fondo del
+    /// scrollback, limpia la seleccion (fuera de copy mode), reinicia el
+    /// parpadeo del cursor y marca dirty. Lo aplican la GUI y el hilo de
+    /// drain segun quien consiga el lock, asi el eco nunca se pinta con la
+    /// vista desplazada hacia arriba.
+    pub fn apply_input_reset(&mut self) {
+        if self.scrollback_offset > 0 {
+            self.scrollback_offset = 0;
+        }
+        if self.copy_mode.is_none() {
+            self.clear_selection();
+        }
+        self.reset_blink_phase();
+        // El PTY puede no generar ningun eco (Space, Delete en linea vacia,
+        // Tab...), en cuyo caso term.dirty seguiria en false y el guard de
+        // RedrawRequested saltaria el repintado. Marcar dirty aqui cubre todo
+        // byte escrito por el usuario sin enumerar teclas sin eco una por una.
+        self.mark_dirty();
+    }
+
     /// Convierte una fila visible (indice en pantalla, 0..rows_count-1)
     /// a una fila logica dentro del buffer virtual [scrollback + grid].
     pub fn visible_to_logical_row(&self, visible_row: usize) -> usize {
@@ -2568,6 +2588,20 @@ mod tests {
         assert_eq!(term.cursor.rows_count, 30);
         assert_eq!(term.cursor.cols_count, 100);
         assert_eq!(term.scroll_region, (0, 29));
+    }
+
+    #[test]
+    fn apply_input_reset_vuelve_al_fondo_limpia_seleccion_y_marca_dirty() {
+        let mut term = Term::new();
+        term.scrollback_offset = 3;
+        term.selection = Some(Selection::new(SelectionPoint { row: 0, col: 0 }));
+        term.take_dirty(); // descartar el dirty inicial
+
+        term.apply_input_reset();
+
+        assert_eq!(term.scrollback_offset, 0);
+        assert!(term.selection.is_none());
+        assert!(term.take_dirty());
     }
 
     #[test]

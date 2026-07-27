@@ -6,7 +6,7 @@
 
 use std::collections::VecDeque;
 use std::io::ErrorKind;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -424,6 +424,8 @@ pub fn spawn_session(
 
     let term_drain = Arc::clone(&term);
     let proxy_for_drain = proxy.clone();
+    let input_reset_pending = Arc::new(AtomicBool::new(false));
+    let input_reset_drain = Arc::clone(&input_reset_pending);
 
     let drain_handle = thread::spawn(move || {
         let mut parser = vte::Parser::new();
@@ -482,6 +484,11 @@ pub fn spawn_session(
                     total_bytes += bytes.len();
                 }
                 term_guard.search_refresh_if_active();
+                // Reset diferido de send_input: se aplica bajo este mismo lock,
+                // antes de soltar el guard y de cualquier repintado del eco.
+                if input_reset_drain.swap(false, Ordering::AcqRel) {
+                    term_guard.apply_input_reset();
+                }
                 term_guard.mark_dirty();
                 term_guard.reset_blink_phase();
                 let response = term_guard.take_pty_response();
@@ -551,6 +558,7 @@ pub fn spawn_session(
         dirty: false,
         hold,
         close_on_exit,
+        input_reset_pending,
     };
 
     Ok(SpawnedSession {

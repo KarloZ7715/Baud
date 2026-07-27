@@ -1,6 +1,6 @@
 //! Una sesion = una terminal (PTY + Term + canal de input).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::ansi::Term;
@@ -28,6 +28,10 @@ pub struct Session {
     pub hold: bool,
     /// Si es true, la sesion se lanzo desde `-e` y sin `--hold` debe cerrarse al salir.
     pub close_on_exit: bool,
+    /// Reset de vista pendiente tras input del usuario (ver
+    /// `Term::apply_input_reset`). Lo activa `send_input` y lo consumen el
+    /// hilo de drain o la GUI, segun quien consiga el lock del term.
+    pub input_reset_pending: Arc<AtomicBool>,
 }
 
 #[cfg(test)]

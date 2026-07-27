@@ -1742,24 +1742,31 @@ impl App {
         if session.hold {
             return;
         }
-        // Resetear scrollback offset al enviar cualquier input al PTY
-        if let Ok(mut guard) = self.focused_term().lock() {
-            if guard.scrollback_offset > 0 {
-                guard.scrollback_offset = 0;
-            }
-            // Limpiar seleccion al escribir teclas (no en copy mode).
-            if guard.copy_mode.is_none() {
-                guard.clear_selection();
-            }
-            guard.reset_blink_phase();
-            // El PTY puede no generar ningun eco (Space, Delete en linea vacia, Tab...),
-            // en cuyo caso term.dirty seguiria en false y el guard de RedrawRequested
-            // saltaria el repintado. Marcar dirty aqui cubre todo byte escrito por el
-            // usuario sin enumerar teclas sin eco una por una.
-            guard.mark_dirty();
+        // El flag se activa antes de intentar el lock: si el drain lo tiene
+        // parseando output, el propio drain aplica el reset bajo su lock
+        // antes de pintar el eco; si no, lo aplica about_to_wait. Un lock
+        // bloqueante aqui congelaria el event loop compitiendo con el parseo.
+        session.input_reset_pending.store(true, Ordering::Release);
+        if let Ok(mut guard) = self.focused_term().try_lock() {
+            guard.apply_input_reset();
+            session.input_reset_pending.store(false, Ordering::Release);
         }
         tracing::debug!("send_input: {} bytes: {:02x?}", bytes.len(), bytes);
         let _ = session.pty_tx.send(PtyCommand::Input(bytes));
+    }
+
+    /// Aplica el reset de vista diferido por `send_input` cuando el lock del
+    /// term estaba ocupado. Si sigue ocupado el flag queda activo y el hilo
+    /// de drain lo honra bajo su propio lock.
+    fn apply_pending_input_reset(&self) {
+        let session = self.focused_session();
+        if !session.input_reset_pending.load(Ordering::Acquire) {
+            return;
+        }
+        if let Ok(mut guard) = session.term.try_lock() {
+            guard.apply_input_reset();
+            session.input_reset_pending.store(false, Ordering::Release);
+        }
     }
 
     /// Pide un redraw para un update de seleccion (drag o teclado) respetando
@@ -2832,6 +2839,7 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.exit();
             return;
         }
+        self.apply_pending_input_reset();
         if self.tick_tab_close_fade() {
             if let Some(window) = &self.window {
                 window.request_redraw();
@@ -4379,6 +4387,7 @@ mod tests {
             dirty: false,
             hold: false,
             close_on_exit: false,
+            input_reset_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -4549,6 +4558,44 @@ mod tests {
         assert!(
             !app.pane_is_dirty(id),
             "send_input no debe marcar dirty en sesion held"
+        );
+    }
+
+    #[test]
+    fn send_input_con_lock_ocupado_difiere_el_reset() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let app = test_app(term.clone());
+        let id = app.sessions[0].session.id;
+        term.lock().expect("term mutex").take_dirty();
+        let guard = term.lock().expect("term mutex");
+
+        app.send_input(b"a".to_vec());
+
+        assert!(
+            app.sessions[0]
+                .session
+                .input_reset_pending
+                .load(Ordering::Relaxed),
+            "con el lock ocupado el reset queda pendiente"
+        );
+        assert!(
+            !guard.dirty,
+            "el dirty se difiere mientras el lock esta ocupado"
+        );
+
+        drop(guard);
+        app.apply_pending_input_reset();
+
+        assert!(
+            !app.sessions[0]
+                .session
+                .input_reset_pending
+                .load(Ordering::Relaxed),
+            "el flag se consume al aplicar el reset"
+        );
+        assert!(
+            app.pane_is_dirty(id),
+            "el reset diferido marca dirty al aplicarse"
         );
     }
 
