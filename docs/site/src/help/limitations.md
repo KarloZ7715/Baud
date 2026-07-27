@@ -19,10 +19,6 @@ A consolidated list of things Baud does not do yet, gathered from the rest of th
 - **No "clear scrollback" action.**
 - The kitty keyboard protocol doesn't implement the "report alternate keys" or "report associated text" flags; see the [Terminal API](../vt/index.md#kitty-keyboard-protocol) page.
 
-## Linux-only integrations
-
-Opening a URL and sending a desktop notification both currently shell out to Linux desktop utilities (`xdg-open`, `notify-send`). On Windows, both are silent no-ops today — see [Notifications and URLs](../features/notifications-and-urls.md).
-
 ## VT compatibility notes
 
 - `DECSTBM` (set scrolling region) follows the common xterm convention for an invalid range (reset to full screen) rather than the stricter VT510 behavior (ignore the request). Most software expects the xterm behavior.
