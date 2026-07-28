@@ -37,6 +37,7 @@ const MAX_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 192 * 1024 * 1024;
 const MAX_DESKTOP_BYTES: u64 = 64 * 1024;
 const MAX_ICON_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_MAN_BYTES: u64 = 256 * 1024;
 
 /// Clave publica embebida para verificar el manifiesto de actualizacion.
 const UPDATE_PUBLIC_KEY_BYTES: [u8; 32] = [
@@ -446,6 +447,7 @@ fn validate_file_size(path: &Path, size: u64) -> Result<(), UpdateError> {
         Some("share/applications/baud.desktop") => MAX_DESKTOP_BYTES,
         Some("share/icons/hicolor/48x48/apps/baud.png") => MAX_ICON_BYTES,
         Some("share/icons/hicolor/256x256/apps/baud.png") => MAX_ICON_BYTES,
+        Some("share/man/man1/baud.1") => MAX_MAN_BYTES,
         _ => {
             return Err(UpdateError::ArchiveInvalid(format!(
                 "unexpected file: {}",
@@ -474,6 +476,8 @@ fn allowed_dir(path: &Path) -> bool {
             | "share/icons/hicolor/48x48/apps"
             | "share/icons/hicolor/256x256"
             | "share/icons/hicolor/256x256/apps"
+            | "share/man"
+            | "share/man/man1"
     )
 }
 
@@ -483,6 +487,7 @@ fn verify_staging_contents(staging: &Path) -> Result<(), UpdateError> {
         staging.join("share/applications/baud.desktop"),
         staging.join("share/icons/hicolor/48x48/apps/baud.png"),
         staging.join("share/icons/hicolor/256x256/apps/baud.png"),
+        staging.join("share/man/man1/baud.1"),
     ];
 
     for path in &expected {
@@ -556,6 +561,10 @@ fn commit_update(installation: &Installation, staging: &Path) -> Result<(), Upda
             installation
                 .data_dir
                 .join("icons/hicolor/256x256/apps/baud.png"),
+        ),
+        (
+            staging.join("share/man/man1/baud.1"),
+            installation.data_dir.join("man/man1/baud.1"),
         ),
     ];
 
@@ -925,6 +934,7 @@ mod tests {
         fs::create_dir_all(staging.join("share/applications")).unwrap();
         fs::create_dir_all(staging.join("share/icons/hicolor/48x48/apps")).unwrap();
         fs::create_dir_all(staging.join("share/icons/hicolor/256x256/apps")).unwrap();
+        fs::create_dir_all(staging.join("share/man/man1")).unwrap();
 
         let binary = staging.join("baud");
         fs::write(&binary, format!("#!/bin/sh\necho 'baud {new_version}'\n")).unwrap();
@@ -943,6 +953,7 @@ mod tests {
             "icon256",
         )
         .unwrap();
+        fs::write(staging.join("share/man/man1/baud.1"), ".TH BAUD 1\n").unwrap();
 
         let mut buf = Vec::new();
         {
