@@ -32,10 +32,12 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
-      - name: Instalar mdBook v0.5.4
+      - name: Instalar mdBook v0.5.4 y mdbook-mermaid v0.17.0
         run: |
           curl -sL https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz | sudo tar xz -C /usr/local/bin
+          curl -sL https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.0/mdbook-mermaid-v0.17.0-x86_64-unknown-linux-gnu.tar.gz | sudo tar xz -C /usr/local/bin
           mdbook --version
+          mdbook-mermaid --version
 
       # changelog.md tiene un unico hogar (CHANGELOG.md); se copia al fuente
       # del libro antes de compilar y la copia esta ignorada por git

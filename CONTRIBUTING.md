@@ -86,7 +86,7 @@ docs(config): describe scrollback.lines default
 
 ## Documentation
 
-The site is built with [mdBook](https://rust-lang.github.io/mdBook/) v0.5.4. To edit it locally:
+The site is built with [mdBook](https://rust-lang.github.io/mdBook/) v0.5.4 and [mdbook-mermaid](https://github.com/badboy/mdbook-mermaid) v0.17.0 (both must be on your `PATH`). To edit it locally:
 
 ```sh
 cp CHANGELOG.md docs/site/src/changelog.md

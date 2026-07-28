@@ -1,14 +1,18 @@
 # Contributing to the docs
 
-The site lives in `docs/site/` and is built with [mdBook](https://rust-lang.github.io/mdBook/) `v0.5.4` (pinned in `.github/workflows/docs.yml`).
+The site lives in `docs/site/` and is built with [mdBook](https://rust-lang.github.io/mdBook/) `v0.5.4` and [mdbook-mermaid](https://github.com/badboy/mdbook-mermaid) `v0.17.0` (both pinned in `.github/workflows/docs.yml`).
 
 ## Previewing
 
+Install the preprocessor once (same version as CI), then serve:
+
 ```sh
+# example: prebuilt linux x86_64 binary
+curl -sL https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.0/mdbook-mermaid-v0.17.0-x86_64-unknown-linux-gnu.tar.gz | tar xz -C ~/.local/bin
 mdbook serve docs/site
 ```
 
-Serves the book locally with live reload as you edit files under `docs/site/src/`.
+Serves the book locally with live reload as you edit files under `docs/site/src/`. Diagrams use fenced `mermaid` code blocks; `mermaid.min.js` and `mermaid-init.js` are vendored next to `book.toml`.
 
 ## Generated reference pages
 

@@ -44,10 +44,12 @@ jobs:
       - name: Verify generated reference
         run: cargo run --bin docs-gen -- --check
 
-      - name: Install mdBook v0.5.4
+      - name: Install mdBook v0.5.4 and mdbook-mermaid v0.17.0
         run: |
           curl -sL https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz | sudo tar xz -C /usr/local/bin
+          curl -sL https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.0/mdbook-mermaid-v0.17.0-x86_64-unknown-linux-gnu.tar.gz | sudo tar xz -C /usr/local/bin
           mdbook --version
+          mdbook-mermaid --version
 
       - name: Build documentation site
         run: |

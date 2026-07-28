@@ -16,8 +16,14 @@ site-url = "/Baud/"
 git-repository-url = "https://github.com/KarloZ7715/Baud"
 edit-url-template = "https://github.com/KarloZ7715/Baud/edit/master/docs/site/{path}"
 additional-css = ["theme/custom.css"]
+additional-js = ["mermaid.min.js", "mermaid-init.js"]
 
 [output.html.search]
 enable = true
 use-boolean-and = true
 boost-title = 2
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"
