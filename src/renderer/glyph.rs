@@ -24,7 +24,7 @@ pub struct GlyphKey {
     pub italic: bool,
     pub dim: bool,
     /// Indice de la familia tipografica en [`GlyphStrings`].
-    pub family: u16,
+    pub family: u32,
 }
 
 /// Tablas de interning para las cadenas de [`GlyphKey`].
@@ -33,13 +33,20 @@ pub struct GlyphKey {
 /// panes y sessions, asi que los indices deben ser unicos a nivel de
 /// `Renderer`. Reusar los indices de `Term::grapheme_extras` produciria
 /// colisiones entre sessions.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct GlyphStrings {
     families: Vec<String>,
-    family_ids: HashMap<String, u16>,
+    family_ids: HashMap<String, u32>,
     /// El indice 0 es siempre el extra vacio.
     extras: Vec<String>,
     extra_ids: HashMap<String, u32>,
+}
+
+// Default manual: el derive dejaria `extras` vacio y `extra(0)` paniquearia.
+impl Default for GlyphStrings {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GlyphStrings {
@@ -52,11 +59,15 @@ impl GlyphStrings {
         }
     }
 
-    pub fn intern_family(&mut self, family: &str) -> u16 {
+    /// Las pseudo-familias de ligaduras (`familia#lig:texto:idx`) se internan
+    /// aqui mismo y su cardinalidad no esta acotada por la config, asi que el
+    /// id es u32: con u16 una sesion larga podria agotar los 65535 ids y
+    /// colisionar familias distintas.
+    pub fn intern_family(&mut self, family: &str) -> u32 {
         if let Some(&id) = self.family_ids.get(family) {
             return id;
         }
-        let id = self.families.len() as u16;
+        let id = self.families.len() as u32;
         self.families.push(family.to_string());
         self.family_ids.insert(family.to_string(), id);
         id
@@ -75,7 +86,7 @@ impl GlyphStrings {
         id
     }
 
-    pub fn family(&self, id: u16) -> &str {
+    pub fn family(&self, id: u32) -> &str {
         &self.families[id as usize]
     }
 
