@@ -3680,7 +3680,21 @@ impl ApplicationHandler<UserEvent> for App {
                                     window.request_redraw();
                                 }
                             }
+                            if self.tab_hover.is_some() {
+                                self.tab_hover = None;
+                                self.tab_anim_last = Instant::now();
+                                if let Some(window) = &self.window {
+                                    window.request_redraw();
+                                }
+                            }
                             return;
+                        }
+                        if hit != TitleBarHit::TabArea && self.tab_hover.is_some() {
+                            self.tab_hover = None;
+                            self.tab_anim_last = Instant::now();
+                            if let Some(window) = &self.window {
+                                window.request_redraw();
+                            }
                         }
                         if self.title_bar_hover.is_some() {
                             self.title_bar_hover = None;
@@ -3705,6 +3719,13 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                         if self.title_bar_hover.is_some() {
                             self.title_bar_hover = None;
+                            if let Some(window) = &self.window {
+                                window.request_redraw();
+                            }
+                        }
+                        if self.tab_hover.is_some() {
+                            self.tab_hover = None;
+                            self.tab_anim_last = Instant::now();
                             if let Some(window) = &self.window {
                                 window.request_redraw();
                             }

@@ -1616,13 +1616,26 @@ height = 800
     fn test_window_config_defaults() {
         let cfg = Config::default();
         assert_eq!(cfg.window.padding_x, 0);
-        // Decorations activas por defecto en ambos SO: la sensacion compacta
-        // viene de materiales/tema/fuentes, no de chrome sin bordes.
+        // Default de decoraciones depende de la plataforma: custom en Windows,
+        // system en Linux para no romper las decoraciones del escritorio.
+        #[cfg(target_os = "windows")]
+        assert_eq!(cfg.window.decorations.kind(), DecorationsKind::Custom);
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(cfg.window.decorations.kind(), DecorationsKind::System);
         assert_eq!(cfg.window.startup, StartupState::Windowed);
         // Opacidad plena por defecto: la misma clave gobierna el alpha del
         // compositor en Linux y el material nativo en Windows.
         assert_eq!(cfg.window.opacity, 1.0);
+    }
+
+    #[test]
+    fn test_window_decorations_enum_strings() {
+        let cfg: Config = toml::from_str("[window]\ndecorations = \"custom\"\n").unwrap();
+        assert_eq!(cfg.window.decorations.kind(), DecorationsKind::Custom);
+        let cfg: Config = toml::from_str("[window]\ndecorations = \"none\"\n").unwrap();
+        assert_eq!(cfg.window.decorations.kind(), DecorationsKind::None);
+        let cfg: Config = toml::from_str("[window]\ndecorations = \"system\"\n").unwrap();
+        assert_eq!(cfg.window.decorations.kind(), DecorationsKind::System);
     }
 
     #[test]
