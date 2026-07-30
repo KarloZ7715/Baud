@@ -2,10 +2,11 @@ use baud::ansi::Term;
 use baud::config::ThemeConfig;
 use baud::grid::{Cell, DamageSnapshot, Grid};
 use baud::renderer::{
-    clear_builtin_cache, CellGeometry, CellMetrics, ContrastCache, DisplayList, DisplayListBuilder,
-    Palette,
+    clear_builtin_cache, CellGeometry, CellMetrics, CellRenderer, ContrastCache, DisplayList,
+    DisplayListBuilder, GlyphCache, GlyphStrings, Palette,
 };
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use glyphon::{FontSystem, SwashCache};
 
 fn dummy_metrics() -> CellMetrics {
     CellMetrics {
@@ -122,6 +123,67 @@ fn bench_display_list_build(c: &mut Criterion) {
     }
 }
 
+/// Mide `CellRenderer::build_custom_glyphs` con damage total (fila fria),
+/// que es el costo de conversion completo que paga cada cache miss: 1
+/// conversion de glifo cacheado por celda de texto, mas fondos/decoraciones.
+/// No mide el camino de reuso por fila (cache caliente), que es O(1) por
+/// frame sin damage y no aporta senal de regresion sobre la conversion.
+fn bench_custom_glyphs_build(c: &mut Criterion) {
+    let (rows, cols) = (50, 200);
+    let (term, theme, family, metrics, grid_rows) = synthetic_grid(rows, cols);
+    let row_sources: Vec<&[Cell]> = grid_rows.iter().map(|r| r.as_slice()).collect();
+    let palette = Palette::from_theme(&theme);
+    let mut contrast_cache = ContrastCache::default();
+    let mut strings = GlyphStrings::new();
+
+    let mut list = DisplayList::default();
+    DisplayListBuilder::build(
+        &mut list,
+        &term,
+        &metrics,
+        &palette,
+        theme.dim_alpha,
+        &row_sources,
+        cols,
+        rows,
+        &family,
+        &DamageSnapshot::Full,
+        false,
+        true,
+        true,
+        false,
+        &mut None,
+        &mut None,
+        &mut contrast_cache,
+        &mut strings,
+    );
+
+    c.bench_function("custom_glyphs_build_200x50", |b| {
+        let mut font_system = FontSystem::new();
+        let mut swash_cache = SwashCache::new();
+        let mut glyph_cache = GlyphCache::new();
+        let mut row_cache = Vec::new();
+        let mut out = Vec::new();
+        b.iter(|| {
+            CellRenderer::build_custom_glyphs(
+                &list,
+                &metrics,
+                &palette,
+                theme.dim_alpha,
+                &mut glyph_cache,
+                &mut strings,
+                &mut font_system,
+                &mut swash_cache,
+                &mut contrast_cache,
+                &mut row_cache,
+                &DamageSnapshot::Full,
+                &mut out,
+            )
+            .expect("build_custom_glyphs");
+        });
+    });
+}
+
 fn bench_builtin_render_cached(c: &mut Criterion) {
     clear_builtin_cache();
     c.bench_function("builtin_render_cached", |b| {
@@ -230,6 +292,7 @@ criterion_group!(
     bench_scroll_pop,
     bench_reflow,
     bench_display_list_build,
+    bench_custom_glyphs_build,
     bench_builtin_render_cached,
     bench_parse_throughput
 );
