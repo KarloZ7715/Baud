@@ -498,6 +498,51 @@ pub enum StartupState {
     Fullscreen,
 }
 
+/// Modo de decoraciones de ventana.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DecorationsKind {
+    /// Decoraciones nativas del sistema operativo / compositor.
+    #[default]
+    System,
+    /// Barra de título propia con botones de ventana.
+    Custom,
+    /// Sin decoraciones ni sombra.
+    None,
+}
+
+/// Valor de `window.decorations` que acepta el bool histórico y el enum actual.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum WindowDecorations {
+    Bool(bool),
+    Name(DecorationsKind),
+}
+
+impl WindowDecorations {
+    /// Resuelve el valor efectivo: `true` → `system`, `false` → `none`.
+    pub fn kind(self) -> DecorationsKind {
+        match self {
+            WindowDecorations::Bool(true) => DecorationsKind::System,
+            WindowDecorations::Bool(false) => DecorationsKind::None,
+            WindowDecorations::Name(k) => k,
+        }
+    }
+}
+
+impl Default for WindowDecorations {
+    fn default() -> Self {
+        #[cfg(target_os = "windows")]
+        {
+            WindowDecorations::Name(DecorationsKind::Custom)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            WindowDecorations::Name(DecorationsKind::System)
+        }
+    }
+}
+
 /// Configuración de la ventana (opacidad, padding, decoraciones, tamaño).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WindowConfig {
@@ -508,8 +553,8 @@ pub struct WindowConfig {
     pub padding_x: u16,
     #[serde(default)]
     pub padding_y: u16,
-    #[serde(default = "default_true")]
-    pub decorations: bool,
+    #[serde(default)]
+    pub decorations: WindowDecorations,
     #[serde(default)]
     pub startup: StartupState,
     /// Ancho inicial en píxeles lógicos. Solo aplica con `startup = "windowed"`.
@@ -716,7 +761,7 @@ impl Default for WindowConfig {
             opacity: default_opacity(),
             padding_x: 0,
             padding_y: 0,
-            decorations: true,
+            decorations: WindowDecorations::default(),
             startup: StartupState::Windowed,
             width: default_win_width(),
             height: default_win_height(),
@@ -1561,7 +1606,7 @@ height = 800
         assert!((cfg.window.opacity - 0.9).abs() < f32::EPSILON);
         assert_eq!(cfg.window.padding_x, 8);
         assert_eq!(cfg.window.padding_y, 6);
-        assert!(!cfg.window.decorations);
+        assert_eq!(cfg.window.decorations.kind(), DecorationsKind::None);
         assert_eq!(cfg.window.startup, StartupState::Maximized);
         assert_eq!(cfg.window.width, 1200);
         assert_eq!(cfg.window.height, 800);
@@ -1573,7 +1618,7 @@ height = 800
         assert_eq!(cfg.window.padding_x, 0);
         // Decorations activas por defecto en ambos SO: la sensacion compacta
         // viene de materiales/tema/fuentes, no de chrome sin bordes.
-        assert!(cfg.window.decorations);
+        assert_eq!(cfg.window.decorations.kind(), DecorationsKind::System);
         assert_eq!(cfg.window.startup, StartupState::Windowed);
         // Opacidad plena por defecto: la misma clave gobierna el alpha del
         // compositor en Linux y el material nativo en Windows.
