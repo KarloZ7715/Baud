@@ -86,7 +86,7 @@ impl CellRenderer {
         }
 
         for text in &display_list.text_glyphs {
-            for glyph in text_glyph_to_customs(
+            text_glyph_to_customs(
                 text,
                 metrics,
                 palette,
@@ -96,11 +96,8 @@ impl CellRenderer {
                 font_system,
                 swash_cache,
                 contrast_cache,
-            )? {
-                if limits::custom_pixels(glyph.width, glyph.height) <= MAX_CUSTOM_GLYPH_PIXELS {
-                    out.push(glyph);
-                }
-            }
+                out,
+            )?;
         }
 
         if let Some(cursor) = &display_list.cursor {
@@ -212,6 +209,10 @@ const LAYER_TEXT: usize = 2;
     clippy::too_many_arguments,
     reason = "GPU glyph build needs palette + cache handles"
 )]
+/// Escribe los `CustomGlyph` de una celda en el buffer del llamante.
+///
+/// Recibe `out` para evitar una asignacion de `Vec` por glifo en el camino
+/// caliente; el limite de pixeles se aplica dentro de cada rama.
 fn text_glyph_to_customs(
     text: &TextGlyph,
     metrics: &CellMetrics,
@@ -222,17 +223,18 @@ fn text_glyph_to_customs(
     font_system: &mut glyphon::FontSystem,
     swash_cache: &mut glyphon::SwashCache,
     contrast_cache: &mut ContrastCache,
-) -> Result<Vec<CustomGlyph>, String> {
+    out: &mut Vec<CustomGlyph>,
+) -> Result<(), String> {
     if text.box_glyph {
         let Some(id) = builtin_custom_glyph_id(text.glyph_key.ch) else {
-            return Ok(Vec::new());
+            return Ok(());
         };
         let gw = metrics.geometry.cell_w as f32;
         let gh = metrics.geometry.cell_h as f32;
         let width = limits::clamp_custom_dimension(gw * text.width_cells.min(2) as f32, gw, 2);
         let height = limits::clamp_custom_dimension(gh, gh, 1);
         if limits::custom_pixels(width, height) > MAX_CUSTOM_GLYPH_PIXELS {
-            return Ok(Vec::new());
+            return Ok(());
         }
         let fg_color = if text.selected {
             selection_fg_glyphon(palette.theme)
@@ -255,7 +257,7 @@ fn text_glyph_to_customs(
             metrics.padding_x,
             metrics.padding_y,
         );
-        return Ok(vec![CustomGlyph {
+        out.push(CustomGlyph {
             id,
             left,
             top,
@@ -264,7 +266,8 @@ fn text_glyph_to_customs(
             color: Some(fg_color),
             snap_to_physical_pixel: true,
             metadata: LAYER_TEXT,
-        }]);
+        });
+        return Ok(());
     }
 
     let base_id = if let Some(shaped) = &text.run_shaped {
@@ -278,8 +281,6 @@ fn text_glyph_to_customs(
             text.glyph_key,
         )
     };
-
-    let mut out = Vec::new();
 
     if let Some(cached) = glyph_cache.get_by_custom_id(base_id) {
         if let Some(cg) =
@@ -337,7 +338,7 @@ fn text_glyph_to_customs(
         }
     }
 
-    Ok(out)
+    Ok(())
 }
 
 fn cached_text_to_custom(
@@ -659,7 +660,8 @@ mod tests {
             run_shaped: None,
         };
 
-        let cg = text_glyph_to_customs(
+        let mut glyphs = Vec::new();
+        text_glyph_to_customs(
             &text,
             &metrics,
             &palette,
@@ -669,11 +671,10 @@ mod tests {
             &mut font_system,
             &mut swash_cache,
             &mut contrast_cache,
+            &mut glyphs,
         )
-        .expect("ok")
-        .into_iter()
-        .next()
-        .expect("box glyph");
+        .expect("ok");
+        let cg = glyphs.into_iter().next().expect("box glyph");
 
         assert!(cache.is_empty(), "box_glyph no debe insertar en GlyphCache");
         assert_eq!(cg.id, builtin_custom_glyph_id(ch).expect("id"));
@@ -733,7 +734,8 @@ mod tests {
             run_shaped: None,
         };
 
-        let cg = text_glyph_to_customs(
+        let mut glyphs = Vec::new();
+        text_glyph_to_customs(
             &text,
             &metrics,
             &palette,
@@ -743,11 +745,10 @@ mod tests {
             &mut font_system,
             &mut swash_cache,
             &mut contrast_cache,
+            &mut glyphs,
         )
-        .expect("ok")
-        .into_iter()
-        .next()
-        .expect("powerline");
+        .expect("ok");
+        let cg = glyphs.into_iter().next().expect("powerline");
 
         assert!(cache.is_empty());
         assert_eq!(cg.id, POWERLINE_GLYPH_ID_BASE);
@@ -846,7 +847,8 @@ mod tests {
             run_shaped: None,
         };
 
-        let cg = text_glyph_to_customs(
+        let mut glyphs = Vec::new();
+        text_glyph_to_customs(
             &text,
             &metrics,
             &palette,
@@ -856,11 +858,10 @@ mod tests {
             &mut font_system,
             &mut swash_cache,
             &mut contrast_cache,
+            &mut glyphs,
         )
-        .expect("ok")
-        .into_iter()
-        .next()
-        .expect("Some glyph");
+        .expect("ok");
+        let cg = glyphs.into_iter().next().expect("Some glyph");
 
         assert!(
             cg.id >= 8,
@@ -907,7 +908,8 @@ mod tests {
             run_shaped: None,
         };
 
-        let cg = text_glyph_to_customs(
+        let mut glyphs = Vec::new();
+        text_glyph_to_customs(
             &text,
             &metrics,
             &palette,
@@ -917,11 +919,10 @@ mod tests {
             &mut font_system,
             &mut swash_cache,
             &mut contrast_cache,
+            &mut glyphs,
         )
-        .expect("ok")
-        .into_iter()
-        .next()
-        .expect("bold W");
+        .expect("ok");
+        let cg = glyphs.into_iter().next().expect("bold W");
 
         let cached = cache.get_by_custom_id(cg.id).expect("en cache");
         assert_eq!(
@@ -1006,7 +1007,8 @@ mod tests {
             run_shaped: None,
         };
 
-        let cg = text_glyph_to_customs(
+        let mut glyphs = Vec::new();
+        text_glyph_to_customs(
             &text,
             &metrics,
             &palette,
@@ -1016,11 +1018,10 @@ mod tests {
             &mut font_system,
             &mut swash_cache,
             &mut contrast_cache,
+            &mut glyphs,
         )
-        .expect("ok")
-        .into_iter()
-        .next()
-        .expect("glyph");
+        .expect("ok");
+        let cg = glyphs.into_iter().next().expect("glyph");
 
         let cached = cache.get_by_custom_id(cg.id).expect("cache");
         let expected_left =
@@ -1069,7 +1070,8 @@ mod tests {
             run_shaped: None,
         };
 
-        let cg = text_glyph_to_customs(
+        let mut glyphs = Vec::new();
+        text_glyph_to_customs(
             &text,
             &metrics,
             &palette,
@@ -1079,11 +1081,10 @@ mod tests {
             &mut font_system,
             &mut swash_cache,
             &mut contrast_cache,
+            &mut glyphs,
         )
-        .expect("ok")
-        .into_iter()
-        .next()
-        .expect("emoji rasterizado");
+        .expect("ok");
+        let cg = glyphs.into_iter().next().expect("emoji rasterizado");
 
         assert!(
             cg.color.is_none(),
