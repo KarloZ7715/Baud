@@ -234,9 +234,9 @@ Startup size, decorations, opacity, and padding of the terminal window.
 
 ### window.decorations {#config-window-decorations}
 
-Shows the native title bar and window border.
+Window decorations: "system" uses the native title bar, "custom" draws Baud's unified title bar with inline tabs and window controls, and "none" removes decorations entirely. The previous boolean values still work: true maps to "system" and false to "none".
 
-Type: `boolean`. Default: `true`.
+Type: `string`. Default: `"system"`.
 
 ### window.height {#config-window-height}
 
@@ -545,4 +545,10 @@ GPU redraw pacing.
 Maximum redraw rate in frames per second. `0` removes the cap.
 
 Type: `integer`. Default: `60`.
+
+### render.vsync {#config-render-vsync}
+
+Synchronize presentation with the monitor refresh rate. Disabling it lowers input latency at the cost of possible tearing.
+
+Type: `boolean`. Default: `true`.
 

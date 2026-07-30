@@ -27,6 +27,10 @@ A few things these terminals offer have no Baud equivalent today:
 - **Background images** (kitty's `background_image`) — not supported.
 - **Sixel graphics** (foot) or **kitty's own graphics protocol** — neither is implemented; see the [Terminal API](vt/index.md#not-supported) page.
 
+## `window.decorations`
+
+`window.decorations` accepts `"system"`, `"custom"`, or `"none"`, and still understands the old boolean values: `true` means `"system"` and `false` means `"none"`. `"custom"` draws Baud's own title bar with inline tabs and window controls; it is the default on Windows. Linux keeps `"system"` by default so existing desktop decorations stay unchanged.
+
 ## What transfers directly
 
 Baud's escape-sequence handling (OSC 133, bracketed paste, synchronized output, truecolor, the kitty keyboard protocol subset) works the same regardless of which terminal you came from — see the [Terminal API](vt/index.md) page for exactly what's covered.

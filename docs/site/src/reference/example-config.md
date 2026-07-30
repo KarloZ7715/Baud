@@ -83,6 +83,8 @@ A fully commented `config.toml`, generated from the same defaults as the configu
 [render]
 # Maximum redraw rate in frames per second. `0` removes the cap.
 # max_fps = 60
+# Synchronize presentation with the monitor refresh rate. Disabling it lowers input latency at the cost of possible tearing.
+# vsync = true
 
 [scrollback]
 # Synthetic arrow-key presses sent per mouse wheel tick while an alternate-screen application, such as a pager or editor, owns the scrolling.
@@ -163,8 +165,8 @@ A fully commented `config.toml`, generated from the same defaults as the configu
 # yellow = "#d4a574"
 
 [window]
-# Shows the native title bar and window border.
-# decorations = true
+# Window decorations: "system" uses the native title bar, "custom" draws Baud's unified title bar with inline tabs and window controls, and "none" removes decorations entirely. The previous boolean values still work: true maps to "system" and false to "none".
+# decorations = "system"
 # Initial window height in logical pixels. Only applies when `startup` is "windowed".
 # height = 600
 # Window opacity from 0 to 1. Values below 1 let the desktop show through the background wherever the GPU backend supports transparency.

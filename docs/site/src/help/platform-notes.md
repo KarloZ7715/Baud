@@ -11,6 +11,10 @@ Setting `window.opacity` below `1.0` requests the native Mica translucent backdr
 
 That look costs input latency: with `window.opacity < 1.0` frames go through DirectComposition, which always presents at the DWM's own cadence. Setting `render.vsync = false` does not recover that latency.
 
+### Custom title bar on Windows
+
+Windows uses `window.decorations = "custom"` by default, which renders Baud's own unified title bar with inline tabs and the minimize/maximize/close buttons. The native resize borders, Aero Snap, and rounded corners are preserved through winit's extended frame. The Snap Layouts flyout that normally appears when hovering the maximize button is not available because winit does not expose `WM_NCHITTEST`; double-clicking the drag area still toggles maximized state.
+
 ### Console behavior
 
 `baud.exe` opens a single window — launching it from the Explorer or the Start Menu shortcut no longer opens a second console window alongside it. Running a CLI subcommand (`baud --version`, `baud --help`, or an unrecognized flag) from `cmd.exe` or PowerShell still prints in that same console, by reattaching to it on startup.
