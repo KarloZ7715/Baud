@@ -35,8 +35,12 @@ pub struct CachedGlyph {
 /// Cache en memoria de glifos shaped.
 #[derive(Debug)]
 pub struct GlyphCache {
-    entries: HashMap<GlyphKey, CachedGlyph>,
-    by_id: HashMap<u16, GlyphKey>,
+    /// `GlyphKey` -> id denso de texto.
+    entries: HashMap<GlyphKey, u16>,
+    /// Glifos indexados por `id - FIRST_TEXT_ID`. `None` representa un slot
+    /// que fue invalidado sin recompactar (p. ej. `ensure_metrics` conserva
+    /// `next_id` para no reutilizar ids que la GPU ya vio).
+    glyphs: Vec<Option<CachedGlyph>>,
     next_id: u16,
     /// Métricas con las que se shapearon las entradas actuales.
     metrics_key: Option<MetricsCacheKey>,
@@ -70,7 +74,7 @@ impl GlyphCache {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
-            by_id: HashMap::new(),
+            glyphs: Vec::new(),
             next_id: Self::FIRST_TEXT_ID,
             metrics_key: None,
         }
@@ -83,6 +87,7 @@ impl GlyphCache {
             return false;
         }
         self.clear_entries();
+        self.glyphs.clear();
         self.next_id = Self::FIRST_TEXT_ID;
         self.metrics_key = Some(key);
         true
@@ -100,7 +105,18 @@ impl GlyphCache {
 
     fn clear_entries(&mut self) {
         self.entries.clear();
-        self.by_id.clear();
+        self.glyphs.fill(None);
+    }
+
+    fn insert_glyph(&mut self, key: GlyphKey, cached: CachedGlyph) -> u16 {
+        let id = cached.custom_glyph_id;
+        let idx = (id - Self::FIRST_TEXT_ID) as usize;
+        if idx >= self.glyphs.len() {
+            self.glyphs.resize_with(idx + 1, || None);
+        }
+        self.glyphs[idx] = Some(cached);
+        self.entries.insert(key, id);
+        id
     }
 
     /// Devuelve el id del glifo cacheado o lo shapea, rasteriza e inserta.
@@ -116,33 +132,30 @@ impl GlyphCache {
         strings: &GlyphStrings,
         key: GlyphKey,
     ) -> u16 {
-        use std::collections::hash_map::Entry;
-
         self.ensure_metrics(metrics);
 
-        match self.entries.entry(key) {
-            Entry::Occupied(entry) => entry.into_mut().custom_glyph_id,
-            Entry::Vacant(vacant) => {
-                let shaped = shape_glyph(
-                    font_system,
-                    metrics,
-                    vacant.key(),
-                    strings.family(key.family),
-                    strings.extra(key.extra),
-                );
-                let raster = rasterize_shaped(font_system, swash_cache, &shaped);
-                let custom_glyph_id = self.next_id;
-                self.next_id = self.next_id.saturating_add(1);
-                self.by_id.insert(custom_glyph_id, *vacant.key());
-                vacant
-                    .insert(CachedGlyph {
-                        custom_glyph_id,
-                        shaped,
-                        raster,
-                    })
-                    .custom_glyph_id
-            }
+        if let Some(&id) = self.entries.get(&key) {
+            return id;
         }
+
+        let shaped = shape_glyph(
+            font_system,
+            metrics,
+            &key,
+            strings.family(key.family),
+            strings.extra(key.extra),
+        );
+        let raster = rasterize_shaped(font_system, swash_cache, &shaped);
+        let custom_glyph_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.insert_glyph(
+            key,
+            CachedGlyph {
+                custom_glyph_id,
+                shaped,
+                raster,
+            },
+        )
     }
 
     /// Inserta o devuelve un glifo ya shaped (p. ej. de un run con ligaduras).
@@ -155,26 +168,23 @@ impl GlyphCache {
         key: GlyphKey,
         shaped: &ShapedGlyph,
     ) -> u16 {
-        use std::collections::hash_map::Entry;
-
         self.ensure_metrics(metrics);
 
-        match self.entries.entry(key) {
-            Entry::Occupied(entry) => entry.into_mut().custom_glyph_id,
-            Entry::Vacant(vacant) => {
-                let raster = rasterize_shaped(font_system, swash_cache, shaped);
-                let custom_glyph_id = self.next_id;
-                self.next_id = self.next_id.saturating_add(1);
-                self.by_id.insert(custom_glyph_id, *vacant.key());
-                vacant
-                    .insert(CachedGlyph {
-                        custom_glyph_id,
-                        shaped: shaped.clone(),
-                        raster,
-                    })
-                    .custom_glyph_id
-            }
+        if let Some(&id) = self.entries.get(&key) {
+            return id;
         }
+
+        let raster = rasterize_shaped(font_system, swash_cache, shaped);
+        let custom_glyph_id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        self.insert_glyph(
+            key,
+            CachedGlyph {
+                custom_glyph_id,
+                shaped: shaped.clone(),
+                raster,
+            },
+        )
     }
 
     pub fn len(&self) -> usize {
@@ -188,16 +198,24 @@ impl GlyphCache {
     /// Invalida entradas tras cambio de metricas de celda (resize).
     pub fn clear(&mut self) {
         self.clear_entries();
+        self.glyphs.clear();
         self.next_id = Self::FIRST_TEXT_ID;
         self.metrics_key = None;
     }
 
     pub fn get(&self, key: &GlyphKey) -> Option<&CachedGlyph> {
-        self.entries.get(key)
+        self.entries
+            .get(key)
+            .and_then(|&id| self.get_by_custom_id(id))
     }
 
     pub fn get_by_custom_id(&self, id: u16) -> Option<&CachedGlyph> {
-        self.by_id.get(&id).and_then(|key| self.entries.get(key))
+        if id < Self::FIRST_TEXT_ID {
+            return None;
+        }
+        self.glyphs
+            .get((id - Self::FIRST_TEXT_ID) as usize)
+            .and_then(|slot| slot.as_ref())
     }
 
     /// Capas overlay del glifo con ese id (vacio si no tiene o no existe).
