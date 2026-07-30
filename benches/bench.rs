@@ -5,7 +5,7 @@ use baud::renderer::{
     clear_builtin_cache, CellGeometry, CellMetrics, ContrastCache, DisplayList, DisplayListBuilder,
     Palette,
 };
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 
 fn dummy_metrics() -> CellMetrics {
     CellMetrics {
@@ -131,12 +131,106 @@ fn bench_builtin_render_cached(c: &mut Criterion) {
     });
 }
 
+const PARSE_THROUGHPUT_TARGET_LEN: usize = 4 * 1024 * 1024;
+
+/// Linea de 74 bytes tipo `ls -l`, terminada en `terminator`.
+fn plain_line_74(terminator: u8) -> Vec<u8> {
+    let base = b"-rwxr-xr-x  1 user user  8192 Jul 30 12:00 build/target/release/baud";
+    let mut line = base.to_vec();
+    line.resize(73, b' ');
+    line.push(terminator);
+    line
+}
+
+fn repeat_to_len(chunk: &[u8], target_len: usize) -> Vec<u8> {
+    let mut data = Vec::with_capacity(target_len + chunk.len());
+    while data.len() < target_len {
+        data.extend_from_slice(chunk);
+    }
+    data
+}
+
+fn sgr_line() -> Vec<u8> {
+    let mut line = Vec::new();
+    line.extend_from_slice(
+        b"\x1b[0m\x1b[32m-rwxr-xr-x\x1b[0m  1 \x1b[34muser\x1b[0m user  8192 Jul 30 12:00 baud\n",
+    );
+    line
+}
+
+fn unicode_line() -> Vec<u8> {
+    // Mezcla de CJK, acento combinante y emoji con ZWJ (mujer + laptop).
+    "你好世界 e\u{0301} \u{1F469}\u{200D}\u{1F4BB}\n"
+        .as_bytes()
+        .to_vec()
+}
+
+/// Grupo de benches del camino de parseo (`vte::Parser` + `Term::print`).
+/// Cada iteracion crea un `Term` nuevo para que el scrollback no se llene
+/// y desvie la medicion hacia otra cosa.
+fn bench_parse_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("parse_throughput");
+
+    let plain_scroll = repeat_to_len(&plain_line_74(b'\n'), PARSE_THROUGHPUT_TARGET_LEN);
+    group.throughput(Throughput::Bytes(plain_scroll.len() as u64));
+    group.bench_function("parse_plain_scroll", |b| {
+        b.iter(|| {
+            let mut term = Term::new_sized(50, 200, 10_000);
+            let mut parser = vte::Parser::new();
+            parser.advance(&mut term, &plain_scroll);
+        });
+    });
+
+    let plain_no_scroll = repeat_to_len(&plain_line_74(b'\r'), PARSE_THROUGHPUT_TARGET_LEN);
+    group.throughput(Throughput::Bytes(plain_no_scroll.len() as u64));
+    group.bench_function("parse_plain_no_scroll", |b| {
+        b.iter(|| {
+            let mut term = Term::new_sized(50, 200, 10_000);
+            let mut parser = vte::Parser::new();
+            parser.advance(&mut term, &plain_no_scroll);
+        });
+    });
+
+    let newlines = repeat_to_len(b"\n", PARSE_THROUGHPUT_TARGET_LEN);
+    group.throughput(Throughput::Bytes(newlines.len() as u64));
+    group.bench_function("parse_newlines", |b| {
+        b.iter(|| {
+            let mut term = Term::new_sized(50, 200, 10_000);
+            let mut parser = vte::Parser::new();
+            parser.advance(&mut term, &newlines);
+        });
+    });
+
+    let sgr = repeat_to_len(&sgr_line(), PARSE_THROUGHPUT_TARGET_LEN);
+    group.throughput(Throughput::Bytes(sgr.len() as u64));
+    group.bench_function("parse_sgr", |b| {
+        b.iter(|| {
+            let mut term = Term::new_sized(50, 200, 10_000);
+            let mut parser = vte::Parser::new();
+            parser.advance(&mut term, &sgr);
+        });
+    });
+
+    let unicode = repeat_to_len(&unicode_line(), PARSE_THROUGHPUT_TARGET_LEN);
+    group.throughput(Throughput::Bytes(unicode.len() as u64));
+    group.bench_function("parse_unicode", |b| {
+        b.iter(|| {
+            let mut term = Term::new_sized(50, 200, 10_000);
+            let mut parser = vte::Parser::new();
+            parser.advance(&mut term, &unicode);
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_scroll_push,
     bench_scroll_pop,
     bench_reflow,
     bench_display_list_build,
-    bench_builtin_render_cached
+    bench_builtin_render_cached,
+    bench_parse_throughput
 );
 criterion_main!(benches);

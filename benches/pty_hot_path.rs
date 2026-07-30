@@ -36,8 +36,8 @@ fn spawn_writer() -> baud::pty::Pty {
 /// y toma ownership una sola vez.
 #[cfg(unix)]
 fn drain_coalesced(master: &mut baud::pty::Pty) -> usize {
-    let mut scratch = [0u8; 4096];
-    let mut out = Vec::with_capacity(4096);
+    let mut scratch = [0u8; 65536];
+    let mut out = Vec::with_capacity(65536);
     let mut total = 0usize;
     loop {
         match master.read_output(&mut scratch) {
@@ -83,7 +83,7 @@ fn spawn_writer() -> baud::pty::Pty {
 /// que WouldBlock solo reintenta hasta completar la carga o agotar el plazo.
 #[cfg(windows)]
 fn drain_coalesced(master: &mut baud::pty::Pty) -> usize {
-    let mut scratch = [0u8; 4096];
+    let mut scratch = [0u8; 65536];
     let mut total = 0usize;
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
