@@ -128,24 +128,15 @@ pub struct ShapedGlyph {
 }
 
 /// True si `col` es la segunda (o posterior) columna de un glifo ancho.
+///
+/// `unicode_width` devuelve a lo sumo 2 y `Term::print` guarda ese valor en
+/// `Cell::width`; por tanto basta con mirar la celda anterior. Esto evita el
+/// escaneo O(columnas) que explotaba en filas de texto ASCII puro.
 pub fn is_wide_continuation(row: &[Cell], col: usize) -> bool {
     if col == 0 || col >= row.len() {
         return false;
     }
-    for start in (0..col).rev() {
-        if start >= row.len() {
-            continue;
-        }
-        let w = row[start].width as usize;
-        if w <= 1 {
-            continue;
-        }
-        if start + w > col {
-            return true;
-        }
-        break;
-    }
-    false
+    row[col - 1].width > 1
 }
 
 /// Construye la clave de cache para la celda en `(row, col)`.
@@ -449,6 +440,10 @@ mod tests {
         assert_eq!(key.unwrap().ch, '\u{4e2d}');
 
         assert!(is_wide_continuation(&row, 1));
+        assert!(
+            !is_wide_continuation(&row, 2),
+            "solo la columna c+1 es continuacion"
+        );
         assert!(resolve_glyph_key(&row, 1, &family, &[], &mut strings).is_none());
     }
 
