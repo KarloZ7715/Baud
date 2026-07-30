@@ -245,6 +245,16 @@ pub struct Renderer {
     glyph_strings: GlyphStrings,
     /// Display list por sesion, reutilizada entre frames para damage parcial.
     pane_display_lists: HashMap<SessionId, DisplayList>,
+    /// Custom glyphs por sesion y fila, reconstruidos solo para filas sucias.
+    pane_custom_glyphs: HashMap<SessionId, Vec<Vec<glyphon::CustomGlyph>>>,
+    /// Tema activo en el frame anterior; se usa para invalidar el cache de
+    /// custom glyphs cuando cambian los colores horneados en los glyphs
+    /// (incluye `dim_alpha`, que es un campo de `ThemeConfig`).
+    prev_theme: ThemeConfig,
+    /// Overrides de color (OSC 4/10/11/12) del pane enfocado en el frame
+    /// anterior; cambian sin marcar damage de grid (no reescriben celdas),
+    /// asi que se comparan aparte para invalidar el cache de custom glyphs.
+    prev_overrides: ColorOverrides,
     line_height: f32,
     glyph_offset: GlyphOffset,
     builtin_box_drawing: bool,
@@ -533,6 +543,9 @@ impl Renderer {
             glyph_cache: GlyphCache::new(),
             glyph_strings: GlyphStrings::new(),
             pane_display_lists: HashMap::new(),
+            pane_custom_glyphs: HashMap::new(),
+            prev_theme: ThemeConfig::default(),
+            prev_overrides: ColorOverrides::default(),
             line_height,
             glyph_offset,
             builtin_box_drawing,
@@ -660,6 +673,7 @@ impl Renderer {
         self.reset_text_atlas();
         self.swash_cache = glyphon::SwashCache::new();
         self.pane_display_lists.clear();
+        self.pane_custom_glyphs.clear();
     }
 
     /// Recrea atlas y text renderer (p. ej. al alternar métricas terminal/picker).
@@ -682,6 +696,7 @@ impl Renderer {
     fn prepare_glyph_metrics(&mut self, metrics: &CellMetrics) {
         if self.glyph_cache.metrics_changed(metrics) {
             self.reset_text_atlas();
+            self.pane_custom_glyphs.clear();
         }
     }
 
@@ -846,6 +861,11 @@ impl Renderer {
         let mut base_metrics = self.cell_metrics;
         base_metrics.padding_y += self.grid_top_offset;
         self.prepare_glyph_metrics(&base_metrics);
+        if *theme != self.prev_theme || overrides != self.prev_overrides {
+            self.pane_custom_glyphs.clear();
+            self.prev_theme = theme.clone();
+            self.prev_overrides = overrides.clone();
+        }
 
         let t_build = Instant::now();
         let mut all_custom_glyphs = Vec::new();
@@ -1154,6 +1174,7 @@ impl Renderer {
             return Ok(false);
         }
         let mut pane_glyphs = Vec::new();
+        let row_cache = self.pane_custom_glyphs.entry(session_id).or_default();
         CellRenderer::build_custom_glyphs(
             list,
             metrics,
@@ -1164,6 +1185,8 @@ impl Renderer {
             &mut self.font_system,
             &mut self.swash_cache,
             &mut self.contrast_cache,
+            row_cache,
+            &DamageSnapshot::Cells(Vec::new()),
             &mut pane_glyphs,
         )?;
         out.extend(pane_glyphs);
@@ -1369,6 +1392,7 @@ impl Renderer {
         );
 
         let mut pane_glyphs = Vec::new();
+        let row_cache = self.pane_custom_glyphs.entry(session_id).or_default();
         CellRenderer::build_custom_glyphs(
             list,
             metrics,
@@ -1379,6 +1403,8 @@ impl Renderer {
             &mut self.font_system,
             &mut self.swash_cache,
             &mut self.contrast_cache,
+            row_cache,
+            &damage,
             &mut pane_glyphs,
         )?;
         out.extend(pane_glyphs);

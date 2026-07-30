@@ -198,6 +198,7 @@ pub fn build_sample_custom_glyphs(
     );
 
     let mut glyphs = Vec::new();
+    let mut row_cache = Vec::new();
     CellRenderer::build_custom_glyphs(
         &list,
         metrics,
@@ -208,6 +209,8 @@ pub fn build_sample_custom_glyphs(
         font_system,
         swash_cache,
         contrast_cache,
+        &mut row_cache,
+        &DamageSnapshot::Full,
         &mut glyphs,
     )?;
 

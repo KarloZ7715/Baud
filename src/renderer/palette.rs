@@ -6,7 +6,7 @@ use crate::ansi::{Color, Term};
 use crate::config::{parse_hex, ThemeConfig};
 
 /// Overrides de color en runtime (provienen de `Term` via OSC 4/10/11/12).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ColorOverrides {
     pub palette: [Option<(u8, u8, u8)>; 256],
     pub foreground: Option<(u8, u8, u8)>,

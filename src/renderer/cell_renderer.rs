@@ -5,6 +5,8 @@ use glyphon::{
     TextBounds, TextRenderer,
 };
 
+use crate::grid::DamageSnapshot;
+
 use super::builtin;
 use super::contrast::ContrastCache;
 use super::decorations::{
@@ -40,6 +42,73 @@ fn line_quad_to_custom(line: &LineQuad, metrics: &CellMetrics) -> CustomGlyph {
 pub struct CellRenderer;
 
 impl CellRenderer {
+    /// Convierte una fila de la display list en `CustomGlyph`, escribiendo en
+    /// el slot cacheado de esa fila (`row_out`). Ese slot se reutiliza tal
+    /// cual mientras la fila no este sucia.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "GPU glyph build needs font + cache handles"
+    )]
+    fn build_row_custom_glyphs(
+        display_list: &DisplayList,
+        row_idx: usize,
+        metrics: &CellMetrics,
+        palette: &Palette<'_>,
+        dim_alpha: bool,
+        cursor_color: glyphon::Color,
+        glyph_cache: &mut GlyphCache,
+        glyph_strings: &mut GlyphStrings,
+        font_system: &mut glyphon::FontSystem,
+        swash_cache: &mut glyphon::SwashCache,
+        contrast_cache: &mut ContrastCache,
+        row_out: &mut Vec<CustomGlyph>,
+    ) -> Result<(), String> {
+        row_out.clear();
+
+        for bg in &display_list.bg_quads[row_idx] {
+            let cg = bg_quad_to_custom(bg, metrics);
+            if limits::custom_pixels(cg.width, cg.height) <= MAX_CUSTOM_GLYPH_PIXELS {
+                row_out.push(cg);
+            }
+        }
+
+        for line in &display_list.line_quads[row_idx] {
+            row_out.push(line_quad_to_custom(line, metrics));
+        }
+
+        for &(bar_row, col) in &display_list.cursor_bars[row_idx] {
+            let mut bar = super::decorations::bar_quad(bar_row, col, metrics, cursor_color);
+            bar.metadata = LAYER_DECORATION;
+            row_out.push(bar);
+        }
+
+        for text in &display_list.text_glyphs[row_idx] {
+            text_glyph_to_customs(
+                text,
+                metrics,
+                palette,
+                dim_alpha,
+                glyph_cache,
+                glyph_strings,
+                font_system,
+                swash_cache,
+                contrast_cache,
+                row_out,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// Convierte una display list en `CustomGlyph` y prepara el frame.
+    ///
+    /// `row_cache` guarda, por fila, los `CustomGlyph` ya resueltos de un
+    /// frame anterior. Solo se reconvierten las filas que `damage` marca
+    /// sucias (o todas si `row_cache` no coincide en tamano con la display
+    /// list, lo que tambien cubre la invalidacion total forzada por el
+    /// llamante vaciando el cache). El aplanado final concatena en orden de
+    /// capa (fondos, decoraciones, texto) en vez de ordenar por `metadata`,
+    /// porque la insercion por fila ya deja cada fila agrupada por capa.
     #[expect(
         clippy::too_many_arguments,
         reason = "GPU glyph build needs font + cache handles"
@@ -54,71 +123,63 @@ impl CellRenderer {
         font_system: &mut glyphon::FontSystem,
         swash_cache: &mut glyphon::SwashCache,
         contrast_cache: &mut ContrastCache,
+        row_cache: &mut Vec<Vec<CustomGlyph>>,
+        damage: &DamageSnapshot,
         out: &mut Vec<CustomGlyph>,
     ) -> Result<(), String> {
-        out.clear();
-        out.reserve(
-            display_list.bg_quads.iter().map(|r| r.len()).sum::<usize>()
-                + display_list
-                    .line_quads
-                    .iter()
-                    .map(|r| r.len())
-                    .sum::<usize>()
-                + display_list
-                    .text_glyphs
-                    .iter()
-                    .map(|r| r.len())
-                    .sum::<usize>()
-                + display_list
-                    .cursor_bars
-                    .iter()
-                    .map(|r| r.len())
-                    .sum::<usize>()
-                + usize::from(display_list.cursor.is_some()),
-        );
-
-        for row in &display_list.bg_quads {
-            for bg in row {
-                let cg = bg_quad_to_custom(bg, metrics);
-                if limits::custom_pixels(cg.width, cg.height) <= MAX_CUSTOM_GLYPH_PIXELS {
-                    out.push(cg);
-                }
-            }
-        }
-
-        for row in &display_list.line_quads {
-            for line in row {
-                out.push(line_quad_to_custom(line, metrics));
-            }
+        let rows = display_list.bg_quads.len();
+        let force_full = row_cache.len() != rows;
+        if force_full {
+            row_cache.clear();
+            row_cache.resize_with(rows, Vec::new);
         }
 
         let cursor_color = {
             let (r, g, b) = palette.cursor_rgb();
             glyphon::Color::rgb(r, g, b)
         };
-        for row in &display_list.cursor_bars {
-            for &(row_idx, col) in row {
-                let mut bar = super::decorations::bar_quad(row_idx, col, metrics, cursor_color);
-                bar.metadata = LAYER_DECORATION;
-                out.push(bar);
+
+        #[allow(
+            clippy::needless_range_loop,
+            reason = "row_idx indexa row_cache, damage y display_list a la vez"
+        )]
+        for row_idx in 0..rows {
+            if !force_full && !damage.is_full() && !damage.is_row_dirty(row_idx) {
+                continue;
             }
+            Self::build_row_custom_glyphs(
+                display_list,
+                row_idx,
+                metrics,
+                palette,
+                dim_alpha,
+                cursor_color,
+                glyph_cache,
+                glyph_strings,
+                font_system,
+                swash_cache,
+                contrast_cache,
+                &mut row_cache[row_idx],
+            )?;
         }
 
-        for row in &display_list.text_glyphs {
-            for text in row {
-                text_glyph_to_customs(
-                    text,
-                    metrics,
-                    palette,
-                    dim_alpha,
-                    glyph_cache,
-                    glyph_strings,
-                    font_system,
-                    swash_cache,
-                    contrast_cache,
-                    out,
-                )?;
-            }
+        out.clear();
+        out.reserve(
+            row_cache.iter().map(Vec::len).sum::<usize>()
+                + usize::from(display_list.cursor.is_some()),
+        );
+        for row in row_cache.iter() {
+            out.extend(row.iter().copied().filter(|g| g.metadata == LAYER_BG));
+        }
+        for row in row_cache.iter() {
+            out.extend(
+                row.iter()
+                    .copied()
+                    .filter(|g| g.metadata == LAYER_DECORATION),
+            );
+        }
+        for row in row_cache.iter() {
+            out.extend(row.iter().copied().filter(|g| g.metadata == LAYER_TEXT));
         }
 
         if let Some(cursor) = &display_list.cursor {
@@ -135,8 +196,6 @@ impl CellRenderer {
                 out.push(glyph);
             }
         }
-
-        out.sort_by_key(|g| g.metadata);
 
         Ok(())
     }
@@ -1196,5 +1255,206 @@ mod tests {
             metrics.cell_w,
             metrics.cell_h
         );
+    }
+
+    fn row_cache_test_metrics() -> CellMetrics {
+        CellMetrics {
+            geometry: super::super::geometry::CellGeometry::from_u32(10, 20),
+            cell_w: 10.0,
+            cell_h: 20.0,
+            font_size: 14.0,
+            baseline_y: 14.0,
+            underline_position: 1.0,
+            underline_thickness: 1.0,
+            glyph_offset_x: 0.0,
+            glyph_offset_y: 0.0,
+            padding_x: 0.0,
+            padding_y: 0.0,
+        }
+    }
+
+    fn build_two_row_list(bg_color: glyphon::Color) -> DisplayList {
+        use super::super::display_list::{LineKind, LineQuad};
+        use crate::ansi::UnderlineStyle;
+
+        let mut list = DisplayList::default();
+        list.ensure_rows(2);
+        list.bg_quads[0].push(BgQuad {
+            row: 0,
+            col: 0,
+            width_cells: 1,
+            color: bg_color,
+        });
+        list.line_quads[1].push(LineQuad {
+            row: 1,
+            col: 0,
+            width_cells: 1,
+            kind: LineKind::Under,
+            style: UnderlineStyle::Single,
+            color: glyphon::Color::rgb(0, 255, 0),
+        });
+        list
+    }
+
+    #[test]
+    fn build_custom_glyphs_no_reconvierte_filas_no_sucias() {
+        let (mut font_system, _) = test_metrics();
+        let mut swash_cache = glyphon::SwashCache::new();
+        let mut glyph_cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
+        let theme = crate::config::ThemeConfig::default();
+        let palette = Palette::from_theme(&theme);
+        let metrics = row_cache_test_metrics();
+        let mut contrast_cache = ContrastCache::default();
+
+        let original_color = glyphon::Color::rgb(255, 0, 0);
+        let mut list = build_two_row_list(original_color);
+        let mut row_cache = Vec::new();
+        let mut out = Vec::new();
+
+        CellRenderer::build_custom_glyphs(
+            &list,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &mut glyph_cache,
+            &mut strings,
+            &mut font_system,
+            &mut swash_cache,
+            &mut contrast_cache,
+            &mut row_cache,
+            &DamageSnapshot::Full,
+            &mut out,
+        )
+        .expect("build inicial");
+        assert_eq!(row_cache[0][0].color, Some(original_color));
+
+        // Cambia el color de la fila 0 en la display list, pero el damage
+        // solo marca sucia la fila 1: la fila 0 debe seguir sirviendo el
+        // valor cacheado, no el nuevo.
+        list.bg_quads[0][0].color = glyphon::Color::rgb(0, 0, 255);
+        let damage = DamageSnapshot::Cells(vec![vec![0], vec![1]]);
+        CellRenderer::build_custom_glyphs(
+            &list,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &mut glyph_cache,
+            &mut strings,
+            &mut font_system,
+            &mut swash_cache,
+            &mut contrast_cache,
+            &mut row_cache,
+            &damage,
+            &mut out,
+        )
+        .expect("build incremental");
+
+        assert_eq!(
+            row_cache[0][0].color,
+            Some(original_color),
+            "fila 0 no esta sucia: debe conservar el custom glyph cacheado"
+        );
+    }
+
+    #[test]
+    fn build_custom_glyphs_agrupa_por_capa_sin_ordenar() {
+        let (mut font_system, _) = test_metrics();
+        let mut swash_cache = glyphon::SwashCache::new();
+        let mut glyph_cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
+        let theme = crate::config::ThemeConfig::default();
+        let palette = Palette::from_theme(&theme);
+        let metrics = row_cache_test_metrics();
+        let mut contrast_cache = ContrastCache::default();
+
+        let list = build_two_row_list(glyphon::Color::rgb(255, 0, 0));
+        let mut row_cache = Vec::new();
+        let mut out = Vec::new();
+
+        CellRenderer::build_custom_glyphs(
+            &list,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &mut glyph_cache,
+            &mut strings,
+            &mut font_system,
+            &mut swash_cache,
+            &mut contrast_cache,
+            &mut row_cache,
+            &DamageSnapshot::Full,
+            &mut out,
+        )
+        .expect("build");
+
+        assert_eq!(out.len(), 2, "un bg (fila 0) y una decoracion (fila 1)");
+        assert_eq!(
+            out[0].metadata, LAYER_BG,
+            "capa de fondo va primero aunque este en la fila 0"
+        );
+        assert_eq!(
+            out[1].metadata, LAYER_DECORATION,
+            "decoracion de la fila 1 va despues del fondo, no por orden de fila"
+        );
+    }
+
+    #[test]
+    fn build_custom_glyphs_invalida_todo_si_cambia_el_numero_de_filas() {
+        let (mut font_system, _) = test_metrics();
+        let mut swash_cache = glyphon::SwashCache::new();
+        let mut glyph_cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
+        let theme = crate::config::ThemeConfig::default();
+        let palette = Palette::from_theme(&theme);
+        let metrics = row_cache_test_metrics();
+        let mut contrast_cache = ContrastCache::default();
+
+        let original_color = glyphon::Color::rgb(255, 0, 0);
+        let mut list = build_two_row_list(original_color);
+        let mut row_cache = Vec::new();
+        let mut out = Vec::new();
+
+        CellRenderer::build_custom_glyphs(
+            &list,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &mut glyph_cache,
+            &mut strings,
+            &mut font_system,
+            &mut swash_cache,
+            &mut contrast_cache,
+            &mut row_cache,
+            &DamageSnapshot::Full,
+            &mut out,
+        )
+        .expect("build inicial");
+
+        let new_color = glyphon::Color::rgb(0, 0, 255);
+        list.bg_quads[0][0].color = new_color;
+        list.ensure_rows(3);
+        // Damage vacio (ninguna fila marcada), pero el cache tiene 2 filas y
+        // la display list ahora tiene 3: el cambio de tamano debe forzar
+        // reconversion total, no dejar la fila 0 con el color viejo.
+        let damage = DamageSnapshot::Cells(Vec::new());
+        CellRenderer::build_custom_glyphs(
+            &list,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &mut glyph_cache,
+            &mut strings,
+            &mut font_system,
+            &mut swash_cache,
+            &mut contrast_cache,
+            &mut row_cache,
+            &damage,
+            &mut out,
+        )
+        .expect("build tras resize");
+
+        assert_eq!(row_cache.len(), 3);
+        assert_eq!(row_cache[0][0].color, Some(new_color));
     }
 }
