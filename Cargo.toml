@@ -11,6 +11,10 @@ authors = ["KarloZ7715"]
 keywords = ["terminal", "emulator", "gpu", "wgpu"]
 categories = ["command-line-utilities"]
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
 [dependencies]
 winit = "0.30"
 tracing = "0.1"
