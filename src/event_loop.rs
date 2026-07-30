@@ -575,8 +575,8 @@ fn pty_thread_main(
     rx_gui_to_pty: mpsc::Receiver<PtyCommand>,
     tx_pty_to_gui: mpsc::Sender<PtyEvent>,
 ) {
-    let mut scratch = [0u8; 4096];
-    let mut out_buf = Vec::with_capacity(4096);
+    let mut scratch = [0u8; 65536];
+    let mut out_buf = Vec::with_capacity(65536);
 
     if let Err(e) = master.set_nonblocking() {
         tracing::warn!("could not set PTY to non-blocking: {e}");
@@ -633,8 +633,8 @@ fn pty_thread_main(
     rx_gui_to_pty: mpsc::Receiver<PtyCommand>,
     tx_pty_to_gui: mpsc::Sender<PtyEvent>,
 ) {
-    let mut scratch = [0u8; 4096];
-    let mut out_buf = Vec::with_capacity(4096);
+    let mut scratch = [0u8; 65536];
+    let mut out_buf = Vec::with_capacity(65536);
 
     if let Err(e) = master.set_nonblocking() {
         tracing::warn!("could not set PTY to non-blocking: {e}");
