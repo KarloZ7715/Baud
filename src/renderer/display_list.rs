@@ -270,6 +270,8 @@ impl DisplayListBuilder {
         contrast_cache: &mut ContrastCache,
         strings: &mut GlyphStrings,
     ) {
+        let family_id = strings.intern_family(font_family);
+
         if damage.is_full() {
             for row in 0..rows {
                 Self::build_row(
@@ -281,7 +283,7 @@ impl DisplayListBuilder {
                     row_sources,
                     cols,
                     row,
-                    font_family,
+                    family_id,
                     show_scrollback,
                     builtin_box_drawing,
                     blink_on,
@@ -307,7 +309,7 @@ impl DisplayListBuilder {
                     row_sources,
                     cols,
                     row,
-                    font_family,
+                    family_id,
                     show_scrollback,
                     builtin_box_drawing,
                     blink_on,
@@ -328,7 +330,7 @@ impl DisplayListBuilder {
             palette,
             cols,
             rows,
-            font_family,
+            family_id,
             show_scrollback,
             strings,
         );
@@ -358,9 +360,9 @@ impl DisplayListBuilder {
         palette: &Palette<'_>,
         cols: usize,
         rows: usize,
-        font_family: &str,
+        family_id: u32,
         show_scrollback: bool,
-        strings: &mut GlyphStrings,
+        _strings: &mut GlyphStrings,
     ) {
         list.cursor = None;
         if let Some(ref cm) = term.copy_mode {
@@ -387,7 +389,7 @@ impl DisplayListBuilder {
                             bold: false,
                             italic: false,
                             dim: false,
-                            family: strings.intern_family(font_family),
+                            family: family_id,
                         },
                     });
                 }
@@ -413,7 +415,7 @@ impl DisplayListBuilder {
         row_sources: &[&[Cell]],
         cols: usize,
         row: usize,
-        font_family: &str,
+        family_id: u32,
         show_scrollback: bool,
         builtin_box_drawing: bool,
         blink_on: bool,
@@ -454,7 +456,7 @@ impl DisplayListBuilder {
                     source_row,
                     cols,
                     row,
-                    font_family,
+                    family_id,
                     fs,
                     swash,
                     show_scrollback,
@@ -653,7 +655,7 @@ impl DisplayListBuilder {
             }
 
             let Some(glyph_key) =
-                resolve_glyph_key(source_row, col, font_family, &term.grapheme_extras, strings)
+                resolve_glyph_key(source_row, col, family_id, &term.grapheme_extras, strings)
             else {
                 if cursor_rendered && cell.ch == ' ' {
                     let mut space_key = GlyphKey {
@@ -662,7 +664,7 @@ impl DisplayListBuilder {
                         bold: false,
                         italic: false,
                         dim: false,
-                        family: strings.intern_family(font_family),
+                        family: family_id,
                     };
                     if bold {
                         space_key.bold = true;
@@ -716,7 +718,7 @@ impl DisplayListBuilder {
         source_row: &[Cell],
         cols: usize,
         row: usize,
-        font_family: &str,
+        family_id: u32,
         font_system: &mut glyphon::FontSystem,
         swash_cache: &mut glyphon::SwashCache,
         show_scrollback: bool,
@@ -749,7 +751,7 @@ impl DisplayListBuilder {
             let shaped_glyphs = shape_run(
                 font_system,
                 metrics,
-                font_family,
+                strings.family(family_id),
                 &run.text,
                 bold,
                 cell.attrs.italic,
@@ -815,7 +817,11 @@ impl DisplayListBuilder {
                     bold,
                     italic: cell.attrs.italic,
                     dim: cell.attrs.dim,
-                    family: strings.intern_family(&format!("{font_family}#lig:{}:{gi}", run.text)),
+                    family: strings.intern_family(&format!(
+                        "{}#lig:{}:{gi}",
+                        strings.family(family_id),
+                        run.text
+                    )),
                 };
                 list.text_glyphs.push(TextGlyph {
                     row,

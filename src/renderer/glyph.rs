@@ -141,11 +141,13 @@ pub fn is_wide_continuation(row: &[Cell], col: usize) -> bool {
 
 /// Construye la clave de cache para la celda en `(row, col)`.
 ///
+/// `family_id` se resuelve una sola vez por frame fuera de este helper para no
+/// pagar un lookup de `HashMap<String, u32>` por cada celda.
 /// Devuelve `None` en columnas de continuacion de glifos anchos o celdas vacias.
 pub fn resolve_glyph_key(
     row: &[Cell],
     col: usize,
-    family: &str,
+    family_id: u32,
     grapheme_extras: &[String],
     strings: &mut GlyphStrings,
 ) -> Option<GlyphKey> {
@@ -167,7 +169,7 @@ pub fn resolve_glyph_key(
         bold: cell.attrs.bold,
         italic: cell.attrs.italic,
         dim: cell.attrs.dim,
-        family: strings.intern_family(family),
+        family: family_id,
     })
 }
 
@@ -431,11 +433,12 @@ mod tests {
     fn wide_char_continuation_returns_none() {
         let family = FontConfig::default().family;
         let mut strings = GlyphStrings::new();
+        let family_id = strings.intern_family(&family);
         let mut row = vec![Cell::default(); 4];
         row[0].ch = '\u{4e2d}';
         row[0].width = 2;
 
-        let key = resolve_glyph_key(&row, 0, &family, &[], &mut strings);
+        let key = resolve_glyph_key(&row, 0, family_id, &[], &mut strings);
         assert!(key.is_some(), "col 0 debe producir clave");
         assert_eq!(key.unwrap().ch, '\u{4e2d}');
 
@@ -444,18 +447,19 @@ mod tests {
             !is_wide_continuation(&row, 2),
             "solo la columna c+1 es continuacion"
         );
-        assert!(resolve_glyph_key(&row, 1, &family, &[], &mut strings).is_none());
+        assert!(resolve_glyph_key(&row, 1, family_id, &[], &mut strings).is_none());
     }
 
     #[test]
     fn glyph_key_incluye_extra_codepoints_en_el_texto_a_shapear() {
         let extras = vec!["\u{0301}".to_string()];
         let mut strings = GlyphStrings::new();
+        let family_id = strings.intern_family("monospace");
         let mut row = vec![Cell::default(); 2];
         row[0].ch = 'e';
         row[0].width = 1;
         row[0].extra_codepoints = Some(0);
-        let key = resolve_glyph_key(&row, 0, "monospace", &extras, &mut strings).expect("key");
+        let key = resolve_glyph_key(&row, 0, family_id, &extras, &mut strings).expect("key");
         assert_eq!(strings.extra(key.extra), "\u{0301}");
     }
 
@@ -463,10 +467,11 @@ mod tests {
     fn glyph_key_extra_vacio_sin_extra_codepoints() {
         let extras: Vec<String> = vec![];
         let mut strings = GlyphStrings::new();
+        let family_id = strings.intern_family("monospace");
         let mut row = vec![Cell::default(); 1];
         row[0].ch = 'a';
         row[0].width = 1;
-        let key = resolve_glyph_key(&row, 0, "monospace", &extras, &mut strings).expect("key");
+        let key = resolve_glyph_key(&row, 0, family_id, &extras, &mut strings).expect("key");
         assert_eq!(strings.extra(key.extra), "");
     }
 
