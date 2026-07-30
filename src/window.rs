@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::ansi::Term;
 use crate::clipboard::{self, CopyTarget};
 use crate::config::watch::WatchState;
-use crate::config::{persist, Config, ConfigSource, ProcessSection, StartupState};
+use crate::config::{persist, Config, ConfigSource, DecorationsKind, ProcessSection, StartupState};
 use crate::copy_mode::CopyModeState;
 use crate::display_quirks::{self, DisplayQuirks};
 use crate::event_loop::{should_redraw, BlinkFocus};
@@ -25,7 +25,8 @@ use crate::input::wheel::{self, WheelIntent, WheelOwnerHint};
 use crate::layout::{Rect as LayoutRect, TabLayout};
 use crate::pty::PtyCommand;
 use crate::renderer::{
-    compute_layout, tab_bar_height_px, PaneRender, PreeditState, Renderer, TabBarLayout,
+    compute_layout, PaneRender, PreeditState, Renderer, TabBarLayout, TitleBarHit, TitleBarLayout,
+    TitleButtonKind,
 };
 use crate::search::SearchState;
 use crate::selection::{Selection, SelectionMode, SelectionPoint};
@@ -44,7 +45,7 @@ use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{Key, NamedKey};
 #[cfg(windows)]
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{CursorGrabMode, CursorIcon, Fullscreen, Window, WindowId};
+use winit::window::{CursorGrabMode, CursorIcon, Fullscreen, ResizeDirection, Window, WindowId};
 
 #[cfg(all(unix, not(target_os = "macos")))]
 use winit::platform::wayland::WindowAttributesExtWayland;
@@ -298,6 +299,10 @@ pub struct App {
     tab_close_tab: Option<usize>,
     /// Opacidad animada del boton × (0..1).
     tab_close_alpha: f32,
+    /// Botón de la barra de título bajo hover (solo modo custom).
+    title_bar_hover: Option<TitleButtonKind>,
+    /// Marca de tiempo del último clic en zona de arrastre de la barra.
+    title_bar_drag_last_click: Option<Instant>,
     /// Marca de tiempo para interpolar el fade del ×.
     tab_anim_last: Instant,
     /// Reintenta sync de grids cuando un pane estaba bloqueado por el drain.
@@ -323,6 +328,8 @@ pub struct App {
     app_id: Option<String>,
     /// Marca de tiempo al entrar a `resumed()`; se consume al loguear el primer frame.
     startup_instant: Option<Instant>,
+    /// Factor de escala DPI de la ventana (1.0 = 96 DPI).
+    scale_factor: f64,
 }
 
 fn allowed_open_url(url: &str) -> bool {
@@ -448,6 +455,8 @@ impl App {
             tab_hover: None,
             tab_close_tab: None,
             tab_close_alpha: 0.0,
+            title_bar_hover: None,
+            title_bar_drag_last_click: None,
             tab_anim_last: Instant::now(),
             pending_pane_sync: false,
             pending_config_source: Some(config_source),
@@ -460,6 +469,7 @@ impl App {
             initial_title,
             app_id,
             startup_instant: None,
+            scale_factor: 1.0,
         }
     }
 
@@ -493,12 +503,7 @@ impl App {
     }
 
     fn terminal_area_rect(&self, width: u32, height: u32, cell_w: f32, cell_h: f32) -> LayoutRect {
-        let reserved = self.tab_bar_rows();
-        let chrome_extra = if reserved > 0 {
-            crate::renderer::TAB_CONTENT_GAP_PX
-        } else {
-            0.0
-        };
+        let chrome_px = self.chrome_reserve_px(cell_h);
         let (rows, cols) = crate::renderer::limits::compute_grid_dims(
             width,
             height,
@@ -506,8 +511,8 @@ impl App {
             cell_h,
             self.config.window.padding_x,
             self.config.window.padding_y,
-            reserved,
-            chrome_extra,
+            0,
+            chrome_px,
         );
         LayoutRect {
             x: 0,
@@ -922,13 +927,8 @@ impl App {
         preserve_scrollback: bool,
         reflow: bool,
     ) -> (usize, usize, usize, usize, bool) {
-        let reserved = self.tab_bar_rows();
+        let chrome_px = self.chrome_reserve_px(cell_h);
         if let Some(renderer) = &mut self.renderer {
-            let chrome_px = if reserved > 0 {
-                crate::renderer::tab_chrome_reserve_px(cell_h)
-            } else {
-                0.0
-            };
             renderer.set_grid_top_offset(chrome_px);
         }
         let focused_id = self.focused_session().id;
@@ -983,11 +983,20 @@ impl App {
         (old_rows, old_cols, area.rows, area.cols, deferred)
     }
 
-    fn tab_bar_rows(&self) -> usize {
-        if self.tabs.len() > 1 {
-            crate::renderer::TAB_BAR_HEIGHT_ROWS
+    /// Altura física reservada encima del grid para barra de tabs/título.
+    fn chrome_reserve_px(&self, cell_h: f32) -> f32 {
+        let has_custom_chrome = self.config.window.decorations.kind() == DecorationsKind::Custom;
+        let bar_px = if has_custom_chrome && !self.is_fullscreen() {
+            crate::renderer::title_bar_height_px(cell_h, self.scale_factor as f32)
+        } else if self.tabs.len() > 1 {
+            cell_h
         } else {
-            0
+            0.0
+        };
+        if bar_px > 0.0 {
+            bar_px + crate::renderer::TAB_CONTENT_GAP_PX
+        } else {
+            0.0
         }
     }
 
@@ -1020,31 +1029,67 @@ impl App {
         }
     }
 
-    fn tab_bar_layout(&self, renderer: &Renderer) -> Option<TabBarLayout> {
-        if self.tabs.len() <= 1 {
+    fn title_bar_layout(&self, renderer: &Renderer) -> Option<TitleBarLayout> {
+        if self.config.window.decorations.kind() != DecorationsKind::Custom || self.is_fullscreen()
+        {
             return None;
         }
-        let titles: Vec<String> = self
-            .tabs
-            .iter()
-            .filter_map(|tab| {
-                self.session_by_id(tab.focused())
-                    .map(|idx| self.sessions[idx].session.title.clone())
-            })
-            .collect();
         let (pad_x, _) = renderer.content_padding();
-        let bar_w = crate::renderer::tab_bar_inner_width(self.window_width, pad_x);
+        Some(crate::renderer::compute_title_bar_layout(
+            self.window_width,
+            pad_x,
+            renderer.cell_h(),
+            self.scale_factor as f32,
+        ))
+    }
+
+    fn tab_bar_layout(
+        &self,
+        renderer: &Renderer,
+        title_bar: Option<&TitleBarLayout>,
+    ) -> Option<TabBarLayout> {
+        let has_custom_chrome = self.config.window.decorations.kind() == DecorationsKind::Custom;
+        if (self.tabs.len() <= 1 && !has_custom_chrome)
+            || (has_custom_chrome && self.is_fullscreen())
+        {
+            return None;
+        }
+        let titles: Vec<String> = if self.tabs.len() == 1 && has_custom_chrome {
+            vec![crate::renderer::shorten_tab_title(
+                &self.focused_session().title,
+            )]
+        } else {
+            self.tabs
+                .iter()
+                .filter_map(|tab| {
+                    self.session_by_id(tab.focused())
+                        .map(|idx| self.sessions[idx].session.title.clone())
+                })
+                .map(|t| crate::renderer::shorten_tab_title(&t))
+                .collect()
+        };
+        let (pad_x, _) = renderer.content_padding();
+        let (bar_x, bar_w) = if let Some(tb) = title_bar {
+            (tb.tab_area_x, tb.tab_area_width)
+        } else {
+            let w = crate::renderer::tab_bar_inner_width(self.window_width, pad_x);
+            (pad_x, w)
+        };
         Some(compute_layout(
             &titles,
             self.focused,
-            pad_x,
+            bar_x,
             bar_w,
             renderer.cell_w(),
         ))
     }
 
-    fn tab_bar_layout_with_mouse(&self, renderer: &Renderer) -> Option<TabBarLayout> {
-        let mut layout = self.tab_bar_layout(renderer)?;
+    fn tab_bar_layout_with_mouse(
+        &self,
+        renderer: &Renderer,
+        title_bar: Option<&TitleBarLayout>,
+    ) -> Option<TabBarLayout> {
+        let mut layout = self.tab_bar_layout(renderer, title_bar)?;
         layout.mouse.hover_index = self.tab_hover;
         layout.mouse.close_tab = self.tab_close_tab;
         layout.mouse.close_alpha = self.tab_close_alpha;
@@ -1497,33 +1542,81 @@ impl App {
         self.sync_after_tab_change();
     }
 
-    fn tab_index_at(&self, x: f64, y: f64, renderer: &Renderer) -> Option<usize> {
-        let layout = self.tab_bar_layout_with_mouse(renderer)?;
+    fn chrome_bar_metrics(&self, renderer: &Renderer) -> (f32, f32) {
         let (_, pad_y) = renderer.content_padding();
-        crate::renderer::tab_index_at(&layout, x, y, pad_y, tab_bar_height_px(renderer.cell_h()))
+        let cell_h = renderer.cell_h();
+        let bar_h = if self.config.window.decorations.kind() == DecorationsKind::Custom {
+            crate::renderer::title_bar_height_px(cell_h, self.scale_factor as f32)
+        } else {
+            cell_h
+        };
+        (pad_y, bar_h)
+    }
+
+    fn tab_index_at(&self, x: f64, y: f64, renderer: &Renderer) -> Option<usize> {
+        let title_bar = self.title_bar_layout(renderer);
+        let layout = self.tab_bar_layout_with_mouse(renderer, title_bar.as_ref())?;
+        let (bar_top, bar_h) = self.chrome_bar_metrics(renderer);
+        crate::renderer::tab_index_at(&layout, x, y, bar_top, bar_h)
     }
 
     fn tab_close_at(&self, x: f64, y: f64, renderer: &Renderer) -> Option<usize> {
-        let layout = self.tab_bar_layout_with_mouse(renderer)?;
-        let (_, pad_y) = renderer.content_padding();
-        crate::renderer::tab_close_at(
-            &layout,
-            x,
-            y,
-            pad_y,
-            tab_bar_height_px(renderer.cell_h()),
-            renderer.cell_w(),
-        )
+        let title_bar = self.title_bar_layout(renderer);
+        let layout = self.tab_bar_layout_with_mouse(renderer, title_bar.as_ref())?;
+        let (bar_top, bar_h) = self.chrome_bar_metrics(renderer);
+        crate::renderer::tab_close_at(&layout, x, y, bar_top, bar_h, renderer.cell_w())
     }
 
     fn is_in_tab_bar_row(&self, y: f64, renderer: &Renderer) -> bool {
-        if self.tabs.len() <= 1 {
+        if self.tabs.len() <= 1 && self.config.window.decorations.kind() != DecorationsKind::Custom
+        {
             return false;
         }
-        let (_, pad_y) = renderer.content_padding();
-        let top = f64::from(pad_y);
-        let bottom = top + f64::from(tab_bar_height_px(renderer.cell_h()));
+        let (bar_top, bar_h) = self.chrome_bar_metrics(renderer);
+        let top = f64::from(bar_top);
+        let bottom = top + f64::from(bar_h);
         (top..bottom).contains(&y)
+    }
+
+    fn is_fullscreen(&self) -> bool {
+        self.window
+            .as_ref()
+            .is_some_and(|w| w.fullscreen().is_some())
+    }
+
+    fn title_bar_hit_at(&self, x: f64, y: f64, renderer: &Renderer) -> Option<TitleBarHit> {
+        if self.config.window.decorations.kind() != DecorationsKind::Custom || self.is_fullscreen()
+        {
+            return None;
+        }
+        let layout = self.title_bar_layout(renderer)?;
+        let (bar_top, _) = self.chrome_bar_metrics(renderer);
+        crate::renderer::hit_test(&layout, x, y, bar_top)
+    }
+
+    fn resize_direction_at(&self, x: f64, y: f64) -> Option<ResizeDirection> {
+        if self.config.window.decorations.kind() != DecorationsKind::Custom || self.is_fullscreen()
+        {
+            return None;
+        }
+        let border = 8.0 * self.scale_factor;
+        let w = f64::from(self.window_width);
+        let h = f64::from(self.window_height);
+        let left = x < border;
+        let right = x >= w - border;
+        let top = y < border;
+        let bottom = y >= h - border;
+        match (top, bottom, left, right) {
+            (true, _, _, true) => Some(ResizeDirection::NorthEast),
+            (true, _, true, _) => Some(ResizeDirection::NorthWest),
+            (_, true, _, true) => Some(ResizeDirection::SouthEast),
+            (_, true, true, _) => Some(ResizeDirection::SouthWest),
+            (true, _, _, _) => Some(ResizeDirection::North),
+            (_, true, _, _) => Some(ResizeDirection::South),
+            (_, _, true, _) => Some(ResizeDirection::West),
+            (_, _, _, true) => Some(ResizeDirection::East),
+            _ => None,
+        }
     }
 
     /// Copia al clipboard: si hay selección activa, copia solo la selección;
@@ -2921,10 +3014,16 @@ impl ApplicationHandler<UserEvent> for App {
         let t_window = Instant::now();
         let wcfg = &self.config.window;
         let initial_title = self.initial_title.as_deref().unwrap_or("baud");
+        let decorations_kind = wcfg.decorations.kind();
         let mut attrs = Window::default_attributes()
             .with_title(initial_title)
             .with_inner_size(winit::dpi::LogicalSize::new(wcfg.width, wcfg.height))
-            .with_decorations(wcfg.decorations);
+            .with_decorations(decorations_kind != DecorationsKind::None);
+        #[cfg(windows)]
+        if decorations_kind == DecorationsKind::Custom {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs = attrs.with_undecorated_shadow(true);
+        }
         #[cfg(all(unix, not(target_os = "macos")))]
         if let Some(app_id) = &self.app_id {
             // Los dos traits escriben en el mismo campo platform_specific.name,
@@ -2968,6 +3067,7 @@ impl ApplicationHandler<UserEvent> for App {
                 .expect("no se pudo crear la ventana"),
         );
         self.window = Some(window.clone());
+        self.scale_factor = window.scale_factor();
         window.set_ime_allowed(true);
         tracing::info!(
             "startup: ventana creada en {}ms",
@@ -3143,6 +3243,7 @@ impl ApplicationHandler<UserEvent> for App {
             config,
             &self.config.font,
             font_system,
+            self.scale_factor as f32,
         ));
         tracing::info!(
             "startup: renderer construido en {}ms",
@@ -3229,6 +3330,37 @@ impl ApplicationHandler<UserEvent> for App {
                     drop(guard);
                     self.send_pty_bytes(seq);
                 }
+            }
+            WindowEvent::ScaleFactorChanged {
+                scale_factor,
+                inner_size_writer: _,
+            } => {
+                self.scale_factor = scale_factor;
+                let window = self.window.clone();
+                let Some(window) = window else {
+                    return;
+                };
+                let Some(renderer) = &mut self.renderer else {
+                    return;
+                };
+                let size = window.inner_size();
+                renderer.set_scale_factor(scale_factor as f32);
+                renderer.resize(size.width, size.height, 0);
+                let cell_w = renderer.cell_w;
+                let cell_h = renderer.cell_h;
+                let (_old_rows, _old_cols, new_rows, new_cols, deferred) =
+                    self.sync_grid_to_window(size.width, size.height, cell_w, cell_h, true, true);
+                self.pending_pane_sync = deferred;
+                tracing::debug!(
+                    "[SCALE] factor={:.2} win={}x{} -> grid={}x{}",
+                    scale_factor,
+                    size.width,
+                    size.height,
+                    new_rows,
+                    new_cols,
+                );
+                window.request_redraw();
+                self.update_ime_area();
             }
             WindowEvent::Resized(new_size) => {
                 self.window_width = new_size.width as f32;
@@ -3326,10 +3458,14 @@ impl ApplicationHandler<UserEvent> for App {
                     })
                 };
                 self.update_ime_area();
+                let title_bar_layout = self
+                    .renderer
+                    .as_ref()
+                    .and_then(|r| self.title_bar_layout(r));
                 let tab_layout = self
                     .renderer
                     .as_ref()
-                    .and_then(|r| self.tab_bar_layout_with_mouse(r));
+                    .and_then(|r| self.tab_bar_layout_with_mouse(r, title_bar_layout.as_ref()));
                 let (cell_w, cell_h) = self
                     .renderer
                     .as_ref()
@@ -3443,6 +3579,8 @@ impl ApplicationHandler<UserEvent> for App {
                     picker,
                     preedit,
                     tab_layout.as_ref(),
+                    title_bar_layout.as_ref(),
+                    self.title_bar_hover,
                 ) {
                     Ok(updated) => {
                         // Ok(_) tambien lo devuelven los early-return de render()
@@ -3530,6 +3668,60 @@ impl ApplicationHandler<UserEvent> for App {
                 };
                 self.mouse_x = position.x;
                 self.mouse_y = position.y;
+
+                if let Some(renderer) = &self.renderer {
+                    if let Some(hit) = self.title_bar_hit_at(position.x, position.y, renderer) {
+                        if let TitleBarHit::Button(kind) = hit {
+                            let changed = self.title_bar_hover != Some(kind);
+                            if changed {
+                                self.title_bar_hover = Some(kind);
+                                if let Some(window) = &self.window {
+                                    window.set_cursor(CursorIcon::Pointer);
+                                    window.request_redraw();
+                                }
+                            }
+                            return;
+                        }
+                        if self.title_bar_hover.is_some() {
+                            self.title_bar_hover = None;
+                            if let Some(window) = &self.window {
+                                window.set_cursor(CursorIcon::Default);
+                                window.request_redraw();
+                            }
+                        }
+                    } else if let Some(dir) = self.resize_direction_at(position.x, position.y) {
+                        let icon = match dir {
+                            ResizeDirection::North => CursorIcon::NResize,
+                            ResizeDirection::South => CursorIcon::SResize,
+                            ResizeDirection::East => CursorIcon::EResize,
+                            ResizeDirection::West => CursorIcon::WResize,
+                            ResizeDirection::NorthEast => CursorIcon::NeResize,
+                            ResizeDirection::NorthWest => CursorIcon::NwResize,
+                            ResizeDirection::SouthEast => CursorIcon::SeResize,
+                            ResizeDirection::SouthWest => CursorIcon::SwResize,
+                        };
+                        if let Some(window) = &self.window {
+                            window.set_cursor(icon);
+                        }
+                        if self.title_bar_hover.is_some() {
+                            self.title_bar_hover = None;
+                            if let Some(window) = &self.window {
+                                window.request_redraw();
+                            }
+                        }
+                        return;
+                    } else {
+                        if self.title_bar_hover.is_some() {
+                            self.title_bar_hover = None;
+                            if let Some(window) = &self.window {
+                                window.request_redraw();
+                            }
+                        }
+                        if let Some(window) = &self.window {
+                            window.set_cursor(CursorIcon::Default);
+                        }
+                    }
+                }
 
                 if let Some(renderer) = &self.renderer {
                     if self.is_in_tab_bar_row(position.y, renderer) {
@@ -3710,14 +3902,90 @@ impl ApplicationHandler<UserEvent> for App {
                     self.mouse_y,
                 );
 
+                // Interacciones de la barra de título propia: botones, arrastre,
+                // doble clic y menú de sistema. Solo en modo custom y no fullscreen.
                 if button == MouseButton::Left && state == ElementState::Pressed {
                     if let Some(renderer) = &self.renderer {
+                        if let Some(hit) =
+                            self.title_bar_hit_at(self.mouse_x, self.mouse_y, renderer)
+                        {
+                            match hit {
+                                TitleBarHit::Button(kind) => {
+                                    let Some(window) = self.window.clone() else {
+                                        return;
+                                    };
+                                    match kind {
+                                        TitleButtonKind::Minimize => {
+                                            window.set_minimized(true);
+                                        }
+                                        TitleButtonKind::Maximize => {
+                                            window.set_maximized(true);
+                                        }
+                                        TitleButtonKind::Close => {
+                                            for host in &self.sessions {
+                                                let _ =
+                                                    host.session.pty_tx.send(PtyCommand::Shutdown);
+                                            }
+                                            event_loop.exit();
+                                        }
+                                    }
+                                    return;
+                                }
+                                TitleBarHit::Drag => {
+                                    let Some(window) = self.window.clone() else {
+                                        return;
+                                    };
+                                    let now = Instant::now();
+                                    let is_double =
+                                        self.title_bar_drag_last_click.is_some_and(|t| {
+                                            now.duration_since(t) < MULTI_CLICK_INTERVAL
+                                        });
+                                    if is_double {
+                                        self.title_bar_drag_last_click = None;
+                                        if window.is_maximized() {
+                                            window.set_maximized(false);
+                                        } else {
+                                            window.set_maximized(true);
+                                        }
+                                    } else {
+                                        self.title_bar_drag_last_click = Some(now);
+                                        let _ = window.drag_window();
+                                    }
+                                    return;
+                                }
+                                TitleBarHit::TabArea => {
+                                    // Dejar que el manejo de tabs lo procese.
+                                }
+                            }
+                        }
                         if let Some(idx) = self.tab_close_at(self.mouse_x, self.mouse_y, renderer) {
                             self.close_tab_at(idx);
                             return;
                         }
                         if let Some(idx) = self.tab_index_at(self.mouse_x, self.mouse_y, renderer) {
                             self.focus_session(idx);
+                            return;
+                        }
+                        if let Some(dir) = self.resize_direction_at(self.mouse_x, self.mouse_y) {
+                            if let Some(window) = &self.window {
+                                let _ = window.drag_resize_window(dir);
+                            }
+                            return;
+                        }
+                    }
+                }
+
+                if button == MouseButton::Right && state == ElementState::Pressed {
+                    if let Some(renderer) = &self.renderer {
+                        if let Some(TitleBarHit::Drag) =
+                            self.title_bar_hit_at(self.mouse_x, self.mouse_y, renderer)
+                        {
+                            if let Some(window) = &self.window {
+                                window.show_window_menu(winit::dpi::PhysicalPosition::new(
+                                    self.mouse_x,
+                                    self.mouse_y,
+                                ));
+                            }
                             return;
                         }
                     }

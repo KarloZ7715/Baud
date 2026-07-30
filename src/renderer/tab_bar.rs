@@ -3,9 +3,10 @@
 //! Modelo inspirado en Ghostty: una fila compacta, tabs alineadas al padding de la
 //! ventana, tab activa con el mismo fondo que el terminal, separador fino y un
 //! pequeño hueco antes del grid.
+//!
+//! En el modo `decorations = "custom"` las tabs viven dentro de la barra de
+//! título; este módulo ya no reserva filas de grid ni fija la altura.
 
-/// Filas del grid reservadas para la barra de tabs.
-pub const TAB_BAR_HEIGHT_ROWS: usize = 1;
 /// Hueco entre la barra y la primera fila del terminal (px).
 pub const TAB_CONTENT_GAP_PX: f32 = 3.0;
 /// Separacion entre tabs en columnas monoespaciadas.
@@ -50,18 +51,14 @@ pub struct TabBarLayout {
     pub show_scroll_left: bool,
     pub show_scroll_right: bool,
     pub mouse: TabBarMouseState,
-}
-
-/// Altura de la barra en pixeles.
-#[inline]
-pub fn tab_bar_height_px(cell_h: f32) -> f32 {
-    cell_h * TAB_BAR_HEIGHT_ROWS as f32
+    /// Ancho disponible que se usó para calcular el layout.
+    pub bar_width_px: f32,
 }
 
 /// Espacio vertical total reservado (barra + hueco antes del grid).
 #[inline]
-pub fn tab_chrome_reserve_px(cell_h: f32) -> f32 {
-    tab_bar_height_px(cell_h) + TAB_CONTENT_GAP_PX
+pub fn tab_chrome_reserve_px(bar_h: f32) -> f32 {
+    bar_h + TAB_CONTENT_GAP_PX
 }
 
 /// Ancho util de la barra con padding horizontal simetrico.
@@ -202,6 +199,7 @@ pub fn compute_layout(
             show_scroll_left: false,
             show_scroll_right: false,
             mouse: TabBarMouseState::default(),
+            bar_width_px: bar_width_px.max(0.0),
         };
     }
 
@@ -225,6 +223,7 @@ pub fn compute_layout(
             show_scroll_left: false,
             show_scroll_right: false,
             mouse: TabBarMouseState::default(),
+            bar_width_px: bar_width_px.max(0.0),
         };
     }
 
@@ -301,6 +300,7 @@ pub fn compute_layout(
         show_scroll_left,
         show_scroll_right,
         mouse: TabBarMouseState::default(),
+        bar_width_px: bar_width_px.max(0.0),
     }
 }
 
@@ -615,7 +615,7 @@ mod tests {
         let layout = compute_layout(&titles, 0, 8.0, 400.0, 10.0);
         let seg0 = &layout.segments[0];
         let mid = (seg0.x_px + seg0.width_px * 0.5) as f64;
-        let bar_h = tab_bar_height_px(20.0);
+        let bar_h = 20.0;
         assert_eq!(tab_index_at(&layout, mid, 10.0, 6.0, bar_h), Some(0));
     }
 

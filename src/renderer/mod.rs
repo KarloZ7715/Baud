@@ -15,6 +15,7 @@ mod palette;
 mod runs;
 mod tab_bar;
 mod terminal_fallback;
+mod title_bar;
 
 pub use blink::blink_on;
 pub use contrast::{adjust_fg, ContrastCache};
@@ -23,11 +24,17 @@ pub use palette::{ColorOverrides, Palette};
 pub use tab_bar::{
     build_inactive_hover_chrome, build_segment_chrome, build_tab_track, compute_layout,
     format_tab_label, push_close_scrub, segment_close_left_px, segment_title_label,
-    shorten_tab_title, tab_bar_height_px, tab_bar_inner_width, tab_chrome_reserve_px, tab_close_at,
-    tab_index_at, TabBarLayout, TabBarMouseState, TabSegment, TAB_BAR_HEIGHT_ROWS,
-    TAB_CLOSE_WIDTH_CELLS, TAB_CONTENT_GAP_PX, TAB_LABEL_PAD_CELLS,
+    shorten_tab_title, tab_bar_inner_width, tab_chrome_reserve_px, tab_close_at, tab_index_at,
+    TabBarLayout, TabBarMouseState, TabSegment, TAB_CLOSE_WIDTH_CELLS, TAB_CONTENT_GAP_PX,
+    TAB_LABEL_PAD_CELLS,
 };
 pub(crate) use terminal_fallback::create_font_system_with_fallback;
+pub use title_bar::{
+    build_button_hover, build_title_bar_track, button_icon, compute_title_bar_layout, hit_test,
+    title_bar_height_px, title_button_size_px, TitleBarHit, TitleBarLayout, TitleButton,
+    TitleButtonKind, TITLE_BAR_HEIGHT_LOGICAL, TITLE_BUTTON_HEIGHT_LOGICAL,
+    TITLE_BUTTON_WIDTH_LOGICAL,
+};
 
 /// Base de ids reservados para box/block glyphs programaticos (sobre ids de cache).
 /// El `GlyphCache` de texto asigna desde ids bajos; estos rangos altos quedan
@@ -221,8 +228,14 @@ pub struct Renderer {
     font_family: String,
     /// Fallbacks de fuente configurados por el usuario.
     font_fallback: Vec<String>,
-    /// Tamaño de fuente desde la configuracion (en puntos).
+    /// Tamaño de fuente desde la configuracion (en puntos logicos).
     font_size: f32,
+    /// Factor de escala DPI de la ventana (1.0 = 96 DPI).
+    scale_factor: f32,
+    /// Padding horizontal configurado (puntos logicos).
+    padding_x: u16,
+    /// Padding vertical configurado (puntos logicos).
+    padding_y: u16,
     /// Metricas de celda (ancho, alto, offsets).
     cell_metrics: CellMetrics,
     /// Cache de glifos para el renderer celda-determinista.
@@ -254,6 +267,12 @@ pub struct Renderer {
     tab_bar_track_glyphs: Vec<glyphon::CustomGlyph>,
     /// Chrome del boton × (scrub acorde a tab activa/inactiva).
     tab_close_glyphs: Vec<glyphon::CustomGlyph>,
+    /// Buffers para los iconos de los botones de la barra de título.
+    title_bar_button_buffers: [glyphon::Buffer; 3],
+    /// Quads de hover para cada botón de la barra de título.
+    title_bar_button_glyphs: [Vec<glyphon::CustomGlyph>; 3],
+    /// Pista de fondo de la barra de título propia.
+    title_bar_track_glyphs: Vec<glyphon::CustomGlyph>,
 }
 
 impl Renderer {
@@ -285,7 +304,7 @@ impl Renderer {
     }
 
     fn reset_aux_buffers(&mut self) {
-        let metrics = glyphon::Metrics::new(self.font_size, self.cell_h);
+        let metrics = glyphon::Metrics::new(self.effective_font_size(), self.cell_h);
         self.overlay_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
         Self::configure_buffer(&mut self.font_system, &mut self.overlay_buffer, self.cell_w);
         self.search_bar_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
@@ -333,6 +352,11 @@ impl Renderer {
             &mut self.tab_close_buffer,
             self.cell_w,
         );
+        for buf in self.title_bar_button_buffers.iter_mut() {
+            *buf = glyphon::Buffer::new(&mut self.font_system, metrics);
+            Self::configure_tab_buffer(&mut self.font_system, buf, self.cell_w);
+        }
+        self.title_bar_button_glyphs = [Vec::new(), Vec::new(), Vec::new()];
         if self.status_active {
             self.status_overlay_dirty = true;
         }
@@ -357,6 +381,10 @@ impl Renderer {
     /// `font_system` llega pre-construido: el caller lo arma en paralelo con la
     /// negociacion de adapter/device de wgpu (ver `resumed()` en `window.rs`),
     /// ya que el escaneo de fuentes del sistema no depende de la GPU.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Renderer::new needs window, device, queue, surface, config, font_system, metrics y scale_factor"
+    )]
     pub fn new(
         _window: Arc<Window>,
         device: wgpu::Device,
@@ -365,6 +393,7 @@ impl Renderer {
         config: wgpu::SurfaceConfiguration,
         font_config: &FontConfig,
         mut font_system: glyphon::FontSystem,
+        scale_factor: f32,
     ) -> Self {
         // Cache necesario para glyphon 0.11
         let t_glyphon_cache = Instant::now();
@@ -409,13 +438,16 @@ impl Renderer {
         let cell_metrics = CellMetrics::measure(
             &mut font_system,
             &font_family,
-            font_size,
+            font_size * scale_factor,
             line_height,
-            glyph_offset,
+            GlyphOffset {
+                x: glyph_offset.x * scale_factor,
+                y: glyph_offset.y * scale_factor,
+            },
         );
         let cell_w = cell_metrics.cell_w;
         let cell_h = cell_metrics.cell_h;
-        let metrics = glyphon::Metrics::new(font_size, cell_h);
+        let metrics = glyphon::Metrics::new(font_size * scale_factor, cell_h);
 
         let mut overlay_buffer = glyphon::Buffer::new(&mut font_system, metrics);
         Self::configure_buffer(&mut font_system, &mut overlay_buffer, cell_w);
@@ -441,6 +473,19 @@ impl Renderer {
 
         let mut consent_buffer = glyphon::Buffer::new(&mut font_system, metrics);
         Self::configure_buffer(&mut font_system, &mut consent_buffer, cell_w);
+
+        let mut title_bar_button_buffers = Vec::with_capacity(3);
+        let mut title_bar_button_glyphs = Vec::with_capacity(3);
+        for _ in 0..3 {
+            let mut buf = glyphon::Buffer::new(&mut font_system, metrics);
+            Self::configure_tab_buffer(&mut font_system, &mut buf, cell_w);
+            title_bar_button_buffers.push(buf);
+            title_bar_button_glyphs.push(Vec::new());
+        }
+        let title_bar_button_buffers: [glyphon::Buffer; 3] =
+            title_bar_button_buffers.try_into().expect("3 buffers");
+        let title_bar_button_glyphs: [Vec<glyphon::CustomGlyph>; 3] =
+            title_bar_button_glyphs.try_into().expect("3 glyph vecs");
 
         Self {
             device,
@@ -481,6 +526,9 @@ impl Renderer {
             font_family,
             font_fallback: font_config.fallback.clone(),
             font_size,
+            scale_factor,
+            padding_x: 0,
+            padding_y: 0,
             cell_metrics,
             glyph_cache: GlyphCache::new(),
             glyph_strings: GlyphStrings::new(),
@@ -498,6 +546,9 @@ impl Renderer {
             tab_bar_seg_glyphs: Vec::new(),
             tab_bar_track_glyphs: Vec::new(),
             tab_close_glyphs: Vec::new(),
+            title_bar_button_buffers,
+            title_bar_button_glyphs,
+            title_bar_track_glyphs: Vec::new(),
         }
     }
 
@@ -507,9 +558,12 @@ impl Renderer {
         self.cell_metrics = CellMetrics::measure(
             &mut self.font_system,
             &self.font_family,
-            self.font_size,
+            self.font_size * self.scale_factor,
             self.line_height,
-            self.glyph_offset,
+            GlyphOffset {
+                x: self.glyph_offset.x * self.scale_factor,
+                y: self.glyph_offset.y * self.scale_factor,
+            },
         );
         self.cell_metrics.padding_x = pad_x;
         self.cell_metrics.padding_y = pad_y;
@@ -517,10 +571,18 @@ impl Renderer {
         self.cell_h = self.cell_metrics.cell_h;
     }
 
+    /// Tamaño de fuente efectivo en pixeles fisicos (tamaño logico × DPI).
+    #[inline]
+    fn effective_font_size(&self) -> f32 {
+        self.font_size * self.scale_factor
+    }
+
     /// Margen interior del área de celdas (único origen del offset de render).
     pub fn set_content_padding(&mut self, padding_x: u16, padding_y: u16) {
-        self.cell_metrics.padding_x = padding_x as f32;
-        self.cell_metrics.padding_y = padding_y as f32;
+        self.padding_x = padding_x;
+        self.padding_y = padding_y;
+        self.cell_metrics.padding_x = padding_x as f32 * self.scale_factor;
+        self.cell_metrics.padding_y = padding_y as f32 * self.scale_factor;
     }
 
     pub fn content_padding(&self) -> (f32, f32) {
@@ -549,6 +611,19 @@ impl Renderer {
         self.font_size = size as f32;
         self.refresh_cell_metrics();
         self.reset_glyph_pipeline();
+        self.reset_aux_buffers();
+        (self.cell_w, self.cell_h)
+    }
+
+    /// Aplica un nuevo factor de escala DPI y recalcula métricas y padding.
+    pub fn set_scale_factor(&mut self, scale_factor: f32) -> (f32, f32) {
+        self.scale_factor = scale_factor.max(0.01);
+        self.cell_metrics.padding_x = self.padding_x as f32 * self.scale_factor;
+        self.cell_metrics.padding_y = self.padding_y as f32 * self.scale_factor;
+        self.refresh_cell_metrics();
+        if self.glyph_cache.metrics_changed(&self.cell_metrics) {
+            self.reset_glyph_pipeline();
+        }
         self.reset_aux_buffers();
         (self.cell_w, self.cell_h)
     }
@@ -629,7 +704,6 @@ impl Renderer {
     }
 
     /// Renderiza los panes del layout activo en la surface.
-    #[tracing::instrument(skip(self, panes, preedit))]
     #[expect(
         clippy::too_many_arguments,
         reason = "render frame needs term, theme, overlays"
@@ -645,6 +719,8 @@ impl Renderer {
         picker: Option<&ThemePickerState>,
         preedit: Option<PreeditState>,
         tabs: Option<&TabBarLayout>,
+        tbar_layout: Option<&TitleBarLayout>,
+        tbar_hover: Option<TitleButtonKind>,
     ) -> Result<Vec<SessionId>, String> {
         let t0 = Instant::now();
 
@@ -708,6 +784,8 @@ impl Renderer {
                 window_opacity,
                 preedit,
                 tabs,
+                tbar_layout,
+                tbar_hover,
                 frame,
                 &view,
                 encoder,
@@ -738,6 +816,8 @@ impl Renderer {
         window_opacity: f32,
         preedit: Option<PreeditState>,
         tabs: Option<&TabBarLayout>,
+        tbar_layout: Option<&TitleBarLayout>,
+        tbar_hover: Option<TitleButtonKind>,
         frame: wgpu::SurfaceTexture,
         view: &wgpu::TextureView,
         mut encoder: wgpu::CommandEncoder,
@@ -850,14 +930,40 @@ impl Renderer {
             self.status_overlay_dirty = false;
         }
         let mut extra_areas: Vec<glyphon::TextArea<'_>> = Vec::with_capacity(8);
+        let bar_top = self.cell_metrics.padding_y;
+        let font_size = self.effective_font_size();
+        let (bar_h, draw_tab_track) = if let Some(tb) = tbar_layout {
+            push_title_bar(
+                tb,
+                theme,
+                &self.cell_metrics,
+                self.config.width,
+                self.config.height,
+                cell_w,
+                cell_h,
+                &self.font_family,
+                &mut self.font_system,
+                &self.bg_buffer,
+                &mut self.title_bar_button_buffers,
+                &mut self.title_bar_button_glyphs,
+                &mut self.title_bar_track_glyphs,
+                &mut extra_areas,
+                tbar_hover,
+            );
+            (tb.bar_height, false)
+        } else {
+            (cell_h, true)
+        };
         if let Some(tab_layout) = tabs.filter(|l| !l.segments.is_empty()) {
             push_tab_bar(
                 tab_layout,
                 theme,
                 &self.cell_metrics,
+                bar_top,
+                bar_h,
                 self.config.width,
                 self.config.height,
-                self.font_size,
+                font_size,
                 cell_w,
                 cell_h,
                 &self.font_family,
@@ -871,6 +977,7 @@ impl Renderer {
                 &mut self.tab_bar_seg_glyphs,
                 &mut self.tab_bar_track_glyphs,
                 &mut extra_areas,
+                draw_tab_track,
             );
         }
         if let Some(pre) = preedit.as_ref().filter(|p| !p.text.is_empty()) {
@@ -1448,7 +1555,7 @@ impl Renderer {
     ) -> Result<(), String> {
         let t_build = Instant::now();
         self.contrast_cache.clear();
-        let metrics = glyphon::Metrics::new(self.font_size, self.cell_h);
+        let metrics = glyphon::Metrics::new(self.effective_font_size(), self.cell_h);
         self.consent_buffer
             .set_metrics(&mut self.font_system, metrics);
         Self::configure_buffer(&mut self.font_system, &mut self.consent_buffer, self.cell_w);
@@ -1920,12 +2027,116 @@ fn push_inactive_overlay(
 
 #[expect(
     clippy::too_many_arguments,
+    reason = "title bar mirrors tab bar glyphon plumbing"
+)]
+fn push_title_bar<'a>(
+    layout: &crate::renderer::TitleBarLayout,
+    theme: &ThemeConfig,
+    cell_metrics: &CellMetrics,
+    surface_w: u32,
+    surface_h: u32,
+    cell_w: f32,
+    cell_h: f32,
+    font_family: &str,
+    font_system: &mut glyphon::FontSystem,
+    empty_buffer: &'a glyphon::Buffer,
+    button_buffers: &'a mut [glyphon::Buffer; 3],
+    button_glyphs: &'a mut [Vec<glyphon::CustomGlyph>; 3],
+    track_glyphs: &'a mut Vec<glyphon::CustomGlyph>,
+    extra_areas: &mut Vec<glyphon::TextArea<'a>>,
+    hovered_button: Option<crate::renderer::TitleButtonKind>,
+) {
+    let bar_top = cell_metrics.padding_y;
+    let full_bounds = glyphon::TextBounds {
+        left: 0,
+        top: 0,
+        right: surface_w as i32,
+        bottom: surface_h as i32,
+    };
+
+    crate::renderer::build_title_bar_track(
+        surface_w as f32,
+        layout.bar_height,
+        theme,
+        track_glyphs,
+    );
+    extra_areas.push(glyphon::TextArea {
+        buffer: empty_buffer,
+        left: 0.0,
+        top: bar_top,
+        scale: 1.0,
+        bounds: full_bounds,
+        default_color: glyphon::Color::rgb(0xff, 0xff, 0xff),
+        custom_glyphs: track_glyphs,
+    });
+
+    let (fr, fg, fb) = parse_hex(&theme.foreground);
+    let icon_color = glyphon::Color::rgb(fr, fg, fb);
+    let family = resolve_family(font_family);
+    let default_attrs = glyphon::Attrs::new().family(family);
+    let text_top = bar_top + (layout.bar_height - cell_h).max(0.0) * 0.5;
+
+    let [ref mut glyphs0, ref mut glyphs1, ref mut glyphs2] = button_glyphs;
+    let [ref mut buf0, ref mut buf1, ref mut buf2] = button_buffers;
+    for (btn, (glyphs, buf)) in
+        layout
+            .buttons
+            .iter()
+            .zip([(glyphs0, buf0), (glyphs1, buf1), (glyphs2, buf2)])
+    {
+        let is_hovered = hovered_button == Some(btn.kind);
+        if is_hovered {
+            crate::renderer::build_button_hover(
+                btn,
+                btn.kind == crate::renderer::TitleButtonKind::Close,
+                theme,
+                glyphs,
+            );
+            extra_areas.push(glyphon::TextArea {
+                buffer: empty_buffer,
+                left: btn.left,
+                top: btn.top,
+                scale: 1.0,
+                bounds: full_bounds,
+                default_color: glyphon::Color::rgb(0xff, 0xff, 0xff),
+                custom_glyphs: glyphs,
+            });
+        }
+
+        let icon_attrs = glyphon::Attrs::new().family(family).color(icon_color);
+        buf.set_rich_text(
+            font_system,
+            vec![(crate::renderer::button_icon(btn.kind), icon_attrs)],
+            &default_attrs,
+            glyphon::Shaping::Advanced,
+            None,
+        );
+        buf.set_size(font_system, Some(btn.width), Some(btn.height));
+        buf.set_monospace_width(font_system, Some(cell_w));
+        buf.set_hinting(font_system, Hinting::Enabled);
+        buf.shape_until_scroll(font_system, false);
+        extra_areas.push(glyphon::TextArea {
+            buffer: buf,
+            left: btn.left,
+            top: text_top,
+            scale: 1.0,
+            bounds: full_bounds,
+            default_color: icon_color,
+            custom_glyphs: &[],
+        });
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
     reason = "tab bar shares overlay layout metrics with status bar"
 )]
 fn push_tab_bar<'a>(
     layout: &TabBarLayout,
     theme: &ThemeConfig,
     cell_metrics: &CellMetrics,
+    bar_top: f32,
+    bar_h: f32,
     surface_w: u32,
     surface_h: u32,
     font_size: f32,
@@ -1942,10 +2153,11 @@ fn push_tab_bar<'a>(
     seg_glyphs: &'a mut Vec<Vec<glyphon::CustomGlyph>>,
     track_glyphs: &'a mut Vec<glyphon::CustomGlyph>,
     extra_areas: &mut Vec<glyphon::TextArea<'a>>,
+    draw_track: bool,
 ) {
-    let (pad_x, pad_y) = (cell_metrics.padding_x, cell_metrics.padding_y);
-    let bar_h = crate::renderer::tab_bar::tab_bar_height_px(cell_h);
-    let inner_w = crate::renderer::tab_bar::tab_bar_inner_width(surface_w as f32, pad_x);
+    let pad_x = cell_metrics.padding_x;
+    let inner_w = layout.bar_width_px;
+    let text_top = bar_top + (bar_h - cell_h).max(0.0) * 0.5;
     let full_bounds = glyphon::TextBounds {
         left: 0,
         top: 0,
@@ -1953,16 +2165,18 @@ fn push_tab_bar<'a>(
         bottom: surface_h as i32,
     };
 
-    crate::renderer::build_tab_track(inner_w, bar_h, theme, track_glyphs);
-    extra_areas.push(glyphon::TextArea {
-        buffer: empty_buffer,
-        left: pad_x,
-        top: pad_y,
-        scale: 1.0,
-        bounds: full_bounds,
-        default_color: glyphon::Color::rgb(0xff, 0xff, 0xff),
-        custom_glyphs: track_glyphs,
-    });
+    if draw_track {
+        crate::renderer::build_tab_track(inner_w, bar_h, theme, track_glyphs);
+        extra_areas.push(glyphon::TextArea {
+            buffer: empty_buffer,
+            left: pad_x,
+            top: bar_top,
+            scale: 1.0,
+            bounds: full_bounds,
+            default_color: glyphon::Color::rgb(0xff, 0xff, 0xff),
+            custom_glyphs: track_glyphs,
+        });
+    }
 
     let (fr, fg, fb) = parse_hex(&theme.foreground);
     let inactive_fg = glyphon::Color::rgba(fr, fg, fb, 120);
@@ -2012,7 +2226,7 @@ fn push_tab_bar<'a>(
             extra_areas.push(glyphon::TextArea {
                 buffer: empty_buffer,
                 left: seg.x_px,
-                top: pad_y,
+                top: bar_top,
                 scale: 1.0,
                 bounds: full_bounds,
                 default_color: glyphon::Color::rgb(0xff, 0xff, 0xff),
@@ -2052,7 +2266,7 @@ fn push_tab_bar<'a>(
         extra_areas.push(glyphon::TextArea {
             buffer: buf,
             left: seg.x_px + label_pad_px,
-            top: pad_y,
+            top: text_top,
             scale: 1.0,
             bounds: full_bounds,
             default_color: if seg.active { active_fg } else { inactive_fg },
@@ -2088,7 +2302,7 @@ fn push_tab_bar<'a>(
         extra_areas.push(glyphon::TextArea {
             buffer: close_buffer,
             left: crate::renderer::segment_close_left_px(seg, cell_w),
-            top: pad_y,
+            top: text_top,
             scale: 1.0,
             bounds: full_bounds,
             default_color: glyphon::Color::rgba(fr, fg, fb, close_a.max(140)),
@@ -2116,7 +2330,7 @@ fn push_tab_bar<'a>(
         extra_areas.push(glyphon::TextArea {
             buffer: scroll_left_buffer,
             left: pad_x,
-            top: pad_y,
+            top: text_top,
             scale: 1.0,
             bounds: full_bounds,
             default_color: inactive_fg,
@@ -2134,11 +2348,11 @@ fn push_tab_bar<'a>(
         scroll_right_buffer.set_size(font_system, Some(ind_w), Some(cell_h));
         scroll_right_buffer.set_monospace_width(font_system, Some(cell_w));
         scroll_right_buffer.shape_until_scroll(font_system, false);
-        let right_x = (surface_w as f32 - pad_x - ind_w).max(pad_x);
+        let right_x = (pad_x + inner_w - ind_w).max(pad_x);
         extra_areas.push(glyphon::TextArea {
             buffer: scroll_right_buffer,
             left: right_x,
-            top: pad_y,
+            top: text_top,
             scale: 1.0,
             bounds: full_bounds,
             default_color: inactive_fg,
