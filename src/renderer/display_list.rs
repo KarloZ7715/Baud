@@ -78,30 +78,104 @@ pub struct TextGlyph {
     pub run_shaped: Option<super::glyph::ShapedGlyph>,
 }
 
-/// Lista de primitivas a pintar para un frame.
+/// Lista de primitivas a pintar para un frame, organizada por fila.
+///
+/// Cada vector externo esta indexado por `row`; `clear_row` solo vacia los
+/// vectores de la fila afectada en lugar de recorrer toda la display list.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct DisplayList {
-    pub bg_quads: Vec<BgQuad>,
-    pub line_quads: Vec<LineQuad>,
-    pub text_glyphs: Vec<TextGlyph>,
+    pub bg_quads: Vec<Vec<BgQuad>>,
+    pub line_quads: Vec<Vec<LineQuad>>,
+    pub text_glyphs: Vec<Vec<TextGlyph>>,
     pub cursor: Option<CursorGlyph>,
-    pub cursor_bars: Vec<(usize, usize)>,
+    pub cursor_bars: Vec<Vec<(usize, usize)>>,
 }
 
 impl DisplayList {
+    /// Garantiza que haya un slot por fila, reutilizando capacidad previa.
+    pub fn ensure_rows(&mut self, rows: usize) {
+        if self.bg_quads.len() < rows {
+            self.bg_quads.resize_with(rows, Vec::new);
+        }
+        if self.line_quads.len() < rows {
+            self.line_quads.resize_with(rows, Vec::new);
+        }
+        if self.text_glyphs_flat().count() < rows {
+            self.text_glyphs.resize_with(rows, Vec::new);
+        }
+        if self.cursor_bars.len() < rows {
+            self.cursor_bars.resize_with(rows, Vec::new);
+        }
+    }
+
     pub fn clear(&mut self) {
-        self.bg_quads.clear();
-        self.line_quads.clear();
-        self.text_glyphs.clear();
+        for row in &mut self.bg_quads {
+            row.clear();
+        }
+        for row in &mut self.line_quads {
+            row.clear();
+        }
+        for row in &mut self.text_glyphs {
+            row.clear();
+        }
         self.cursor = None;
-        self.cursor_bars.clear();
+        for row in &mut self.cursor_bars {
+            row.clear();
+        }
     }
 
     pub fn is_populated(&self) -> bool {
-        !self.bg_quads.is_empty()
-            || !self.text_glyphs.is_empty()
-            || self.cursor.is_some()
-            || !self.cursor_bars.is_empty()
+        self.cursor.is_some()
+            || self.bg_quads.iter().any(|r| !r.is_empty())
+            || self.text_glyphs.iter().any(|r| !r.is_empty())
+            || self.cursor_bars.iter().any(|r| !r.is_empty())
+    }
+
+    /// Iteradores planos para tests y consumidores que no necesitan la
+    /// estructura por filas.
+    pub fn bg_quads_flat(&self) -> impl Iterator<Item = &BgQuad> {
+        self.bg_quads.iter().flatten()
+    }
+
+    pub fn line_quads_flat(&self) -> impl Iterator<Item = &LineQuad> {
+        self.line_quads.iter().flatten()
+    }
+
+    pub fn text_glyphs_flat(&self) -> impl Iterator<Item = &TextGlyph> {
+        self.text_glyphs.iter().flatten()
+    }
+
+    pub fn cursor_bars_flat(&self) -> impl Iterator<Item = &(usize, usize)> {
+        self.cursor_bars.iter().flatten()
+    }
+
+    /// Accesos indexados para tests que no necesitan saber la estructura interna.
+    pub fn bg_quad_at(&self, index: usize) -> Option<&BgQuad> {
+        self.bg_quads_flat().nth(index)
+    }
+
+    pub fn line_quad_at(&self, index: usize) -> Option<&LineQuad> {
+        self.line_quads_flat().nth(index)
+    }
+
+    pub fn text_glyph_at(&self, index: usize) -> Option<&TextGlyph> {
+        self.text_glyphs_flat().nth(index)
+    }
+
+    pub fn cursor_bar_at(&self, index: usize) -> Option<&(usize, usize)> {
+        self.cursor_bars_flat().nth(index)
+    }
+
+    pub fn bg_quads_is_empty(&self) -> bool {
+        self.bg_quads_flat().next().is_none()
+    }
+
+    pub fn line_quads_is_empty(&self) -> bool {
+        self.line_quads_flat().next().is_none()
+    }
+
+    pub fn text_glyphs_is_empty(&self) -> bool {
+        self.text_glyphs_flat().next().is_none()
     }
 }
 
@@ -271,6 +345,7 @@ impl DisplayListBuilder {
         strings: &mut GlyphStrings,
     ) {
         let family_id = strings.intern_family(font_family);
+        list.ensure_rows(rows);
 
         if damage.is_full() {
             for row in 0..rows {
@@ -369,7 +444,7 @@ impl DisplayListBuilder {
             if let Some(vis_row) = crate::copy_mode::logical_to_visible_row(term, cm.row) {
                 if vis_row < rows && cm.col < cols {
                     let color = Self::cursor_color(palette);
-                    list.line_quads.push(LineQuad {
+                    list.line_quads[vis_row].push(LineQuad {
                         row: vis_row,
                         col: cm.col,
                         width_cells: 1,
@@ -399,10 +474,18 @@ impl DisplayListBuilder {
     }
 
     fn clear_row(list: &mut DisplayList, row: usize) {
-        list.bg_quads.retain(|q| q.row != row);
-        list.line_quads.retain(|q| q.row != row);
-        list.text_glyphs.retain(|g| g.row != row);
-        list.cursor_bars.retain(|(r, _)| *r != row);
+        if let Some(slot) = list.bg_quads.get_mut(row) {
+            slot.clear();
+        }
+        if let Some(slot) = list.line_quads.get_mut(row) {
+            slot.clear();
+        }
+        if let Some(slot) = list.text_glyphs.get_mut(row) {
+            slot.clear();
+        }
+        if let Some(slot) = list.cursor_bars.get_mut(row) {
+            slot.clear();
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -491,7 +574,7 @@ impl DisplayListBuilder {
             let bold = cell.attrs.bold;
 
             if cursor_rendered && matches!(term.cursor_style, CursorStyle::Bar) {
-                list.cursor_bars.push((row, col));
+                list.cursor_bars[row].push((row, col));
             }
 
             let (mut fg, mut bg) = (cell.attrs.fg, cell.attrs.bg);
@@ -506,7 +589,7 @@ impl DisplayListBuilder {
             let box_glyph = builtin_box_drawing && super::builtin::supports(cell.ch);
 
             if is_sel {
-                list.bg_quads.push(BgQuad {
+                list.bg_quads[row].push(BgQuad {
                     row,
                     col,
                     width_cells: cell.width.max(1),
@@ -519,21 +602,21 @@ impl DisplayListBuilder {
                 } else {
                     attenuate_glyphon(base)
                 };
-                list.bg_quads.push(BgQuad {
+                list.bg_quads[row].push(BgQuad {
                     row,
                     col,
                     width_cells: cell.width.max(1),
                     color,
                 });
             } else if cursor_rendered && matches!(term.cursor_style, CursorStyle::Block) {
-                list.bg_quads.push(BgQuad {
+                list.bg_quads[row].push(BgQuad {
                     row,
                     col,
                     width_cells: cell.width.max(1),
                     color: Self::cursor_color(palette),
                 });
             } else if bg != Color::Default {
-                list.bg_quads.push(BgQuad {
+                list.bg_quads[row].push(BgQuad {
                     row,
                     col,
                     width_cells: cell.width.max(1),
@@ -549,7 +632,7 @@ impl DisplayListBuilder {
             // recuadro negro solido justo donde habia box-drawing.
 
             if cursor_rendered && matches!(term.cursor_style, CursorStyle::Underline) {
-                list.line_quads.push(LineQuad {
+                list.line_quads[row].push(LineQuad {
                     row,
                     col,
                     width_cells: cell.width.max(1),
@@ -564,7 +647,7 @@ impl DisplayListBuilder {
                     effective_underline_style(cell)
                 };
                 if underline_style != UnderlineStyle::None && cell.ch != ' ' {
-                    list.line_quads.push(LineQuad {
+                    list.line_quads[row].push(LineQuad {
                         row,
                         col,
                         width_cells: cell.width.max(1),
@@ -587,7 +670,7 @@ impl DisplayListBuilder {
             }
 
             if cell.attrs.strikethrough && cell.ch != ' ' {
-                list.line_quads.push(LineQuad {
+                list.line_quads[row].push(LineQuad {
                     row,
                     col,
                     width_cells: cell.width.max(1),
@@ -607,7 +690,7 @@ impl DisplayListBuilder {
             }
 
             if cell.attrs.overline && cell.ch != ' ' {
-                list.line_quads.push(LineQuad {
+                list.line_quads[row].push(LineQuad {
                     row,
                     col,
                     width_cells: cell.width.max(1),
@@ -669,7 +752,7 @@ impl DisplayListBuilder {
                     if bold {
                         space_key.bold = true;
                     }
-                    list.text_glyphs.push(TextGlyph {
+                    list.text_glyphs[row].push(TextGlyph {
                         row,
                         col,
                         width_cells: 1,
@@ -689,7 +772,7 @@ impl DisplayListBuilder {
                 continue;
             };
 
-            list.text_glyphs.push(TextGlyph {
+            list.text_glyphs[row].push(TextGlyph {
                 row,
                 col,
                 width_cells: cell.width.max(1),
@@ -823,7 +906,7 @@ impl DisplayListBuilder {
                         run.text
                     )),
                 };
-                list.text_glyphs.push(TextGlyph {
+                list.text_glyphs[row].push(TextGlyph {
                     row,
                     col,
                     width_cells: g.cluster_cols.min(255) as u8,
@@ -1029,8 +1112,8 @@ mod tests {
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
 
-        assert_eq!(list.text_glyphs.len(), 1);
-        assert!(list.text_glyphs[0].box_glyph);
+        assert_eq!(list.text_glyphs_flat().count(), 1);
+        assert!(list.text_glyph_at(0).unwrap().box_glyph);
     }
 
     #[test]
@@ -1045,9 +1128,9 @@ mod tests {
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
 
-        assert_eq!(list.text_glyphs.len(), 1);
-        assert!(list.text_glyphs[0].box_glyph);
-        assert!(list.text_glyphs[0].skip_contrast);
+        assert_eq!(list.text_glyphs_flat().count(), 1);
+        assert!(list.text_glyph_at(0).unwrap().box_glyph);
+        assert!(list.text_glyph_at(0).unwrap().skip_contrast);
     }
 
     #[test]
@@ -1062,12 +1145,12 @@ mod tests {
 
         let list = build_with_builtin(&term, &metrics, &theme, &row_sources, 1, 1, &family, false);
 
-        assert_eq!(list.text_glyphs.len(), 1);
+        assert_eq!(list.text_glyphs_flat().count(), 1);
         assert!(
-            !list.text_glyphs[0].box_glyph,
+            !list.text_glyph_at(0).unwrap().box_glyph,
             "con builtin desactivado los separadores van por fuente"
         );
-        assert!(list.text_glyphs[0].skip_contrast);
+        assert!(list.text_glyph_at(0).unwrap().skip_contrast);
     }
 
     #[test]
@@ -1087,9 +1170,9 @@ mod tests {
         term.cursor_visible = false;
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
-        assert_eq!(list.text_glyphs.len(), 1);
-        assert!(!list.text_glyphs[0].box_glyph);
-        assert!(!list.text_glyphs[0].skip_contrast);
+        assert_eq!(list.text_glyphs_flat().count(), 1);
+        assert!(!list.text_glyph_at(0).unwrap().box_glyph);
+        assert!(!list.text_glyph_at(0).unwrap().skip_contrast);
     }
 
     #[test]
@@ -1103,8 +1186,8 @@ mod tests {
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 4, 1, &family);
 
-        assert_eq!(list.text_glyphs.len(), 4);
-        assert!(list.text_glyphs.iter().all(|g| g.box_glyph));
+        assert_eq!(list.text_glyphs_flat().count(), 4);
+        assert!(list.text_glyphs_flat().all(|g| g.box_glyph));
     }
 
     #[test]
@@ -1118,9 +1201,9 @@ mod tests {
 
         let list = build_with_builtin(&term, &metrics, &theme, &row_sources, 4, 1, &family, false);
 
-        assert_eq!(list.text_glyphs.len(), 4);
+        assert_eq!(list.text_glyphs_flat().count(), 4);
         assert!(
-            list.text_glyphs.iter().all(|g| !g.box_glyph),
+            list.text_glyphs_flat().all(|g| !g.box_glyph),
             "con builtin desactivado los box-drawing van por el path de fuente"
         );
     }
@@ -1139,10 +1222,10 @@ mod tests {
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 3, 1, &family);
 
-        assert_eq!(list.text_glyphs.len(), 3);
-        assert!(!list.text_glyphs[0].box_glyph);
-        assert!(list.text_glyphs[1].box_glyph);
-        assert!(!list.text_glyphs[2].box_glyph);
+        assert_eq!(list.text_glyphs_flat().count(), 3);
+        assert!(!list.text_glyph_at(0).unwrap().box_glyph);
+        assert!(list.text_glyph_at(1).unwrap().box_glyph);
+        assert!(!list.text_glyph_at(2).unwrap().box_glyph);
     }
 
     #[test]
@@ -1156,8 +1239,8 @@ mod tests {
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 4, 1, &family);
 
-        assert_eq!(list.text_glyphs.len(), 4);
-        for (i, glyph) in list.text_glyphs.iter().enumerate() {
+        assert_eq!(list.text_glyphs_flat().count(), 4);
+        for (i, glyph) in list.text_glyphs_flat().enumerate() {
             assert_eq!(glyph.col, i);
             assert_eq!(glyph.row, 0);
             assert_eq!(glyph.width_cells, 1);
@@ -1177,7 +1260,7 @@ mod tests {
         let list = build_full(&term, &metrics, &theme, &row_sources, 4, 1, &family);
 
         assert!(
-            list.bg_quads.is_empty(),
+            list.bg_quads_is_empty(),
             "box-drawing con bg por defecto no deberia generar bg_quad"
         );
     }
@@ -1201,8 +1284,8 @@ mod tests {
         term.cursor_visible = false;
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 2, 1, &family);
-        assert!(list.text_glyphs[0].skip_contrast);
-        assert!(!list.text_glyphs[1].skip_contrast);
+        assert!(list.text_glyph_at(0).unwrap().skip_contrast);
+        assert!(!list.text_glyph_at(1).unwrap().skip_contrast);
 
         let mut cache = ContrastCache::default();
         let palette = test_palette(&theme);
@@ -1212,8 +1295,8 @@ mod tests {
             false,
             &palette,
             theme.dim_alpha,
-            list.text_glyphs[0].contrast_bg,
-            list.text_glyphs[0].skip_contrast,
+            list.text_glyph_at(0).unwrap().contrast_bg,
+            list.text_glyph_at(0).unwrap().skip_contrast,
             &mut cache,
         );
         let text = resolve_fg_glyphon(
@@ -1222,8 +1305,8 @@ mod tests {
             false,
             &palette,
             theme.dim_alpha,
-            list.text_glyphs[1].contrast_bg,
-            list.text_glyphs[1].skip_contrast,
+            list.text_glyph_at(1).unwrap().contrast_bg,
+            list.text_glyph_at(1).unwrap().skip_contrast,
             &mut cache,
         );
         assert_eq!((geom.r(), geom.g(), geom.b()), (0x1e, 0x1e, 0x1e));
@@ -1250,7 +1333,7 @@ mod tests {
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 5, 1, &family);
 
-        assert!(list.bg_quads.iter().any(|q| q.row == 0 && q.col == 3));
+        assert!(list.bg_quads_flat().any(|q| q.row == 0 && q.col == 3));
     }
 
     #[test]
@@ -1272,8 +1355,7 @@ mod tests {
         let expected = contrast_text_color(palette.cursor_rgb());
 
         let glyph = list
-            .text_glyphs
-            .iter()
+            .text_glyphs_flat()
             .find(|g| g.row == 0 && g.col == 3)
             .expect("glifo bajo cursor block");
         assert_eq!(glyph.fg, Color::Rgb(expected.0, expected.1, expected.2));
@@ -1294,8 +1376,7 @@ mod tests {
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
 
         assert!(
-            list.line_quads
-                .iter()
+            list.line_quads_flat()
                 .any(|q| q.kind == LineKind::Strike && q.row == 0 && q.col == 0),
             "strikethrough debe emitir LineKind::Strike"
         );
@@ -1316,8 +1397,7 @@ mod tests {
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
 
         assert!(
-            list.line_quads
-                .iter()
+            list.line_quads_flat()
                 .any(|q| q.kind == LineKind::Over && q.row == 0 && q.col == 0),
             "overline debe emitir LineKind::Over"
         );
@@ -1362,8 +1442,8 @@ mod tests {
             &family,
         );
 
-        let link_color = link_list.line_quads[0].color;
-        let sgr_color = sgr_list.line_quads[0].color;
+        let link_color = link_list.line_quad_at(0).unwrap().color;
+        let sgr_color = sgr_list.line_quad_at(0).unwrap().color;
         let mut cache = ContrastCache::default();
         let full = test_resolve(
             Color::Green,
@@ -1391,9 +1471,9 @@ mod tests {
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 4, 1, &family);
 
-        assert_eq!(list.text_glyphs.len(), 1);
-        assert_eq!(list.text_glyphs[0].col, 0);
-        assert_eq!(list.text_glyphs[0].width_cells, 2);
+        assert_eq!(list.text_glyphs_flat().count(), 1);
+        assert_eq!(list.text_glyph_at(0).unwrap().col, 0);
+        assert_eq!(list.text_glyph_at(0).unwrap().width_cells, 2);
     }
 
     #[test]
@@ -1420,17 +1500,17 @@ mod tests {
         let expected = attenuate_glyphon(color_to_glyphon(Color::Blue, &theme));
         let mut cache = ContrastCache::default();
         let actual = resolve_fg_glyphon(
-            list.text_glyphs[0].fg,
-            list.text_glyphs[0].dim,
-            list.text_glyphs[0].bold,
+            list.text_glyph_at(0).unwrap().fg,
+            list.text_glyph_at(0).unwrap().dim,
+            list.text_glyph_at(0).unwrap().bold,
             &palette,
             theme.dim_alpha,
-            list.text_glyphs[0].contrast_bg,
-            list.text_glyphs[0].skip_contrast,
+            list.text_glyph_at(0).unwrap().contrast_bg,
+            list.text_glyph_at(0).unwrap().skip_contrast,
             &mut cache,
         );
         assert_eq!(actual, expected);
-        assert_eq!(list.text_glyphs[0].fg, Color::Blue);
+        assert_eq!(list.text_glyph_at(0).unwrap().fg, Color::Blue);
     }
 
     #[test]
@@ -1452,9 +1532,9 @@ mod tests {
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
 
-        assert_eq!(list.line_quads.len(), 1);
+        assert_eq!(list.line_quads_flat().count(), 1);
         let expected = attenuate_glyphon(color_to_glyphon(Color::Green, &theme));
-        assert_eq!(list.line_quads[0].color, expected);
+        assert_eq!(list.line_quad_at(0).unwrap().color, expected);
         let _ = palette;
     }
 
@@ -1497,7 +1577,7 @@ mod tests {
             &mut contrast_cache,
             &mut strings,
         );
-        let full_glyphs = list.text_glyphs.len();
+        let full_glyphs = list.text_glyphs_flat().count();
         assert_eq!(full_glyphs, 8);
 
         let mut damage = GridDamage::new(2, 4);
@@ -1526,8 +1606,8 @@ mod tests {
             &mut strings,
         );
 
-        assert_eq!(list.text_glyphs.len(), full_glyphs);
-        assert_eq!(list.text_glyphs.iter().filter(|g| g.row == 0).count(), 4);
+        assert_eq!(list.text_glyphs_flat().count(), full_glyphs);
+        assert_eq!(list.text_glyphs_flat().filter(|g| g.row == 0).count(), 4);
     }
 
     #[test]
@@ -1543,7 +1623,7 @@ mod tests {
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
 
-        assert!(list.text_glyphs.is_empty(), "invisible no dibuja glifo");
+        assert!(list.text_glyphs_is_empty(), "invisible no dibuja glifo");
     }
 
     #[test]
@@ -1571,8 +1651,7 @@ mod tests {
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
 
         let under = list
-            .line_quads
-            .iter()
+            .line_quads_flat()
             .find(|q| q.kind == LineKind::Under)
             .expect("underline quad");
         assert_eq!(under.style, UnderlineStyle::Curly);
@@ -1615,13 +1694,13 @@ mod tests {
 
         let mut cache = ContrastCache::default();
         let actual = resolve_fg_glyphon(
-            list.text_glyphs[0].fg,
-            list.text_glyphs[0].dim,
-            list.text_glyphs[0].bold,
+            list.text_glyph_at(0).unwrap().fg,
+            list.text_glyph_at(0).unwrap().dim,
+            list.text_glyph_at(0).unwrap().bold,
             &palette,
             theme.dim_alpha,
-            list.text_glyphs[0].contrast_bg,
-            list.text_glyphs[0].skip_contrast,
+            list.text_glyph_at(0).unwrap().contrast_bg,
+            list.text_glyph_at(0).unwrap().skip_contrast,
             &mut cache,
         );
         assert_eq!(actual.a(), (DIM_FACTOR * 255.0) as u8);
@@ -1642,8 +1721,7 @@ mod tests {
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
 
         assert_eq!(
-            list.line_quads
-                .iter()
+            list.line_quads_flat()
                 .filter(|q| q.kind == LineKind::Under)
                 .count(),
             1
@@ -1671,8 +1749,7 @@ mod tests {
         let list = build_full(&term, &metrics, &theme, &row_sources, 20, 1, &family);
 
         assert!(
-            list.line_quads
-                .iter()
+            list.line_quads_flat()
                 .any(|q| q.kind == LineKind::Under && q.col >= 4 && q.col <= 17),
             "hovered_link debe subrayar el rango sin atributo OSC 8"
         );
@@ -1701,15 +1778,15 @@ mod tests {
         let off = build_full_blink(&term, &metrics, &theme, &row_sources, 3, 1, &family, false);
 
         assert!(
-            on.bg_quads.iter().any(|q| q.row == 0 && q.col == 1),
+            on.bg_quads_flat().any(|q| q.row == 0 && q.col == 1),
             "fase on: el cursor block emite bg_quad"
         );
         assert!(
-            !off.bg_quads.iter().any(|q| q.row == 0 && q.col == 1),
+            !off.bg_quads_flat().any(|q| q.row == 0 && q.col == 1),
             "fase off: no hay bg_quad del cursor"
         );
         assert!(
-            !off.cursor_bars.iter().any(|&(r, _)| r == 0),
+            !off.cursor_bars_flat().any(|&(r, _)| r == 0),
             "fase off: no hay cursor_bars"
         );
     }
@@ -1732,7 +1809,7 @@ mod tests {
         let off = build_full_blink(&term, &metrics, &theme, &row_sources, 3, 1, &family, false);
 
         assert!(
-            off.bg_quads.iter().any(|q| q.row == 0 && q.col == 1),
+            off.bg_quads_flat().any(|q| q.row == 0 && q.col == 1),
             "blink desactivado: el cursor sigue visible en fase off"
         );
     }
@@ -1756,19 +1833,22 @@ mod tests {
         let on = build_full_blink(&term, &metrics, &theme, &row_sources, 1, 1, &family, true);
         let off = build_full_blink(&term, &metrics, &theme, &row_sources, 1, 1, &family, false);
 
-        assert_eq!(on.text_glyphs.len(), 1, "fase on: glifo de texto visible");
+        assert_eq!(
+            on.text_glyphs_flat().count(),
+            1,
+            "fase on: glifo de texto visible"
+        );
         assert!(
-            off.text_glyphs.is_empty(),
+            off.text_glyphs_is_empty(),
             "fase off: glifo de texto blink suprimido"
         );
         assert_eq!(
-            off.bg_quads.len(),
-            on.bg_quads.len(),
+            off.bg_quads_flat().count(),
+            on.bg_quads_flat().count(),
             "bg de celda blink se mantiene en fase off"
         );
         assert_eq!(
-            off.line_quads
-                .iter()
+            off.line_quads_flat()
                 .filter(|q| q.kind == LineKind::Under)
                 .count(),
             1,
@@ -1796,11 +1876,11 @@ mod tests {
         let off = build_full_blink(&term, &metrics, &theme, &row_sources, 3, 1, &family, false);
 
         assert!(
-            on.cursor_bars.iter().any(|&(r, _)| r == 0),
+            on.cursor_bars_flat().any(|&(r, _)| r == 0),
             "fase on: bar emite cursor_bar"
         );
         assert!(
-            !off.cursor_bars.iter().any(|&(r, _)| r == 0),
+            !off.cursor_bars_flat().any(|&(r, _)| r == 0),
             "fase off: no hay cursor_bars para Bar"
         );
     }
@@ -1825,7 +1905,7 @@ mod tests {
         let off = build_full_blink(&term, &metrics, &theme, &row_sources, 3, 1, &family, false);
 
         let cursor_under = |l: &DisplayList| {
-            l.line_quads.iter().any(|q| {
+            l.line_quads_flat().any(|q| {
                 q.row == 0
                     && q.col == 1
                     && q.color == rgb_to_glyphon(Palette::from_theme(&theme).cursor_rgb())
@@ -1859,16 +1939,16 @@ mod tests {
         let off = build_full_blink(&term, &metrics, &theme, &row_sources, 1, 1, &family, false);
 
         assert_eq!(
-            on.text_glyphs.len(),
+            on.text_glyphs_flat().count(),
             1,
             "fase on: glifo text + cursor block"
         );
         assert!(
-            off.text_glyphs.is_empty(),
+            off.text_glyphs_is_empty(),
             "fase off: ni cursor block ni glifo blink"
         );
         assert!(
-            !off.bg_quads.iter().any(|q| q.row == 0 && q.col == 0),
+            !off.bg_quads_flat().any(|q| q.row == 0 && q.col == 0),
             "fase off: sin bg_quad del cursor block"
         );
     }
@@ -1895,18 +1975,22 @@ mod tests {
         let on = build_full_blink(&term, &metrics, &theme, &row_sources, 1, 1, &family, true);
         let off = build_full_blink(&term, &metrics, &theme, &row_sources, 1, 1, &family, false);
 
-        assert_eq!(on.text_glyphs.len(), 1, "fase on: glifo blink visible");
+        assert_eq!(
+            on.text_glyphs_flat().count(),
+            1,
+            "fase on: glifo blink visible"
+        );
         assert!(
-            off.text_glyphs.is_empty(),
+            off.text_glyphs_is_empty(),
             "fase off: glifo blink oculto con reverse"
         );
         assert_eq!(
-            off.bg_quads.len(),
-            on.bg_quads.len(),
+            off.bg_quads_flat().count(),
+            on.bg_quads_flat().count(),
             "bg efectivo (swap por reverse) se mantiene en fase off"
         );
         assert!(
-            !off.bg_quads.is_empty(),
+            !off.bg_quads_is_empty(),
             "hay un bg_quad por el reverse efectivo"
         );
     }

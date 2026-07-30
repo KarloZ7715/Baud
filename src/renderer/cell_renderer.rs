@@ -58,46 +58,67 @@ impl CellRenderer {
     ) -> Result<(), String> {
         out.clear();
         out.reserve(
-            display_list.bg_quads.len()
-                + display_list.line_quads.len()
-                + display_list.text_glyphs.len()
+            display_list.bg_quads.iter().map(|r| r.len()).sum::<usize>()
+                + display_list
+                    .line_quads
+                    .iter()
+                    .map(|r| r.len())
+                    .sum::<usize>()
+                + display_list
+                    .text_glyphs
+                    .iter()
+                    .map(|r| r.len())
+                    .sum::<usize>()
+                + display_list
+                    .cursor_bars
+                    .iter()
+                    .map(|r| r.len())
+                    .sum::<usize>()
                 + usize::from(display_list.cursor.is_some()),
         );
 
-        for bg in &display_list.bg_quads {
-            let cg = bg_quad_to_custom(bg, metrics);
-            if limits::custom_pixels(cg.width, cg.height) <= MAX_CUSTOM_GLYPH_PIXELS {
-                out.push(cg);
+        for row in &display_list.bg_quads {
+            for bg in row {
+                let cg = bg_quad_to_custom(bg, metrics);
+                if limits::custom_pixels(cg.width, cg.height) <= MAX_CUSTOM_GLYPH_PIXELS {
+                    out.push(cg);
+                }
             }
         }
 
-        for line in &display_list.line_quads {
-            out.push(line_quad_to_custom(line, metrics));
+        for row in &display_list.line_quads {
+            for line in row {
+                out.push(line_quad_to_custom(line, metrics));
+            }
         }
 
         let cursor_color = {
             let (r, g, b) = palette.cursor_rgb();
             glyphon::Color::rgb(r, g, b)
         };
-        for &(row, col) in &display_list.cursor_bars {
-            let mut bar = super::decorations::bar_quad(row, col, metrics, cursor_color);
-            bar.metadata = LAYER_DECORATION;
-            out.push(bar);
+        for row in &display_list.cursor_bars {
+            for &(row_idx, col) in row {
+                let mut bar = super::decorations::bar_quad(row_idx, col, metrics, cursor_color);
+                bar.metadata = LAYER_DECORATION;
+                out.push(bar);
+            }
         }
 
-        for text in &display_list.text_glyphs {
-            text_glyph_to_customs(
-                text,
-                metrics,
-                palette,
-                dim_alpha,
-                glyph_cache,
-                glyph_strings,
-                font_system,
-                swash_cache,
-                contrast_cache,
-                out,
-            )?;
+        for row in &display_list.text_glyphs {
+            for text in row {
+                text_glyph_to_customs(
+                    text,
+                    metrics,
+                    palette,
+                    dim_alpha,
+                    glyph_cache,
+                    glyph_strings,
+                    font_system,
+                    swash_cache,
+                    contrast_cache,
+                    out,
+                )?;
+            }
         }
 
         if let Some(cursor) = &display_list.cursor {
