@@ -89,20 +89,25 @@ impl GridDamage {
     }
 
     /// Toma el estado de daño y lo resetea para el próximo frame.
+    ///
+    /// Sin clonar: `self.rows` se mueve tal cual al snapshot devuelto (que
+    /// ya iba a machacarse en el próximo frame) y se reconstruye un buffer
+    /// nuevo, ya en cero, para las siguientes escrituras.
     pub fn take(&mut self) -> DamageSnapshot {
         if self.rows.len() > MAX_DAMAGE_COLS || self.cols > MAX_DAMAGE_COLS {
             self.full = true;
         }
-        let snapshot = if self.full {
-            DamageSnapshot::Full
-        } else {
-            DamageSnapshot::Cells(self.rows.clone())
-        };
-        self.full = false;
-        for row in &mut self.rows {
-            row.fill(0);
+        if self.full {
+            self.full = false;
+            for row in &mut self.rows {
+                row.fill(0);
+            }
+            return DamageSnapshot::Full;
         }
-        snapshot
+        let words = Self::words_for_cols(self.cols);
+        let row_count = self.rows.len();
+        let taken = std::mem::replace(&mut self.rows, vec![vec![0; words]; row_count]);
+        DamageSnapshot::Cells(taken)
     }
 
     pub(crate) fn words_for_cols(cols: usize) -> usize {
