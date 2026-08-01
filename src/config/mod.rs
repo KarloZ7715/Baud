@@ -87,12 +87,19 @@ pub struct DebugConfig {
     pub fps_counter_enabled: bool,
 }
 
-/// Diagnósticos locales: watchdog y logging.
+/// Diagnósticos locales: watchdog, sonda de latencia y logging.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct DiagnosticsConfig {
     /// Activa el hilo watchdog del event loop. Requiere reinicio.
     #[serde(default)]
     pub watchdog: bool,
+    /// Activa la sonda de latencia tecla→present. Mide de `KeyboardInput`
+    /// a `frame.present()`, no de dedo a fotón: deja fuera el teclado,
+    /// el compositor y el panel. Es un límite inferior estricto, pero es
+    /// lo único que Baud controla y puede regresionar por un cambio de
+    /// código. Registra p50/p95/p99 cada N muestras, no cada muestra.
+    #[serde(default)]
+    pub latency_probe: bool,
     /// Nivel de log por defecto del target `baud`. Solo aplica si no hay
     /// `RUST_LOG` en el entorno.
     #[serde(default)]
@@ -1296,6 +1303,10 @@ mod tests {
         assert_eq!(
             roundtripped.diagnostics.watchdog,
             original.diagnostics.watchdog
+        );
+        assert_eq!(
+            roundtripped.diagnostics.latency_probe,
+            original.diagnostics.latency_probe
         );
         assert_eq!(
             roundtripped.debug.fps_counter_enabled,

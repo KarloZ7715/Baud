@@ -330,6 +330,51 @@ pub struct App {
     startup_instant: Option<Instant>,
     /// Factor de escala DPI de la ventana (1.0 = 96 DPI).
     scale_factor: f64,
+    // --- Sonda de latencia tecla→present (diagnostics.latency_probe) ---
+    /// Instant en que se envió la última entrada al PTY; None si no hay
+    /// eco pendiente. Solo se mide cuando el drain dispara el redraw, no
+    /// en el request_redraw inmediato del handler de teclado (ese frame
+    /// no contiene el eco todavía).
+    pending_echo: Option<Instant>,
+    /// True cuando el último RedrawNeeded vino del drain (procesó salida).
+    /// Distingue los frames que pueden contener el eco de los redraws
+    /// inmediatos del handler de teclado.
+    drain_triggered_redraw: bool,
+    /// Acumulador de muestras de latencia; emite p50/p95/p99 al llenarse.
+    latency_probe: LatencyProbeStats,
+}
+
+/// Recopila muestras de latencia (µs) y registra p50/p95/p99 cada N.
+struct LatencyProbeStats {
+    samples: Vec<u64>,
+    capacity: usize,
+}
+
+impl LatencyProbeStats {
+    const DEFAULT_CAPACITY: usize = 60;
+
+    fn new() -> Self {
+        Self {
+            samples: Vec::with_capacity(Self::DEFAULT_CAPACITY),
+            capacity: Self::DEFAULT_CAPACITY,
+        }
+    }
+
+    /// Añade una muestra; devuelve los percentiles (µs) cuando se llena.
+    fn record(&mut self, latency_us: u64) -> Option<(u64, u64, u64)> {
+        self.samples.push(latency_us);
+        if self.samples.len() < self.capacity {
+            return None;
+        }
+        self.samples.sort_unstable();
+        let p = |pct: f64| -> u64 {
+            let idx = ((pct / 100.0) * self.samples.len() as f64) as usize;
+            self.samples[idx.min(self.samples.len() - 1)]
+        };
+        let result = (p(50.0), p(95.0), p(99.0));
+        self.samples.clear();
+        Some(result)
+    }
 }
 
 fn allowed_open_url(url: &str) -> bool {
@@ -470,6 +515,9 @@ impl App {
             app_id,
             startup_instant: None,
             scale_factor: 1.0,
+            pending_echo: None,
+            drain_triggered_redraw: false,
+            latency_probe: LatencyProbeStats::new(),
         }
     }
 
@@ -566,6 +614,7 @@ impl App {
     pub(crate) fn dispatch_user_event(&mut self, event: UserEvent) {
         match event {
             UserEvent::RedrawNeeded(id) => {
+                self.drain_triggered_redraw = true;
                 if self.is_focused_session(id) {
                     let idx = self.session_by_id(id);
                     let deferred = idx
@@ -867,6 +916,11 @@ impl App {
             self.config.render.redraw_interval_nanos(),
             Ordering::Relaxed,
         );
+
+        // Sonda de latencia: limpiar estado pendiente si se desactiva.
+        if !self.config.diagnostics.latency_probe {
+            self.pending_echo = None;
+        }
 
         if !self.config.debug.fps_counter_enabled && self.fps_overlay_visible {
             self.fps_overlay_visible = false;
@@ -3635,6 +3689,30 @@ impl ApplicationHandler<UserEvent> for App {
                         search_active
                     );
                 }
+
+                // Sonda de latencia: medir tecla→present solo en frames
+                // disparados por el drain (contienen el eco), no en el
+                // request_redraw inmediato del handler de teclado.
+                if self.config.diagnostics.latency_probe {
+                    if let Some(t_echo) = self.pending_echo.take() {
+                        if self.drain_triggered_redraw {
+                            let us = t_echo.elapsed().as_micros() as u64;
+                            if let Some((p50, p95, p99)) = self.latency_probe.record(us) {
+                                tracing::info!(
+                                    "[LATENCY] p50={}µs p95={}µs p99={}µs",
+                                    p50,
+                                    p95,
+                                    p99
+                                );
+                            }
+                        } else {
+                            // El frame no vino del drain: reponer para la
+                            // próxima presentación que sí contenga el eco.
+                            self.pending_echo = Some(t_echo);
+                        }
+                    }
+                }
+                self.drain_triggered_redraw = false;
             }
             // Track modifier state (Ctrl, Shift, Alt, etc.) for keyboard shortcuts.
             // winit 0.30 envia ModifiersChanged separado de KeyboardInput.
@@ -4468,6 +4546,13 @@ impl ApplicationHandler<UserEvent> for App {
                 }
 
                 // Fallback: encode_key_extended (CSI u) o encode_key clasico.
+                // Sonda de latencia: marcar el instante de envío justo antes
+                // de encode_key. Solo se mide cuando el drain dispara el redraw
+                // (drain_triggered_redraw), no en el request_redraw inmediato
+                // de abajo: ese frame no contiene el eco todavía.
+                if self.config.diagnostics.latency_probe && self.pending_echo.is_none() {
+                    self.pending_echo = Some(Instant::now());
+                }
                 if let Some(k) = winit_to_key(&event.logical_key) {
                     let modes = current_key_modes(self.focused_term());
                     let kind = if event.repeat {

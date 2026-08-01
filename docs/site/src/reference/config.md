@@ -502,6 +502,12 @@ Type: `string (optional)`. Default: *(not set)*.
 
 Local troubleshooting: the event-loop watchdog, log level, and opt-in crash reporting.
 
+### diagnostics.latency_probe {#config-diagnostics-latency_probe}
+
+Measures key-to-presentation latency (from `KeyboardInput` to `frame.present()`), logging p50/p95/p99 every 60 samples. This is a strict lower bound: it excludes keyboard, compositor, and panel latency.
+
+Type: `boolean`. Default: `false`.
+
 ### diagnostics.log_level {#config-diagnostics-log_level}
 
 Default log level for the `baud` tracing target; ignored when `RUST_LOG` is set in the environment.
