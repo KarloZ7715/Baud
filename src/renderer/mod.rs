@@ -155,7 +155,7 @@ pub struct PaneRender {
 
 use crate::ansi::{Color, Term};
 use crate::config::{parse_hex, FontConfig, GlyphOffset, StatusConfig, ThemeConfig};
-use crate::grid::{Cell, DamageSnapshot};
+use crate::grid::{Cell, DamageSnapshot, GridDamage};
 use crate::session::SessionId;
 use crate::theme_picker::ThemePickerState;
 use glyphon::cosmic_text::Hinting;
@@ -220,6 +220,10 @@ pub struct Renderer {
     prev_selection_bounds: Option<(usize, usize, usize, usize)>,
     /// Offset de scrollback del frame anterior (invalida cache si cambia con seleccion).
     prev_scrollback_offset: isize,
+    /// SessionId del pane enfocado en el frame anterior. Detecta cambios de
+    /// pane enfocado para evitar que `prev_scrollback_offset` (compartido entre
+    /// panes) produzca un delta espurio de scrollback al cambiar el foco.
+    prev_focused_session_id: Option<SessionId>,
     /// Fila/columna visible del cursor en el frame anterior. Movimientos de
     /// cursor via CSI (CUU/CUD/CUF/CUB/CUP) no marcan damage de grid por si
     /// solos, asi que esta comparacion es la unica forma de invalidar la fila
@@ -535,6 +539,7 @@ impl Renderer {
             frame_count: 0,
             prev_selection_bounds: None,
             prev_scrollback_offset: 0,
+            prev_focused_session_id: None,
             prev_cursor_pos: None,
             font_family,
             font_fallback: font_config.fallback.clone(),
@@ -1249,7 +1254,14 @@ impl Renderer {
         };
         let mut damage = term.take_active_grid_damage();
         let show_scrollback = term.scrollback_offset > 0;
-        if show_scrollback {
+        // Viendo scrollback: el bitmap de damage del grid referencia filas del
+        // grid activo, no filas visibles (scrollback + grid). Si llego output
+        // nuevo (damage no vacio), no podemos mapearlo a filas visibles → Full.
+        // Si el grid no cambio, el contenido visible es estatico: no forzamos
+        // Full y dejamos que el delta de scrollback (mas abajo) o el cache
+        // reuso decidan.
+        let grid_has_damage = damage.has_any_dirty();
+        if show_scrollback && grid_has_damage {
             damage = DamageSnapshot::Full;
         }
 
@@ -1284,10 +1296,41 @@ impl Renderer {
                 }
             }
 
-            if term.scrollback_offset != self.prev_scrollback_offset {
+            // Cambio de pane enfocado: prev_scrollback_offset es compartido
+            // entre panes, asi que un cambio de foco producira un delta
+            // espurio. Forzamos Full y reseteamos el offset para el nuevo pane.
+            let pane_switched = self.prev_focused_session_id != Some(session_id);
+            if pane_switched {
                 damage = DamageSnapshot::Full;
+                self.prev_focused_session_id = Some(session_id);
             }
+
+            let scrollback_delta = if pane_switched {
+                0isize
+            } else {
+                term.scrollback_offset - self.prev_scrollback_offset
+            };
             self.prev_scrollback_offset = term.scrollback_offset;
+
+            if scrollback_delta != 0 && !damage.is_full() {
+                // Scroll dentro del scrollback: rotar la display list y
+                // reconstruir solo las filas recien expuestas, en vez de
+                // reconstruir todo. delta > 0 (offset subio) = contenido baja
+                // = lines negativo; delta < 0 (offset bajo) = contenido sube
+                // = lines positivo.
+                let abs_delta = scrollback_delta.unsigned_abs();
+                if abs_delta >= rows_count {
+                    damage = DamageSnapshot::Full;
+                } else {
+                    let lines = -(scrollback_delta as i32);
+                    let words = GridDamage::words_for_cols(cols_count);
+                    damage = DamageSnapshot::Scrolled {
+                        lines,
+                        region: (0, rows_count.saturating_sub(1)),
+                        rest: vec![vec![0; words]; rows_count],
+                    };
+                }
+            }
 
             // Movimientos de cursor via CSI (CUU/CUD/CUF/CUB/CUP) actualizan
             // term.cursor pero no marcan ninguna celda como escrita, asi que
@@ -2605,6 +2648,86 @@ mod tests {
     fn feed(term: &mut Term, data: &[u8]) {
         let mut parser = vte::Parser::new();
         parser.advance(term, data);
+    }
+
+    // =====================================================================
+    // Scrollback scroll damage: delta pequeno → Scrolled, no Full
+    // =====================================================================
+
+    /// Replica la logica de conversion de delta de scrollback a damage que
+    /// usa `append_pane_glyphs`. Permite testear sin una instancia de Renderer
+    /// (que requiere GPU/wgpu).
+    fn scrollback_delta_to_damage(delta: isize, rows_count: usize, cols: usize) -> DamageSnapshot {
+        let abs_delta = delta.unsigned_abs();
+        if abs_delta >= rows_count {
+            return DamageSnapshot::Full;
+        }
+        let lines = -(delta as i32);
+        let words = GridDamage::words_for_cols(cols);
+        DamageSnapshot::Scrolled {
+            lines,
+            region: (0, rows_count.saturating_sub(1)),
+            rest: vec![vec![0; words]; rows_count],
+        }
+    }
+
+    #[test]
+    fn scrollback_delta_pequeno_produce_scrolled_no_full() {
+        // Scroll up 3 lineas en una terminal de 24 filas: debe ser Scrolled,
+        // no Full. Antes del fix, cualquier cambio de scrollback_offset
+        // forzaba DamageSnapshot::Full, causando renders de ~1000ms.
+        let damage = scrollback_delta_to_damage(3, 24, 80);
+        assert!(!damage.is_full(), "delta pequeno no debe forzar Full");
+        match damage {
+            DamageSnapshot::Scrolled { lines, region, .. } => {
+                // delta=+3 (offset subio) → contenido baja → lines=-3
+                assert_eq!(lines, -3, "delta positivo → lines negativo");
+                assert_eq!(region, (0, 23), "region cubre toda la pantalla");
+            }
+            _ => panic!("esperaba Scrolled"),
+        }
+    }
+
+    #[test]
+    fn scrollback_delta_negativo_produce_scrolled_lines_positivo() {
+        // Scroll down 2 lineas (offset baja): contenido sube → lines=+2
+        let damage = scrollback_delta_to_damage(-2, 24, 80);
+        assert!(!damage.is_full());
+        match damage {
+            DamageSnapshot::Scrolled { lines, .. } => {
+                assert_eq!(lines, 2, "delta negativo → lines positivo");
+            }
+            _ => panic!("esperaba Scrolled"),
+        }
+    }
+
+    #[test]
+    fn scrollback_delta_mayor_o_igual_que_filas_produce_full() {
+        // Scroll de una pagina completa o mas: toda la pantalla cambio → Full
+        let damage = scrollback_delta_to_damage(24, 24, 80);
+        assert!(damage.is_full(), "delta >= rows_count debe ser Full");
+
+        let damage = scrollback_delta_to_damage(30, 24, 80);
+        assert!(damage.is_full(), "delta > rows_count debe ser Full");
+    }
+
+    #[test]
+    fn scrollback_scrolled_rest_esta_vacio() {
+        // Al hacer scroll por scrollback, ninguna celda del viewport cambio
+        // (el contenido es estatico); rest debe ser todo ceros.
+        let damage = scrollback_delta_to_damage(5, 24, 80);
+        match damage {
+            DamageSnapshot::Scrolled { rest, .. } => {
+                assert_eq!(rest.len(), 24, "rest tiene una fila por fila visible");
+                for row in &rest {
+                    assert!(
+                        row.iter().all(|&w| w == 0),
+                        "rest debe ser todo ceros (sin celdas sucias)"
+                    );
+                }
+            }
+            _ => panic!("esperaba Scrolled"),
+        }
     }
 
     #[test]
