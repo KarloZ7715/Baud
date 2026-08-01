@@ -100,7 +100,7 @@ impl DisplayList {
         if self.line_quads.len() < rows {
             self.line_quads.resize_with(rows, Vec::new);
         }
-        if self.text_glyphs_flat().count() < rows {
+        if self.text_glyphs.len() < rows {
             self.text_glyphs.resize_with(rows, Vec::new);
         }
         if self.cursor_bars.len() < rows {
@@ -1169,6 +1169,65 @@ mod tests {
             row[col].ch = *ch;
         }
         row
+    }
+
+    fn sample_text_glyph() -> TextGlyph {
+        TextGlyph {
+            row: 0,
+            col: 0,
+            width_cells: 1,
+            glyph_key: GlyphKey {
+                ch: 'A',
+                extra: 0,
+                bold: false,
+                italic: false,
+                dim: false,
+                family: 0,
+                lig_slot: None,
+            },
+            fg: Color::Default,
+            bold: false,
+            dim: false,
+            contrast_bg: (0, 0, 0),
+            skip_contrast: false,
+            custom_id: 0,
+            selected: false,
+            box_glyph: false,
+            x_offset: None,
+            run_shaped: None,
+        }
+    }
+
+    /// `ensure_rows` debe garantizar un slot-fila por fila en TODOS los
+    /// campos de la display list. Antes de este fix, `text_glyphs` usaba
+    /// `text_glyphs_flat().count()` (numero total de glifos) en lugar de
+    /// `text_glyphs.len()` (numero de filas), lo que dejaba `text_glyphs`
+    /// con menos filas que `bg_quads` cuando ya habia glifos suficientes.
+    /// Eso causaba un index-out-of-bounds en
+    /// `CellRenderer::build_custom_glyphs` al crecer el grid tras un resize.
+    #[test]
+    fn ensure_rows_alinea_text_glyphs_con_bg_quads() {
+        let mut list = DisplayList::default();
+        // 3 filas, con 6 glifos en la fila 0: text_glyphs_flat().count() = 6
+        // pero text_glyphs.len() = 3. El bug comparaba count() >= rows.
+        list.ensure_rows(3);
+        for _ in 0..6 {
+            list.text_glyphs[0].push(sample_text_glyph());
+        }
+        assert_eq!(list.text_glyphs.len(), 3);
+        assert_eq!(list.text_glyphs_flat().count(), 6);
+
+        // Crece a 5 filas: con el bug (count()=6 >= 5), text_glyphs NO creceria.
+        list.ensure_rows(5);
+
+        assert_eq!(list.bg_quads.len(), 5);
+        assert_eq!(list.line_quads.len(), 5);
+        assert_eq!(
+            list.text_glyphs.len(),
+            5,
+            "text_glyphs debe tener 5 filas como los demas campos"
+        );
+        assert_eq!(list.cursor_bars.len(), 5);
     }
 
     #[test]
