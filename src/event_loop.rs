@@ -477,7 +477,13 @@ pub fn spawn_session(
                 coalesce_output_chunks(first, &rx_pty_to_gui, DRAIN_MAX_BYTES_PER_PASS);
 
             let (response, title, clipboard_pending, clipboard_writes, total_bytes) = {
-                let mut term_guard = term_drain.lock().expect("term mutex poisoned en drain");
+                let mut term_guard = match term_drain.lock() {
+                    Ok(g) => g,
+                    Err(poisoned) => {
+                        tracing::warn!("drain: term mutex poisoned, recovering guard");
+                        poisoned.into_inner()
+                    }
+                };
                 let mut total_bytes = 0usize;
                 for bytes in &chunks {
                     parser.advance(&mut *term_guard, bytes);
