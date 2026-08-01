@@ -75,6 +75,11 @@ fn init_reporter_if_accepted(config: &Config) {
 
 // ponytail: tope de bytes por pasada del drain; suelta el mutex del Term para la GUI.
 const DRAIN_MAX_BYTES_PER_PASS: usize = 256 * 1024;
+// Presupuesto de reloj por pasada del drain: corta a los 4 ms para que la
+// GUI pueda tomar el lock del Term aunque llegue salida masiva. El bucle
+// exterior vuelve a entrar inmediatamente cuando el backlog no está vacío,
+// así que el throughput agregado no cae.
+const DRAIN_TIME_BUDGET: Duration = Duration::from_millis(4);
 
 /// Sesion cuyo cursor/celdas SGR 5 deben parpadear (solo una a la vez).
 #[derive(Debug)]
@@ -473,10 +478,10 @@ pub fn spawn_session(
                 }
             };
 
-            let (chunks, deferred) =
+            let (mut chunks, deferred) =
                 coalesce_output_chunks(first, &rx_pty_to_gui, DRAIN_MAX_BYTES_PER_PASS);
 
-            let (response, title, clipboard_pending, clipboard_writes, total_bytes) = {
+            let (response, title, clipboard_pending, clipboard_writes, total_bytes, unparsed_idx) = {
                 let mut term_guard = match term_drain.lock() {
                     Ok(g) => g,
                     Err(poisoned) => {
@@ -485,9 +490,18 @@ pub fn spawn_session(
                     }
                 };
                 let mut total_bytes = 0usize;
-                for bytes in &chunks {
+                let drain_start = Instant::now();
+                let mut unparsed_idx = chunks.len();
+                for (i, bytes) in chunks.iter().enumerate() {
                     parser.advance(&mut *term_guard, bytes);
                     total_bytes += bytes.len();
+                    // Cortar por presupuesto de reloj, no por bytes: deja el
+                    // resto en el backlog para la próxima pasada. Comprobar
+                    // por chunk, no por byte, para no añadir overhead al hot path.
+                    if i + 1 < chunks.len() && drain_start.elapsed() >= DRAIN_TIME_BUDGET {
+                        unparsed_idx = i + 1;
+                        break;
+                    }
                 }
                 term_guard.search_refresh_if_active();
                 // Reset diferido de send_input: se aplica bajo este mismo lock,
@@ -507,6 +521,7 @@ pub fn spawn_session(
                     clipboard_pending,
                     clipboard_writes,
                     total_bytes,
+                    unparsed_idx,
                 )
             };
             metrics.record_bytes(total_bytes);
@@ -530,6 +545,14 @@ pub fn spawn_session(
                 pending_redraw = false;
             } else {
                 pending_redraw = true;
+            }
+
+            // Chunks cortados por presupuesto de reloj: reencolar al frente
+            // del backlog para que la próxima pasada los procese primero.
+            if unparsed_idx < chunks.len() {
+                for bytes in chunks.drain(unparsed_idx..).rev() {
+                    output_backlog.push_front(bytes);
+                }
             }
 
             for event in deferred {
