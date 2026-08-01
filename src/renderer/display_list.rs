@@ -166,6 +166,61 @@ impl DisplayList {
         self.cursor_bars_flat().nth(index)
     }
 
+    /// Rota las filas `[top, bottom]` (`region`) `lines` posiciones:
+    /// positivo hacia arriba (`rotate_left`), negativo hacia abajo
+    /// (`rotate_right`). Reaprovecha las primitivas ya construidas de las
+    /// filas que solo cambiaron de posicion tras un scroll, en vez de
+    /// reconstruirlas. Requiere que `ensure_rows` ya haya corrido para
+    /// `bottom` (lo garantiza el unico llamante, `build`).
+    ///
+    /// Cada primitiva lleva su propia fila (`row`, o el primer elemento de
+    /// la tupla en `cursor_bars`) para el calculo de geometria en pantalla;
+    /// mover solo el slot del `Vec` externo sin reescribir ese campo dejaria
+    /// el contenido pintandose en su posicion vieja.
+    pub fn rotate_region(&mut self, region: (usize, usize), lines: i32) {
+        let (top, bottom) = region;
+        if top > bottom || bottom >= self.bg_quads.len() {
+            return;
+        }
+        let n = (lines.unsigned_abs() as usize).min(bottom - top + 1);
+        if n == 0 {
+            return;
+        }
+        if lines > 0 {
+            self.bg_quads[top..=bottom].rotate_left(n);
+            self.line_quads[top..=bottom].rotate_left(n);
+            self.text_glyphs[top..=bottom].rotate_left(n);
+            if bottom < self.cursor_bars.len() {
+                self.cursor_bars[top..=bottom].rotate_left(n);
+            }
+        } else {
+            self.bg_quads[top..=bottom].rotate_right(n);
+            self.line_quads[top..=bottom].rotate_right(n);
+            self.text_glyphs[top..=bottom].rotate_right(n);
+            if bottom < self.cursor_bars.len() {
+                self.cursor_bars[top..=bottom].rotate_right(n);
+            }
+        }
+        for row in top..=bottom {
+            for q in &mut self.bg_quads[row] {
+                q.row = row;
+            }
+            for q in &mut self.line_quads[row] {
+                q.row = row;
+            }
+            for q in &mut self.text_glyphs[row] {
+                q.row = row;
+            }
+        }
+        if bottom < self.cursor_bars.len() {
+            for row in top..=bottom {
+                for bar in &mut self.cursor_bars[row] {
+                    bar.0 = row;
+                }
+            }
+        }
+    }
+
     pub fn bg_quads_is_empty(&self) -> bool {
         self.bg_quads_flat().next().is_none()
     }
@@ -370,6 +425,9 @@ impl DisplayListBuilder {
                 );
             }
         } else {
+            if let DamageSnapshot::Scrolled { lines, region, .. } = damage {
+                list.rotate_region(*region, *lines);
+            }
             for row in 0..rows {
                 if !damage.is_row_dirty(row) {
                     continue;
@@ -1993,5 +2051,70 @@ mod tests {
             !off.bg_quads_is_empty(),
             "hay un bg_quad por el reverse efectivo"
         );
+    }
+
+    fn char_row(ch: char) -> Vec<Cell> {
+        vec![Cell {
+            ch,
+            ..Cell::default()
+        }]
+    }
+
+    /// Rebuild incremental con damage `Scrolled` sobre una cache existente
+    /// debe producir exactamente la misma display list que una reconstruccion
+    /// completa del contenido ya desplazado: la rotacion de `rotate_region`
+    /// (slots + campo `row` de cada primitiva) tiene que dejar todo en la
+    /// posicion correcta, no solo el contenido.
+    #[test]
+    fn scrolled_damage_iguala_rebuild_completo_tras_el_scroll() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut term = Term::default();
+        // El cursor no es objeto de este test (su acoplamiento con el
+        // damage esta cubierto en otros tests); desactivarlo aisla la
+        // geometria de contenido que rotate_region debe preservar.
+        term.cursor_visible = false;
+
+        let row_a = char_row('A');
+        let row_b = char_row('B');
+        let row_c = char_row('C');
+        let blank = vec![Cell::default(); 1];
+
+        let before: Vec<&[Cell]> = vec![row_a.as_slice(), row_b.as_slice(), row_c.as_slice()];
+        let mut cache = build_full(&term, &metrics, &theme, &before, 1, 3, &family);
+
+        // Scroll up de 1 sobre toda la pantalla: B y C suben, fila 2 en blanco.
+        let after: Vec<&[Cell]> = vec![row_b.as_slice(), row_c.as_slice(), blank.as_slice()];
+        let palette = test_palette(&theme);
+        let mut contrast_cache = ContrastCache::default();
+        let mut strings = GlyphStrings::new();
+        DisplayListBuilder::build(
+            &mut cache,
+            &term,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &after,
+            1,
+            3,
+            &family,
+            &DamageSnapshot::Scrolled {
+                lines: 1,
+                region: (0, 2),
+                rest: vec![vec![0]; 3],
+            },
+            false,
+            true,
+            true,
+            false,
+            &mut None,
+            &mut None,
+            &mut contrast_cache,
+            &mut strings,
+        );
+
+        let expected = build_full(&term, &metrics, &theme, &after, 1, 3, &family);
+        assert_eq!(cache, expected);
     }
 }

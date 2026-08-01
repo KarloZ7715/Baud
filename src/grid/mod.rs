@@ -243,7 +243,13 @@ impl Grid {
                     let last = self.row_continuations.len() - 1;
                     self.row_continuations[last] = false;
                 }
-                self.damage.mark_all();
+                // El caso dominante deja rotar la cache de render en vez de
+                // invalidar el frame entero (ver GridDamage::mark_scrolled).
+                if let Ok(lines) = i32::try_from(n) {
+                    self.damage.mark_scrolled(lines, top, bottom);
+                } else {
+                    self.damage.mark_all();
+                }
             } else {
                 for _ in 0..n {
                     let blank = self.take_blank_row();
