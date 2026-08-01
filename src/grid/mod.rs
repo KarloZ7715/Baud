@@ -923,6 +923,37 @@ mod tests {
     }
 
     #[test]
+    fn scroll_up_pantalla_completa_produce_damage_scrolled() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 10);
+        let _ = grid.damage.take(); // descarta el damage inicial (full).
+        grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        let snap = grid.damage.take();
+        assert_eq!(
+            snap,
+            DamageSnapshot::Scrolled {
+                lines: 1,
+                region: (0, 4),
+                rest: vec![vec![0]; 5],
+            }
+        );
+    }
+
+    #[test]
+    fn varios_scrolls_en_el_mismo_frame_acumulan_lineas() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 10);
+        let _ = grid.damage.take();
+        grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        let snap = grid.damage.take();
+        let DamageSnapshot::Scrolled { lines, region, .. } = snap else {
+            panic!("se esperaba Scrolled tras varios scrolls del mismo frame");
+        };
+        assert_eq!(lines, 3);
+        assert_eq!(region, (0, 4));
+    }
+
+    #[test]
     fn resize_vacia_el_pool_reciclado_para_evitar_filas_de_longitud_vieja() {
         let mut grid = Grid::new_sized_with_scrollback(5, 10, 0);
         // max_scrollback == 0: cada scroll recicla directamente la propia fila.
