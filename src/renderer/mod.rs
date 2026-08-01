@@ -725,7 +725,21 @@ impl Renderer {
     pub fn resize(&mut self, width: u32, height: u32, _rows_count: usize) {
         self.config.width = width.clamp(1, 16_384);
         self.config.height = height.clamp(1, 16_384);
-        self.surface.configure(&self.device, &self.config);
+
+        // `surface.configure()` puede panicar via el error handler por defecto
+        // de wgpu (p. ej. "SurfaceOutput must be dropped") si un frame anterior
+        // se descarto sin presentar tras un panic en render. Lo capturamos aqui
+        // para que el resize no mate el proceso; el siguiente render intentara
+        // reconfigurar via el path Outdated/Lost de get_current_texture.
+        let configure_ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.surface.configure(&self.device, &self.config);
+        }))
+        .is_ok();
+        if !configure_ok {
+            tracing::warn!("resize: surface.configure() failed, skipping reconfiguration");
+            return;
+        }
+
         self.viewport
             .update(&self.queue, glyphon::Resolution { width, height });
 
