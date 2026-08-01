@@ -37,7 +37,10 @@ pub struct Cell {
 #[derive(Debug, Clone)]
 pub struct Grid {
     /// Matriz de celdas: rows[row][col].
-    pub rows: Vec<Vec<Cell>>,
+    /// `VecDeque` para que el scroll de pantalla completa (el caso dominante:
+    /// `\n` al final de la pantalla) sea O(1) con `pop_front`/`push_back` en
+    /// vez de un memmove sobre un `Vec`.
+    pub rows: VecDeque<Vec<Cell>>,
     /// Líneas que hicieron scroll por arriba de la región.
     /// La fila más reciente está al final.
     // ponytail: scrollback minimo con reflow.
@@ -57,7 +60,15 @@ pub struct Grid {
     pub row_continuations: Vec<bool>,
     /// Celdas modificadas desde el último frame (render incremental).
     pub damage: GridDamage,
+    /// Filas en blanco recicladas de scrolls anteriores, listas para reusar
+    /// sin asignar. Solo se llena mientras el scrollback aún no está lleno;
+    /// con el scrollback lleno el reciclado viene directo de `push_scrollback_recycling`.
+    blank_row_pool: Vec<Vec<Cell>>,
 }
+
+/// Tope del pool de filas en blanco recicladas: cubre ráfagas de scroll sin
+/// dejar que el pool crezca sin límite.
+const BLANK_ROW_POOL_CAP: usize = 4;
 
 impl Default for Cell {
     fn default() -> Self {
@@ -93,7 +104,7 @@ impl Grid {
     pub fn new_sized_with_scrollback(rows: usize, cols: usize, max_scrollback: usize) -> Self {
         let cap = max_scrollback.min(1024);
         Self {
-            rows: vec![vec![Cell::default(); cols]; rows],
+            rows: vec![vec![Cell::default(); cols]; rows].into(),
             scrollback: VecDeque::with_capacity(cap),
             rows_count: rows,
             cols_count: cols,
@@ -101,6 +112,7 @@ impl Grid {
             scrollback_trimmed: 0,
             row_continuations: vec![false; rows],
             damage: GridDamage::new(rows, cols),
+            blank_row_pool: Vec::new(),
         }
     }
 
@@ -191,36 +203,84 @@ impl Grid {
         self.damage.mark_row_range(row, from, end);
     }
 
+    /// Saca una fila en blanco del pool reciclado, o asigna una nueva si el
+    /// pool está vacío.
+    fn take_blank_row(&mut self) -> Vec<Cell> {
+        let row = self
+            .blank_row_pool
+            .pop()
+            .unwrap_or_else(|| vec![Cell::default(); self.cols_count]);
+        debug_assert_eq!(row.len(), self.cols_count);
+        row
+    }
+
+    /// Devuelve una fila ya vaciada al pool reciclado, si hay hueco.
+    fn recycle_blank_row(&mut self, row: Vec<Cell>) {
+        debug_assert_eq!(row.len(), self.cols_count);
+        if self.blank_row_pool.len() < BLANK_ROW_POOL_CAP {
+            self.blank_row_pool.push(row);
+        }
+    }
+
     /// Scroll up: mueve todas las filas de la región [top, bottom] una posición
     /// hacia arriba. La fila `bottom` queda en blanco.
     // ponytail: alt screen tambien acumula scrollback (bug aceptado).
     pub fn scroll_up_region(&mut self, n: usize, top: usize, bottom: usize) {
-        for _ in 0..n {
-            if top < self.rows_count && bottom < self.rows_count && top <= bottom {
-                let row_to_save = self.rows[top].clone();
-                self.push_scrollback(row_to_save);
-                self.resync_continuations();
-                self.rows.remove(top);
-                self.rows
-                    .insert(bottom, vec![Cell::default(); self.cols_count]);
-                self.row_continuations.remove(top);
-                self.row_continuations.insert(bottom, false);
+        if top < self.rows_count && bottom < self.rows_count && top <= bottom {
+            self.resync_continuations();
+            if top == 0 && bottom == self.rows_count - 1 {
+                // Camino rapido: caso dominante (\n al final de pantalla, sin
+                // scroll region activa). pop_front/push_back es O(1) real,
+                // sin memmove ni rotate.
+                for _ in 0..n {
+                    let saved = self.rows.pop_front().expect("rows_count > 0");
+                    let blank = self.take_blank_row();
+                    self.rows.push_back(blank);
+                    if let Some(recycled) = self.push_scrollback_recycling(saved) {
+                        self.recycle_blank_row(recycled);
+                    }
+                    self.row_continuations.rotate_left(1);
+                    let last = self.row_continuations.len() - 1;
+                    self.row_continuations[last] = false;
+                }
+                // El caso dominante deja rotar la cache de render en vez de
+                // invalidar el frame entero (ver GridDamage::mark_scrolled).
+                if let Ok(lines) = i32::try_from(n) {
+                    self.damage.mark_scrolled(lines, top, bottom);
+                } else {
+                    self.damage.mark_all();
+                }
+            } else {
+                for _ in 0..n {
+                    let blank = self.take_blank_row();
+                    let saved = std::mem::replace(&mut self.rows[top], blank);
+                    if let Some(recycled) = self.push_scrollback_recycling(saved) {
+                        self.recycle_blank_row(recycled);
+                    }
+                    self.rows.make_contiguous()[top..=bottom].rotate_left(1);
+                    self.row_continuations[top..=bottom].rotate_left(1);
+                    self.row_continuations[bottom] = false;
+                }
+                self.damage.mark_all();
             }
+        } else {
+            self.damage.mark_all();
         }
-        self.damage.mark_all();
     }
 
     /// Scroll down: mueve todas las filas de la región [top, bottom] una posición
     /// hacia abajo. La fila `top` queda en blanco.
     pub fn scroll_down_region(&mut self, n: usize, top: usize, bottom: usize) {
-        for _ in 0..n {
-            if top < self.rows_count && bottom < self.rows_count && top <= bottom {
-                self.resync_continuations();
-                self.rows.remove(bottom);
-                self.rows
-                    .insert(top, vec![Cell::default(); self.cols_count]);
-                self.row_continuations.remove(bottom);
-                self.row_continuations.insert(top, false);
+        if top < self.rows_count && bottom < self.rows_count && top <= bottom {
+            self.resync_continuations();
+            for _ in 0..n {
+                let blank = self.take_blank_row();
+                let mut discarded = std::mem::replace(&mut self.rows[bottom], blank);
+                self.rows.make_contiguous()[top..=bottom].rotate_right(1);
+                self.row_continuations[top..=bottom].rotate_right(1);
+                self.row_continuations[top] = false;
+                discarded.fill(Cell::default());
+                self.recycle_blank_row(discarded);
             }
         }
         self.damage.mark_all();
@@ -232,11 +292,13 @@ impl Grid {
     pub fn insert_line(&mut self, row: usize) {
         if row < self.rows_count {
             self.resync_continuations();
-            let blank = vec![Cell::default(); self.cols_count];
-            self.rows.remove(self.rows_count - 1);
-            self.rows.insert(row, blank);
-            self.row_continuations.remove(self.rows_count - 1);
-            self.row_continuations.insert(row, false);
+            let blank = self.take_blank_row();
+            let mut discarded = std::mem::replace(&mut self.rows[self.rows_count - 1], blank);
+            self.rows.make_contiguous()[row..self.rows_count].rotate_right(1);
+            self.row_continuations[row..self.rows_count].rotate_right(1);
+            self.row_continuations[row] = false;
+            discarded.fill(Cell::default());
+            self.recycle_blank_row(discarded);
             self.damage.mark_all();
         }
     }
@@ -247,10 +309,13 @@ impl Grid {
     pub fn delete_line(&mut self, row: usize) {
         if row < self.rows_count {
             self.resync_continuations();
-            self.rows.remove(row);
-            self.rows.push(vec![Cell::default(); self.cols_count]);
-            self.row_continuations.remove(row);
-            self.row_continuations.push(false);
+            let blank = self.take_blank_row();
+            let mut discarded = std::mem::replace(&mut self.rows[row], blank);
+            self.rows.make_contiguous()[row..self.rows_count].rotate_left(1);
+            self.row_continuations[row..self.rows_count].rotate_left(1);
+            self.row_continuations[self.rows_count - 1] = false;
+            discarded.fill(Cell::default());
+            self.recycle_blank_row(discarded);
             self.damage.mark_all();
         }
     }
@@ -294,6 +359,8 @@ impl Grid {
         let new_rows = new_rows.clamp(1, MAX_GRID);
         let new_cols = new_cols.clamp(1, MAX_GRID);
         self.resync_continuations();
+        // Las filas recicladas tienen la longitud vieja: no sirven tras un resize.
+        self.blank_row_pool.clear();
         // Primero truncar o expandir columnas en cada fila existente.
         for row in &mut self.rows {
             if new_cols < row.len() {
@@ -324,7 +391,7 @@ impl Grid {
 
         self.rows_count = new_rows;
         self.cols_count = new_cols;
-        Self::normalize_row_lengths(&mut self.rows, new_cols);
+        Self::normalize_row_lengths(self.rows.make_contiguous(), new_cols);
         self.damage.resize(new_rows, new_cols);
         rows_removed
     }
@@ -347,16 +414,30 @@ impl Grid {
 
     /// Guarda una fila en el scrollback cuando sale por arriba de la pantalla.
     fn push_scrollback(&mut self, row: Vec<Cell>) {
+        self.push_scrollback_recycling(row);
+    }
+
+    /// Guarda `row` en el scrollback y devuelve un buffer reutilizable (la
+    /// fila más antigua recortada, ya vaciada) cuando el scrollback estaba
+    /// lleno, para evitar asignar una fila en blanco nueva en el llamante.
+    fn push_scrollback_recycling(&mut self, mut row: Vec<Cell>) -> Option<Vec<Cell>> {
         if self.max_scrollback == 0 {
             // Sin buffer: la línea se descarta; igual cuenta para reconciliar índices.
             self.scrollback_trimmed += 1;
-            return;
+            row.fill(Cell::default());
+            return Some(row);
         }
-        if self.scrollback.len() >= self.max_scrollback {
-            self.scrollback.pop_front();
+        let recycled = if self.scrollback.len() >= self.max_scrollback {
             self.scrollback_trimmed += 1;
-        }
+            self.scrollback.pop_front()
+        } else {
+            None
+        };
         self.scrollback.push_back(row);
+        recycled.map(|mut r| {
+            r.fill(Cell::default());
+            r
+        })
     }
 
     /// Actualiza el límite de scrollback y descarta líneas sobrantes.
@@ -483,6 +564,8 @@ impl Grid {
         new_cols: usize,
         cursor: Option<(usize, usize)>,
     ) -> Option<(usize, usize)> {
+        // Las filas recicladas tienen la longitud vieja: no sirven tras un reflow.
+        self.blank_row_pool.clear();
         let old_rows: Vec<Vec<Cell>> = self.rows.drain(..).collect();
         let old_row_continuations = self.row_continuations.clone();
         let cursor_offset =
@@ -544,7 +627,7 @@ impl Grid {
         // ---- Step 4: if the grid was completely empty, just fill and return ----
 
         if flat.is_empty() {
-            self.rows = vec![vec![Cell::default(); new_cols]; self.rows_count];
+            self.rows = vec![vec![Cell::default(); new_cols]; self.rows_count].into();
             self.cols_count = new_cols;
             return cursor.map(|(r, c)| {
                 (
@@ -658,7 +741,7 @@ impl Grid {
 
         // ---- Step 8: assign ----
 
-        self.rows = new_rows;
+        self.rows = new_rows.into();
         self.row_continuations = new_continuations;
         self.cols_count = new_cols;
         self.damage.mark_all();
@@ -755,6 +838,132 @@ mod tests {
             grid.scroll_up_region(1, 0, grid.rows_count - 1);
         }
         assert_eq!(grid.scrollback.len(), 100);
+    }
+
+    #[test]
+    fn scroll_up_recicla_fila_sin_contenido_previo() {
+        // Scrollback lleno: cada scroll recicla la fila mas antigua recortada.
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 2);
+        for i in 0..2usize {
+            grid.rows[0][0].ch = (b'a' + i as u8) as char;
+            grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        }
+        // La fila nueva del fondo debe estar en blanco, no arrastrar contenido reciclado.
+        let bottom = grid.rows_count - 1;
+        assert_eq!(grid.rows[bottom][0], Cell::default());
+    }
+
+    #[test]
+    fn scroll_up_region_parcial_no_toca_filas_fuera_de_rango() {
+        // top != 0 y bottom != rows_count - 1: fuerza el camino make_contiguous.
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 10);
+        for r in 0..grid.rows_count {
+            grid.rows[r][0].ch = (b'a' + r as u8) as char;
+        }
+        grid.scroll_up_region(1, 1, 3);
+        assert_eq!(grid.rows[0][0].ch, 'a', "fuera de la region: intacta");
+        assert_eq!(grid.rows[1][0].ch, 'c');
+        assert_eq!(grid.rows[2][0].ch, 'd');
+        assert_eq!(grid.rows[3][0], Cell::default());
+        assert_eq!(grid.rows[4][0].ch, 'e', "fuera de la region: intacta");
+        // La region no incluye row 0, no debe ir al scrollback.
+        assert_eq!(grid.scrollback.len(), 1);
+        assert_eq!(grid.scrollback[0][0].ch, 'b');
+    }
+
+    #[test]
+    fn scroll_down_region_parcial_no_toca_filas_fuera_de_rango() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 10);
+        for r in 0..grid.rows_count {
+            grid.rows[r][0].ch = (b'a' + r as u8) as char;
+        }
+        grid.scroll_down_region(1, 1, 3);
+        assert_eq!(grid.rows[0][0].ch, 'a', "fuera de la region: intacta");
+        assert_eq!(grid.rows[1][0], Cell::default());
+        assert_eq!(grid.rows[2][0].ch, 'b');
+        assert_eq!(grid.rows[3][0].ch, 'c');
+        assert_eq!(grid.rows[4][0].ch, 'e', "fuera de la region: intacta");
+    }
+
+    #[test]
+    fn scroll_down_region_desplaza_contenido_y_limpia_top() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 10);
+        for r in 0..grid.rows_count {
+            grid.rows[r][0].ch = (b'a' + r as u8) as char;
+        }
+        grid.scroll_down_region(1, 0, grid.rows_count - 1);
+        assert_eq!(grid.rows[0][0], Cell::default());
+        assert_eq!(grid.rows[1][0].ch, 'a');
+        assert_eq!(grid.rows[grid.rows_count - 1][0].ch, 'd');
+    }
+
+    #[test]
+    fn insert_line_desplaza_hacia_abajo_y_descarta_ultima_fila() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 10);
+        for r in 0..grid.rows_count {
+            grid.rows[r][0].ch = (b'a' + r as u8) as char;
+        }
+        grid.insert_line(1);
+        assert_eq!(grid.rows[0][0].ch, 'a');
+        assert_eq!(grid.rows[1][0], Cell::default());
+        assert_eq!(grid.rows[2][0].ch, 'b');
+        assert_eq!(grid.rows[grid.rows_count - 1][0].ch, 'd');
+    }
+
+    #[test]
+    fn delete_line_desplaza_hacia_arriba_y_deja_ultima_en_blanco() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 10);
+        for r in 0..grid.rows_count {
+            grid.rows[r][0].ch = (b'a' + r as u8) as char;
+        }
+        grid.delete_line(1);
+        assert_eq!(grid.rows[0][0].ch, 'a');
+        assert_eq!(grid.rows[1][0].ch, 'c');
+        assert_eq!(grid.rows[grid.rows_count - 1][0], Cell::default());
+    }
+
+    #[test]
+    fn scroll_up_pantalla_completa_produce_damage_scrolled() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 10);
+        let _ = grid.damage.take(); // descarta el damage inicial (full).
+        grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        let snap = grid.damage.take();
+        assert_eq!(
+            snap,
+            DamageSnapshot::Scrolled {
+                lines: 1,
+                region: (0, 4),
+                rest: vec![vec![0]; 5],
+            }
+        );
+    }
+
+    #[test]
+    fn varios_scrolls_en_el_mismo_frame_acumulan_lineas() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 10);
+        let _ = grid.damage.take();
+        grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        let snap = grid.damage.take();
+        let DamageSnapshot::Scrolled { lines, region, .. } = snap else {
+            panic!("se esperaba Scrolled tras varios scrolls del mismo frame");
+        };
+        assert_eq!(lines, 3);
+        assert_eq!(region, (0, 4));
+    }
+
+    #[test]
+    fn resize_vacia_el_pool_reciclado_para_evitar_filas_de_longitud_vieja() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 0);
+        // max_scrollback == 0: cada scroll recicla directamente la propia fila.
+        grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        grid.resize(5, 20);
+        // Tras el resize toda fila nueva por scroll debe tener el ancho nuevo.
+        grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        for row in &grid.rows {
+            assert_eq!(row.len(), 20);
+        }
     }
 
     #[test]

@@ -9,10 +9,20 @@ pub(crate) const MAX_DAMAGE_COLS: usize = 4096;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GridDamage {
     /// `rows[row][word]` cubre columnas `word*64 .. word*64+63`.
+    /// Rota en conjunto con `Grid::rows` cuando hay scroll (`mark_scrolled`),
+    /// asi que un bit marcado antes del scroll sigue senalando la fila
+    /// correcta despues de que su contenido se desplazo.
     rows: Vec<Vec<u64>>,
     cols: usize,
     /// Invalidación total (resize, clear, reflow).
     full: bool,
+    /// Región que acumula scrolls compatibles desde el último `take()`.
+    /// `None` si no hubo scroll, o si scrolls de regiones distintas se
+    /// mezclaron y degradaron a `full`.
+    scroll_region: Option<(usize, usize)>,
+    /// Desplazamiento neto acumulado para `scroll_region`. Positivo: el
+    /// contenido se movio hacia arriba (scroll up). Negativo: hacia abajo.
+    scroll_lines: i32,
 }
 
 impl GridDamage {
@@ -21,6 +31,8 @@ impl GridDamage {
             rows: vec![vec![0; Self::words_for_cols(cols)]; rows],
             cols,
             full: true,
+            scroll_region: None,
+            scroll_lines: 0,
         }
     }
 
@@ -30,6 +42,8 @@ impl GridDamage {
         self.rows = vec![vec![0; Self::words_for_cols(cols)]; rows];
         self.cols = cols;
         self.full = true;
+        self.scroll_region = None;
+        self.scroll_lines = 0;
     }
 
     pub fn cols(&self) -> usize {
@@ -42,8 +56,57 @@ impl GridDamage {
 
     pub fn mark_all(&mut self) {
         self.full = true;
+        self.scroll_region = None;
+        self.scroll_lines = 0;
         for row in &mut self.rows {
             row.fill(0);
+        }
+    }
+
+    /// Registra un scroll de `lines` filas (positivo: arriba, negativo:
+    /// abajo) sobre `[top, bottom]`, en vez de invalidar todo el frame.
+    /// Rota el propio bitmap junto con el contenido para que los bits ya
+    /// marcados sigan apuntando a la fila correcta tras el desplazamiento.
+    /// Si ya hay un scroll acumulado de otra región, degrada a `mark_all`
+    /// (caso raro: mezclar scrolls de regiones distintas en el mismo frame).
+    pub fn mark_scrolled(&mut self, lines: i32, top: usize, bottom: usize) {
+        if self.full || lines == 0 {
+            return;
+        }
+        match self.scroll_region {
+            Some(region) if region != (top, bottom) => {
+                self.mark_all();
+                return;
+            }
+            None => self.scroll_region = Some((top, bottom)),
+            Some(_) => {}
+        }
+        self.scroll_lines += lines;
+        self.rotate_rows(lines, top, bottom);
+    }
+
+    /// Rota el bitmap de daño `[top, bottom]` en el mismo sentido que el
+    /// contenido del grid: mueve punteros de `Vec<u64>` (24 bytes), no
+    /// palabras de bits.
+    fn rotate_rows(&mut self, lines: i32, top: usize, bottom: usize) {
+        if top > bottom || bottom >= self.rows.len() {
+            return;
+        }
+        let region_len = bottom - top + 1;
+        let n = (lines.unsigned_abs() as usize).min(region_len);
+        if n == 0 {
+            return;
+        }
+        if lines > 0 {
+            self.rows[top..=bottom].rotate_left(n);
+            for row in &mut self.rows[(bottom + 1 - n)..=bottom] {
+                row.fill(0);
+            }
+        } else {
+            self.rows[top..=bottom].rotate_right(n);
+            for row in &mut self.rows[top..(top + n)] {
+                row.fill(0);
+            }
         }
     }
 
@@ -99,6 +162,8 @@ impl GridDamage {
         }
         if self.full {
             self.full = false;
+            self.scroll_region = None;
+            self.scroll_lines = 0;
             for row in &mut self.rows {
                 row.fill(0);
             }
@@ -107,6 +172,17 @@ impl GridDamage {
         let words = Self::words_for_cols(self.cols);
         let row_count = self.rows.len();
         let taken = std::mem::replace(&mut self.rows, vec![vec![0; words]; row_count]);
+        if let Some(region) = self.scroll_region.take() {
+            let lines = self.scroll_lines;
+            self.scroll_lines = 0;
+            if lines != 0 {
+                return DamageSnapshot::Scrolled {
+                    lines,
+                    region,
+                    rest: taken,
+                };
+            }
+        }
         DamageSnapshot::Cells(taken)
     }
 
@@ -120,6 +196,17 @@ impl GridDamage {
 pub enum DamageSnapshot {
     Full,
     Cells(Vec<Vec<u64>>),
+    /// La región `region` (`(top, bottom)`, inclusive) se desplazó `lines`
+    /// filas (positivo: arriba, negativo: abajo) respecto al frame anterior,
+    /// además de las celdas marcadas en `rest` (ya en la posición final,
+    /// post-desplazamiento). El consumidor puede rotar su propia caché por
+    /// fila en vez de reconstruirla, y solo repintar las filas que el
+    /// desplazamiento dejó en blanco más las de `rest`.
+    Scrolled {
+        lines: i32,
+        region: (usize, usize),
+        rest: Vec<Vec<u64>>,
+    },
 }
 
 impl DamageSnapshot {
@@ -130,23 +217,48 @@ impl DamageSnapshot {
     pub fn is_cell_dirty(&self, row: usize, col: usize) -> bool {
         match self {
             Self::Full => true,
-            Self::Cells(rows) => {
-                let word = col / BITS_PER_WORD;
-                let bit = col % BITS_PER_WORD;
-                rows.get(row)
-                    .and_then(|words| words.get(word))
-                    .is_some_and(|w| (w & (1_u64 << bit)) != 0)
-            }
+            Self::Cells(rows) => Self::cell_dirty_in(rows, row, col),
+            Self::Scrolled { .. } => self.is_row_dirty(row),
         }
     }
 
-    /// True si alguna celda de la fila cambio.
+    fn cell_dirty_in(rows: &[Vec<u64>], row: usize, col: usize) -> bool {
+        let word = col / BITS_PER_WORD;
+        let bit = col % BITS_PER_WORD;
+        rows.get(row)
+            .and_then(|words| words.get(word))
+            .is_some_and(|w| (w & (1_u64 << bit)) != 0)
+    }
+
+    fn row_dirty_in(rows: &[Vec<u64>], row: usize) -> bool {
+        rows.get(row)
+            .is_some_and(|words| words.iter().any(|w| *w != 0))
+    }
+
+    /// True si alguna celda de la fila cambio. Para `Scrolled`, tambien es
+    /// cierto si `row` es una de las filas que el desplazamiento dejo en
+    /// blanco (nunca reusables desde la cache, sin importar `rest`).
     pub fn is_row_dirty(&self, row: usize) -> bool {
         match self {
             Self::Full => true,
-            Self::Cells(rows) => rows
-                .get(row)
-                .is_some_and(|words| words.iter().any(|w| *w != 0)),
+            Self::Cells(rows) => Self::row_dirty_in(rows, row),
+            Self::Scrolled {
+                lines,
+                region: (top, bottom),
+                rest,
+            } => {
+                if row < *top || row > *bottom {
+                    return false;
+                }
+                let region_len = bottom - top + 1;
+                let n = (lines.unsigned_abs() as usize).min(region_len);
+                let newly_exposed = if *lines > 0 {
+                    row > bottom.saturating_sub(n)
+                } else {
+                    row < top + n
+                };
+                newly_exposed || Self::row_dirty_in(rest, row)
+            }
         }
     }
 
@@ -155,6 +267,9 @@ impl DamageSnapshot {
         match self {
             Self::Full => true,
             Self::Cells(rows) => rows.iter().any(|words| words.iter().any(|w| *w != 0)),
+            Self::Scrolled { lines, rest, .. } => {
+                *lines != 0 || rest.iter().any(|words| words.iter().any(|w| *w != 0))
+            }
         }
     }
 
@@ -164,8 +279,10 @@ impl DamageSnapshot {
             return;
         }
         let cols = cols.clamp(1, MAX_DAMAGE_COLS);
-        let Self::Cells(rows) = self else {
-            return;
+        let rows = match self {
+            Self::Cells(rows) => rows,
+            Self::Scrolled { rest, .. } => rest,
+            Self::Full => return,
         };
         let words_needed = GridDamage::words_for_cols(cols);
         if rows.len() <= row {
@@ -242,5 +359,130 @@ mod tests {
         snap.mark_row_dirty(0, 10);
         assert!(snap.is_row_dirty(0));
         assert!(!snap.is_row_dirty(1));
+    }
+
+    #[test]
+    fn mark_scrolled_produce_snapshot_scrolled() {
+        let mut d = GridDamage::new(5, 10);
+        d.full = false;
+        d.mark_scrolled(1, 0, 4);
+        let snap = d.take();
+        assert_eq!(
+            snap,
+            DamageSnapshot::Scrolled {
+                lines: 1,
+                region: (0, 4),
+                rest: vec![vec![0]; 5],
+            }
+        );
+    }
+
+    #[test]
+    fn mark_scrolled_acumula_lineas_de_la_misma_region() {
+        let mut d = GridDamage::new(5, 10);
+        d.full = false;
+        d.mark_scrolled(1, 0, 4);
+        d.mark_scrolled(1, 0, 4);
+        d.mark_scrolled(1, 0, 4);
+        let snap = d.take();
+        let DamageSnapshot::Scrolled { lines, region, .. } = snap else {
+            panic!("se esperaba Scrolled");
+        };
+        assert_eq!(lines, 3);
+        assert_eq!(region, (0, 4));
+    }
+
+    #[test]
+    fn mark_scrolled_con_region_distinta_degrada_a_full() {
+        let mut d = GridDamage::new(5, 10);
+        d.full = false;
+        d.mark_scrolled(1, 0, 4);
+        d.mark_scrolled(1, 1, 3);
+        assert!(d.is_full());
+        assert_eq!(d.take(), DamageSnapshot::Full);
+    }
+
+    #[test]
+    fn is_row_dirty_scrolled_marca_filas_recien_expuestas() {
+        // 5 filas, scroll de 2: las 2 filas del fondo quedaron en blanco.
+        let snap = DamageSnapshot::Scrolled {
+            lines: 2,
+            region: (0, 4),
+            rest: vec![vec![0]; 5],
+        };
+        assert!(!snap.is_row_dirty(0));
+        assert!(!snap.is_row_dirty(1));
+        assert!(!snap.is_row_dirty(2));
+        assert!(snap.is_row_dirty(3));
+        assert!(snap.is_row_dirty(4));
+    }
+
+    #[test]
+    fn is_row_dirty_scrolled_hacia_abajo_marca_filas_del_tope() {
+        let snap = DamageSnapshot::Scrolled {
+            lines: -2,
+            region: (0, 4),
+            rest: vec![vec![0]; 5],
+        };
+        assert!(snap.is_row_dirty(0));
+        assert!(snap.is_row_dirty(1));
+        assert!(!snap.is_row_dirty(2));
+        assert!(!snap.is_row_dirty(3));
+        assert!(!snap.is_row_dirty(4));
+    }
+
+    #[test]
+    fn is_row_dirty_scrolled_respeta_rest_fuera_de_lo_recien_expuesto() {
+        let mut rest = vec![vec![0]; 5];
+        rest[1][0] = 1; // celda escrita despues del scroll, fuera del borde.
+        let snap = DamageSnapshot::Scrolled {
+            lines: 1,
+            region: (0, 4),
+            rest,
+        };
+        assert!(snap.is_row_dirty(1));
+        assert!(!snap.is_row_dirty(2));
+    }
+
+    #[test]
+    fn mark_cell_antes_de_scroll_sigue_la_fila_tras_rotar() {
+        // Escribir en la fila 4 (fondo), luego scrollear 1: ese bit debe
+        // reaparecer en la fila 3 tras el desplazamiento.
+        let mut d = GridDamage::new(5, 10);
+        d.full = false;
+        d.mark_cell(4, 2);
+        d.mark_scrolled(1, 0, 4);
+        let snap = d.take();
+        assert!(snap.is_cell_dirty(3, 2));
+    }
+
+    #[test]
+    fn mark_row_dirty_en_snapshot_scrolled_marca_rest() {
+        let mut snap = DamageSnapshot::Scrolled {
+            lines: 1,
+            region: (0, 4),
+            rest: vec![vec![0]; 5],
+        };
+        snap.mark_row_dirty(2, 10);
+        assert!(snap.is_row_dirty(2));
+    }
+
+    #[test]
+    fn has_any_dirty_scrolled_true_por_el_desplazamiento_solo() {
+        let snap = DamageSnapshot::Scrolled {
+            lines: 1,
+            region: (0, 4),
+            rest: vec![vec![0]; 5],
+        };
+        assert!(snap.has_any_dirty());
+    }
+
+    #[test]
+    fn resize_descarta_scroll_acumulado() {
+        let mut d = GridDamage::new(5, 10);
+        d.full = false;
+        d.mark_scrolled(1, 0, 4);
+        d.resize(5, 20);
+        assert_eq!(d.take(), DamageSnapshot::Full);
     }
 }

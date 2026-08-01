@@ -42,6 +42,41 @@ fn line_quad_to_custom(line: &LineQuad, metrics: &CellMetrics) -> CustomGlyph {
 pub struct CellRenderer;
 
 impl CellRenderer {
+    /// Rota `[top, bottom]` del cache de custom glyphs por fila igual que
+    /// `DisplayList::rotate_region`. A diferencia de la display list, cada
+    /// `CustomGlyph` ya trae su posicion en pixeles horneada (`top`), asi
+    /// que ademas de mover el slot hay que desplazar esa coordenada segun
+    /// cuantas filas se movio (las filas recien expuestas por el scroll se
+    /// sobrescriben de todos modos al reconstruirse, asi que el shift ahi
+    /// es inofensivo aunque no se preserve).
+    fn rotate_row_cache(
+        row_cache: &mut [Vec<CustomGlyph>],
+        region: (usize, usize),
+        lines: i32,
+        cell_h: f32,
+    ) {
+        let (top, bottom) = region;
+        if top > bottom || bottom >= row_cache.len() {
+            return;
+        }
+        let n = (lines.unsigned_abs() as usize).min(bottom - top + 1);
+        if n == 0 {
+            return;
+        }
+        let shift = if lines > 0 {
+            row_cache[top..=bottom].rotate_left(n);
+            -(n as f32) * cell_h
+        } else {
+            row_cache[top..=bottom].rotate_right(n);
+            n as f32 * cell_h
+        };
+        for glyphs in &mut row_cache[top..=bottom] {
+            for g in glyphs.iter_mut() {
+                g.top += shift;
+            }
+        }
+    }
+
     /// Convierte una fila de la display list en `CustomGlyph`, escribiendo en
     /// el slot cacheado de esa fila (`row_out`). Ese slot se reutiliza tal
     /// cual mientras la fila no este sucia.
@@ -132,6 +167,8 @@ impl CellRenderer {
         if force_full {
             row_cache.clear();
             row_cache.resize_with(rows, Vec::new);
+        } else if let DamageSnapshot::Scrolled { lines, region, .. } = damage {
+            Self::rotate_row_cache(row_cache, *region, *lines, metrics.cell_h);
         }
 
         let cursor_color = {
@@ -1456,5 +1493,100 @@ mod tests {
 
         assert_eq!(row_cache.len(), 3);
         assert_eq!(row_cache[0][0].color, Some(new_color));
+    }
+
+    /// `CustomGlyph.top` viene horneado en pixeles (a diferencia de
+    /// `BgQuad.row`, que es logico). `rotate_row_cache` debe desplazar ese
+    /// valor ademas de mover el slot, o el contenido reciclado por scroll
+    /// se pintaria en su fila vieja. Compara contra un rebuild completo del
+    /// estado ya desplazado.
+    #[test]
+    fn scroll_desplaza_el_top_horneado_del_row_cache() {
+        let (mut font_system, _) = test_metrics();
+        let mut swash_cache = glyphon::SwashCache::new();
+        let mut glyph_cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
+        let theme = crate::config::ThemeConfig::default();
+        let palette = Palette::from_theme(&theme);
+        let metrics = row_cache_test_metrics();
+        let mut contrast_cache = ContrastCache::default();
+        let color = glyphon::Color::rgb(255, 0, 0);
+
+        let mut list = DisplayList::default();
+        list.ensure_rows(3);
+        list.bg_quads[1].push(BgQuad {
+            row: 1,
+            col: 0,
+            width_cells: 1,
+            color,
+        });
+        let mut row_cache = Vec::new();
+        let mut out = Vec::new();
+        CellRenderer::build_custom_glyphs(
+            &list,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &mut glyph_cache,
+            &mut strings,
+            &mut font_system,
+            &mut swash_cache,
+            &mut contrast_cache,
+            &mut row_cache,
+            &DamageSnapshot::Full,
+            &mut out,
+        )
+        .expect("build inicial");
+
+        // Scroll up de 1 sobre [0,2]: la fila 1 (con el quad) pasa a la 0.
+        list.rotate_region((0, 2), 1);
+        let damage = DamageSnapshot::Scrolled {
+            lines: 1,
+            region: (0, 2),
+            rest: vec![vec![0]; 3],
+        };
+        CellRenderer::build_custom_glyphs(
+            &list,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &mut glyph_cache,
+            &mut strings,
+            &mut font_system,
+            &mut swash_cache,
+            &mut contrast_cache,
+            &mut row_cache,
+            &damage,
+            &mut out,
+        )
+        .expect("build incremental tras scroll");
+
+        let mut expected_list = DisplayList::default();
+        expected_list.ensure_rows(3);
+        expected_list.bg_quads[0].push(BgQuad {
+            row: 0,
+            col: 0,
+            width_cells: 1,
+            color,
+        });
+        let mut expected_row_cache = Vec::new();
+        let mut expected_out = Vec::new();
+        CellRenderer::build_custom_glyphs(
+            &expected_list,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &mut glyph_cache,
+            &mut strings,
+            &mut font_system,
+            &mut swash_cache,
+            &mut contrast_cache,
+            &mut expected_row_cache,
+            &DamageSnapshot::Full,
+            &mut expected_out,
+        )
+        .expect("build de referencia");
+
+        assert_eq!(row_cache[0], expected_row_cache[0]);
     }
 }
