@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use glyphon::cosmic_text::FontSystem;
 use glyphon::{ContentType, SwashCache, SwashContent};
 
-use super::glyph::{shape_glyph, GlyphKey, GlyphStrings, ShapedGlyph, ShapedOverlay};
+use super::glyph::{shape_glyph, GlyphKey, GlyphStrings, LineYCache, ShapedGlyph, ShapedOverlay};
 use super::limits::{self, MAX_RASTER_BYTES};
 use super::metrics::CellMetrics;
 
@@ -44,6 +44,13 @@ pub struct GlyphCache {
     next_id: u16,
     /// Métricas con las que se shapearon las entradas actuales.
     metrics_key: Option<MetricsCacheKey>,
+    /// Cache de `reference_line_y` por `(family, bold, italic, dim)`,
+    /// compartida por todos los glifos de celda (ver `shape_glyph`).
+    line_y_cache: LineYCache,
+    /// True tras purgar el cache por saturacion de `next_id` (ver
+    /// `take_needs_atlas_reset`): el llamante debe resetear el atlas de la
+    /// GPU, igual que hace tras `metrics_changed`.
+    needs_atlas_reset: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +84,8 @@ impl GlyphCache {
             glyphs: Vec::new(),
             next_id: Self::FIRST_TEXT_ID,
             metrics_key: None,
+            line_y_cache: LineYCache::new(),
+            needs_atlas_reset: false,
         }
     }
 
@@ -106,6 +115,36 @@ impl GlyphCache {
     fn clear_entries(&mut self) {
         self.entries.clear();
         self.glyphs.fill(None);
+        self.line_y_cache.clear();
+    }
+
+    /// Devuelve el siguiente `custom_glyph_id`. Si `next_id` esta saturado
+    /// (65535 glifos distintos vistos desde el ultimo reset de metricas),
+    /// purga el cache entero en vez de seguir asignando el mismo id a
+    /// glifos distintos: la alternativa (lo que hacia `saturating_add` antes
+    /// de este cambio) deja `by_id` apuntando siempre a la ultima entrada
+    /// insertada y todo glifo nuevo se pinta como esa.
+    fn take_next_id(&mut self) -> u16 {
+        if self.next_id == u16::MAX {
+            tracing::warn!(
+                "glyph cache: next_id saturado en {} entradas, purgando cache de glifos",
+                u16::MAX
+            );
+            self.clear_entries();
+            self.glyphs.clear();
+            self.next_id = Self::FIRST_TEXT_ID;
+            self.needs_atlas_reset = true;
+        }
+        let id = self.next_id;
+        self.next_id = self.next_id.saturating_add(1);
+        id
+    }
+
+    /// True (una sola vez) si una purga por saturacion de `next_id` requiere
+    /// resetear el atlas de la GPU. El llamante debe consultarlo tras cada
+    /// frame que pudo insertar glifos nuevos.
+    pub fn take_needs_atlas_reset(&mut self) -> bool {
+        std::mem::take(&mut self.needs_atlas_reset)
     }
 
     fn insert_glyph(&mut self, key: GlyphKey, cached: CachedGlyph) -> u16 {
@@ -144,10 +183,10 @@ impl GlyphCache {
             &key,
             strings.family(key.family),
             strings.extra(key.extra),
+            &mut self.line_y_cache,
         );
         let raster = rasterize_shaped(font_system, swash_cache, &shaped);
-        let custom_glyph_id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
+        let custom_glyph_id = self.take_next_id();
         self.insert_glyph(
             key,
             CachedGlyph {
@@ -175,8 +214,7 @@ impl GlyphCache {
         }
 
         let raster = rasterize_shaped(font_system, swash_cache, shaped);
-        let custom_glyph_id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
+        let custom_glyph_id = self.take_next_id();
         self.insert_glyph(
             key,
             CachedGlyph {
@@ -387,6 +425,7 @@ mod tests {
             bold: false,
             italic: false,
             dim: false,
+            lig_slot: None,
             family: strings.intern_family(family),
         }
     }
@@ -475,6 +514,62 @@ mod tests {
                 cached.raster.width
             );
         }
+    }
+
+    #[test]
+    fn purga_al_saturar_next_id_y_senala_reset_de_atlas() {
+        let mut font_system = create_font_system();
+        let mut swash_cache = SwashCache::new();
+        let font_config = FontConfig::default();
+        let metrics = CellMetrics::measure(
+            &mut font_system,
+            &font_config.family,
+            font_config.size as f32,
+            font_config.line_height,
+            font_config.glyph_offset,
+        );
+        let mut cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
+
+        let key_a = test_key(&mut strings, 'A', &font_config.family);
+        cache.get_or_insert(
+            &mut font_system,
+            &mut swash_cache,
+            &metrics,
+            &strings,
+            key_a,
+        );
+        assert!(!cache.take_needs_atlas_reset());
+
+        // Forzar la saturacion sin insertar 65 mil glifos reales.
+        cache.next_id = u16::MAX;
+        let key_b = test_key(&mut strings, 'B', &font_config.family);
+        let id_b = cache.get_or_insert(
+            &mut font_system,
+            &mut swash_cache,
+            &metrics,
+            &strings,
+            key_b,
+        );
+
+        assert_eq!(
+            id_b,
+            GlyphCache::FIRST_TEXT_ID,
+            "tras la purga, el primer id vuelve a ser el inicial"
+        );
+        assert_eq!(
+            cache.len(),
+            1,
+            "la purga debe vaciar las entradas viejas, solo queda la nueva"
+        );
+        assert!(
+            cache.take_needs_atlas_reset(),
+            "una purga por saturacion debe pedir reset de atlas"
+        );
+        assert!(
+            !cache.take_needs_atlas_reset(),
+            "la señal se consume una sola vez"
+        );
     }
 
     #[test]

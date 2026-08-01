@@ -25,6 +25,11 @@ pub struct GlyphKey {
     pub dim: bool,
     /// Indice de la familia tipografica en [`GlyphStrings`].
     pub family: u32,
+    /// Posicion dentro de un run de ligadura shapeado (`run_id`, indice del
+    /// glifo). `None` para glifos de celda normal. Distingue el mismo
+    /// caracter renderizado dentro de runs distintos (p. ej. `=` en `==` vs
+    /// `===`), que pueden producir glifos visualmente distintos.
+    pub lig_slot: Option<(u32, u16)>,
 }
 
 /// Tablas de interning para las cadenas de [`GlyphKey`].
@@ -59,10 +64,11 @@ impl GlyphStrings {
         }
     }
 
-    /// Las pseudo-familias de ligaduras (`familia#lig:texto:idx`) se internan
-    /// aqui mismo y su cardinalidad no esta acotada por la config, asi que el
-    /// id es u32: con u16 una sesion larga podria agotar los 65535 ids y
-    /// colisionar familias distintas.
+    /// El id es u32 por margen frente a configuraciones con muchos
+    /// fallbacks de fuente; la cardinalidad real (familias configuradas)
+    /// esta muy lejos de saturar un u16, pero un id mas ancho no cuesta
+    /// nada aqui (a diferencia de `GlyphCache::next_id`, que sí se paga por
+    /// glifo, ver `glyph_cache.rs`).
     pub fn intern_family(&mut self, family: &str) -> u32 {
         if let Some(&id) = self.family_ids.get(family) {
             return id;
@@ -92,6 +98,12 @@ impl GlyphStrings {
 
     pub fn extra(&self, id: u32) -> &str {
         &self.extras[id as usize]
+    }
+
+    /// Familias internadas hasta ahora (test de no-regresion de la fuga de
+    /// pseudo-familias de ligadura).
+    pub fn family_count(&self) -> usize {
+        self.families.len()
     }
 }
 
@@ -170,7 +182,33 @@ pub fn resolve_glyph_key(
         italic: cell.attrs.italic(),
         dim: cell.attrs.dim(),
         family: family_id,
+        lig_slot: None,
     })
+}
+
+/// Cache de `reference_line_y` por `(family, bold, italic, dim)`, vive en
+/// [`super::glyph_cache::GlyphCache`] y se invalida con el mismo disparador
+/// que sus metricas: como mucho 8 entradas por familia, se calculan una vez.
+pub(crate) type LineYCache = HashMap<(u32, bool, bool, bool), f32>;
+
+#[allow(clippy::too_many_arguments)]
+fn cached_line_y(
+    font_system: &mut FontSystem,
+    metrics: &CellMetrics,
+    line_y_cache: &mut LineYCache,
+    family_id: u32,
+    family: &str,
+    bold: bool,
+    italic: bool,
+    dim: bool,
+) -> f32 {
+    let key = (family_id, bold, italic, dim);
+    if let Some(&v) = line_y_cache.get(&key) {
+        return v;
+    }
+    let v = super::runs::reference_line_y(font_system, metrics, family, bold, italic, dim);
+    line_y_cache.insert(key, v);
+    v
 }
 
 /// Shapea un unico caracter con cosmic-text.
@@ -180,23 +218,41 @@ pub fn shape_glyph(
     key: &GlyphKey,
     family: &str,
     extra: &str,
+    line_y_cache: &mut LineYCache,
 ) -> ShapedGlyph {
     if key.bold {
-        let bold = shape_with_style(font_system, metrics, key, family, extra, true);
+        let bold = shape_with_style(font_system, metrics, key, family, extra, true, line_y_cache);
         if is_bold_weight(bold.cache_key.font_weight) {
             return bold;
         }
-        let mut regular = shape_with_style(font_system, metrics, key, family, extra, false);
+        let mut regular = shape_with_style(
+            font_system,
+            metrics,
+            key,
+            family,
+            extra,
+            false,
+            line_y_cache,
+        );
         regular.used_bold_fallback = true;
         return regular;
     }
-    shape_with_style(font_system, metrics, key, family, extra, false)
+    shape_with_style(
+        font_system,
+        metrics,
+        key,
+        family,
+        extra,
+        false,
+        line_y_cache,
+    )
 }
 
 fn is_bold_weight(weight: Weight) -> bool {
     weight.0 >= Weight::BOLD.0
 }
 
+#[allow(clippy::too_many_arguments)]
 fn shape_with_style(
     font_system: &mut FontSystem,
     metrics: &CellMetrics,
@@ -204,6 +260,7 @@ fn shape_with_style(
     family: &str,
     extra: &str,
     use_bold: bool,
+    line_y_cache: &mut LineYCache,
 ) -> ShapedGlyph {
     let ct_metrics = Metrics::new(metrics.font_size, metrics.cell_h);
     let mut buf = glyphon::Buffer::new(font_system, ct_metrics);
@@ -251,8 +308,16 @@ fn shape_with_style(
         };
     };
 
-    let line_y =
-        super::runs::reference_line_y(font_system, metrics, family, use_bold, key.italic, key.dim);
+    let line_y = cached_line_y(
+        font_system,
+        metrics,
+        line_y_cache,
+        key.family,
+        family,
+        use_bold,
+        key.italic,
+        key.dim,
+    );
 
     let mut overlays = Vec::new();
     let mut base: Option<ShapedGlyph> = None;
@@ -339,6 +404,7 @@ mod tests {
             bold: false,
             italic: false,
             dim: false,
+            lig_slot: None,
             family: strings.intern_family(family),
         }
     }
@@ -349,7 +415,15 @@ mod tests {
         let family = FontConfig::default().family;
         let mut strings = GlyphStrings::new();
         let key = test_key(&mut strings, 'M', "", &family);
-        let shaped = shape_glyph(&mut font_system, &metrics, &key, &family, "");
+        let mut line_y_cache = LineYCache::new();
+        let shaped = shape_glyph(
+            &mut font_system,
+            &metrics,
+            &key,
+            &family,
+            "",
+            &mut line_y_cache,
+        );
         assert!(
             (shaped.advance - metrics.cell_w).abs() < 0.5,
             "advance {} debe coincidir con cell_w {}",
@@ -481,7 +555,15 @@ mod tests {
         let family = FontConfig::default().family;
         let mut strings = GlyphStrings::new();
         let key = test_key(&mut strings, 'e', "\u{0301}", &family);
-        let shaped = shape_glyph(&mut font_system, &metrics, &key, &family, "\u{0301}");
+        let mut line_y_cache = LineYCache::new();
+        let shaped = shape_glyph(
+            &mut font_system,
+            &metrics,
+            &key,
+            &family,
+            "\u{0301}",
+            &mut line_y_cache,
+        );
         // Fuente puede componer a 1 glifo (overlays vacio) o emitir base+marca.
         // Lo importante: no se descarta el cluster; hay al menos la capa base.
         assert!(shaped.bitmap_w > 0.0 || !shaped.overlays.is_empty() || shaped.advance > 0.0);
