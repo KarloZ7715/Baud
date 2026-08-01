@@ -219,6 +219,297 @@ pub struct Attrs {
     pub underline_color: Color,
 }
 
+impl UnderlineStyle {
+    const fn to_bits(self) -> u16 {
+        match self {
+            UnderlineStyle::None => 0,
+            UnderlineStyle::Single => 1,
+            UnderlineStyle::Double => 2,
+            UnderlineStyle::Curly => 3,
+            UnderlineStyle::Dotted => 4,
+            UnderlineStyle::Dashed => 5,
+        }
+    }
+
+    const fn from_bits(bits: u16) -> Self {
+        match bits {
+            1 => UnderlineStyle::Single,
+            2 => UnderlineStyle::Double,
+            3 => UnderlineStyle::Curly,
+            4 => UnderlineStyle::Dotted,
+            5 => UnderlineStyle::Dashed,
+            _ => UnderlineStyle::None,
+        }
+    }
+}
+
+/// Flags de estilo de una celda, empaquetados en 16 bits.
+///
+/// Bits 0-8: los 9 booleanos de `Attrs` (bold, underline, italic, dim,
+/// reverse, blink, invisible, strikethrough, overline), un bit cada uno.
+/// Bits 9-11: `underline_style` (6 variantes). Bits 12-13: ancho de la celda
+/// (0, 1 o 2 columnas). Bits 14-15: reservados.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AttrFlags(u16);
+
+impl AttrFlags {
+    const BOLD: u16 = 1 << 0;
+    const UNDERLINE: u16 = 1 << 1;
+    const ITALIC: u16 = 1 << 2;
+    const DIM: u16 = 1 << 3;
+    const REVERSE: u16 = 1 << 4;
+    const BLINK: u16 = 1 << 5;
+    const INVISIBLE: u16 = 1 << 6;
+    const STRIKETHROUGH: u16 = 1 << 7;
+    const OVERLINE: u16 = 1 << 8;
+    const UNDERLINE_STYLE_SHIFT: u16 = 9;
+    const UNDERLINE_STYLE_MASK: u16 = 0b111 << Self::UNDERLINE_STYLE_SHIFT;
+    const WIDTH_SHIFT: u16 = 12;
+    const WIDTH_MASK: u16 = 0b11 << Self::WIDTH_SHIFT;
+
+    fn get(self, mask: u16) -> bool {
+        self.0 & mask != 0
+    }
+
+    fn set(&mut self, mask: u16, value: bool) {
+        if value {
+            self.0 |= mask;
+        } else {
+            self.0 &= !mask;
+        }
+    }
+
+    pub fn bold(self) -> bool {
+        self.get(Self::BOLD)
+    }
+    pub fn set_bold(&mut self, v: bool) {
+        self.set(Self::BOLD, v);
+    }
+    pub fn underline(self) -> bool {
+        self.get(Self::UNDERLINE)
+    }
+    pub fn set_underline(&mut self, v: bool) {
+        self.set(Self::UNDERLINE, v);
+    }
+    pub fn italic(self) -> bool {
+        self.get(Self::ITALIC)
+    }
+    pub fn set_italic(&mut self, v: bool) {
+        self.set(Self::ITALIC, v);
+    }
+    pub fn dim(self) -> bool {
+        self.get(Self::DIM)
+    }
+    pub fn set_dim(&mut self, v: bool) {
+        self.set(Self::DIM, v);
+    }
+    pub fn reverse(self) -> bool {
+        self.get(Self::REVERSE)
+    }
+    pub fn set_reverse(&mut self, v: bool) {
+        self.set(Self::REVERSE, v);
+    }
+    pub fn blink(self) -> bool {
+        self.get(Self::BLINK)
+    }
+    pub fn set_blink(&mut self, v: bool) {
+        self.set(Self::BLINK, v);
+    }
+    pub fn invisible(self) -> bool {
+        self.get(Self::INVISIBLE)
+    }
+    pub fn set_invisible(&mut self, v: bool) {
+        self.set(Self::INVISIBLE, v);
+    }
+    pub fn strikethrough(self) -> bool {
+        self.get(Self::STRIKETHROUGH)
+    }
+    pub fn set_strikethrough(&mut self, v: bool) {
+        self.set(Self::STRIKETHROUGH, v);
+    }
+    pub fn overline(self) -> bool {
+        self.get(Self::OVERLINE)
+    }
+    pub fn set_overline(&mut self, v: bool) {
+        self.set(Self::OVERLINE, v);
+    }
+
+    pub fn underline_style(self) -> UnderlineStyle {
+        UnderlineStyle::from_bits(
+            (self.0 & Self::UNDERLINE_STYLE_MASK) >> Self::UNDERLINE_STYLE_SHIFT,
+        )
+    }
+    pub fn set_underline_style(&mut self, style: UnderlineStyle) {
+        self.0 = (self.0 & !Self::UNDERLINE_STYLE_MASK)
+            | (style.to_bits() << Self::UNDERLINE_STYLE_SHIFT);
+    }
+
+    pub fn width(self) -> u8 {
+        ((self.0 & Self::WIDTH_MASK) >> Self::WIDTH_SHIFT) as u8
+    }
+    pub fn set_width(&mut self, width: u8) {
+        debug_assert!(width <= 2, "ancho de celda fuera de rango: {width}");
+        self.0 = (self.0 & !Self::WIDTH_MASK) | ((width as u16) << Self::WIDTH_SHIFT);
+    }
+}
+
+/// Representación compacta de `Attrs` usada dentro de `Cell`.
+///
+/// Agrupa `fg`/`bg` (como `PackedColor`), los flags booleanos y el estilo de
+/// subrayado (como `AttrFlags`), y el color de subrayado (SGR 58) como índice
+/// en `Term::underline_colors`. `0` significa `Color::Default`; cualquier
+/// otro valor es `idx + 1` dentro de esa tabla. El índice solo es válido
+/// junto al `Term` que lo produjo (misma convención que `grapheme_extras` y
+/// `hyperlinks`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PackedAttrs {
+    fg: PackedColor,
+    bg: PackedColor,
+    flags: AttrFlags,
+    underline_color: u16,
+}
+
+impl PackedAttrs {
+    pub fn fg(&self) -> Color {
+        self.fg.into()
+    }
+    pub fn set_fg(&mut self, color: Color) {
+        self.fg = color.into();
+    }
+    pub fn bg(&self) -> Color {
+        self.bg.into()
+    }
+    pub fn set_bg(&mut self, color: Color) {
+        self.bg = color.into();
+    }
+    pub fn bold(&self) -> bool {
+        self.flags.bold()
+    }
+    pub fn set_bold(&mut self, v: bool) {
+        self.flags.set_bold(v);
+    }
+    pub fn underline(&self) -> bool {
+        self.flags.underline()
+    }
+    pub fn set_underline(&mut self, v: bool) {
+        self.flags.set_underline(v);
+    }
+    pub fn italic(&self) -> bool {
+        self.flags.italic()
+    }
+    pub fn set_italic(&mut self, v: bool) {
+        self.flags.set_italic(v);
+    }
+    pub fn dim(&self) -> bool {
+        self.flags.dim()
+    }
+    pub fn set_dim(&mut self, v: bool) {
+        self.flags.set_dim(v);
+    }
+    pub fn reverse(&self) -> bool {
+        self.flags.reverse()
+    }
+    pub fn set_reverse(&mut self, v: bool) {
+        self.flags.set_reverse(v);
+    }
+    pub fn blink(&self) -> bool {
+        self.flags.blink()
+    }
+    pub fn set_blink(&mut self, v: bool) {
+        self.flags.set_blink(v);
+    }
+    pub fn invisible(&self) -> bool {
+        self.flags.invisible()
+    }
+    pub fn set_invisible(&mut self, v: bool) {
+        self.flags.set_invisible(v);
+    }
+    pub fn strikethrough(&self) -> bool {
+        self.flags.strikethrough()
+    }
+    pub fn set_strikethrough(&mut self, v: bool) {
+        self.flags.set_strikethrough(v);
+    }
+    pub fn overline(&self) -> bool {
+        self.flags.overline()
+    }
+    pub fn set_overline(&mut self, v: bool) {
+        self.flags.set_overline(v);
+    }
+    pub fn underline_style(&self) -> UnderlineStyle {
+        self.flags.underline_style()
+    }
+    pub fn set_underline_style(&mut self, style: UnderlineStyle) {
+        self.flags.set_underline_style(style);
+    }
+    pub fn width(&self) -> u8 {
+        self.flags.width()
+    }
+    pub fn set_width(&mut self, width: u8) {
+        self.flags.set_width(width);
+    }
+
+    /// Resuelve el color de subrayado (SGR 58) contra la tabla del `Term`
+    /// que produjo esta celda.
+    pub fn underline_color(&self, term: &Term) -> Color {
+        match self.underline_color {
+            0 => Color::Default,
+            idx => term.underline_colors[(idx - 1) as usize].into(),
+        }
+    }
+    /// Fija el color de subrayado, internando el valor en la tabla del
+    /// `Term` (con dedup) si no es `Color::Default`.
+    pub fn set_underline_color(&mut self, term: &mut Term, color: Color) {
+        self.underline_color = term.intern_underline_color(color);
+    }
+}
+
+impl From<Attrs> for PackedAttrs {
+    /// Convierte sin resolver `underline_color`: queda en `Color::Default`
+    /// (índice 0). Usar `set_underline_color` con el `Term` correspondiente
+    /// para preservarlo.
+    fn from(attrs: Attrs) -> Self {
+        let mut flags = AttrFlags::default();
+        flags.set_bold(attrs.bold);
+        flags.set_underline(attrs.underline);
+        flags.set_italic(attrs.italic);
+        flags.set_dim(attrs.dim);
+        flags.set_reverse(attrs.reverse);
+        flags.set_blink(attrs.blink);
+        flags.set_invisible(attrs.invisible);
+        flags.set_strikethrough(attrs.strikethrough);
+        flags.set_overline(attrs.overline);
+        flags.set_underline_style(attrs.underline_style);
+        PackedAttrs {
+            fg: attrs.fg.into(),
+            bg: attrs.bg.into(),
+            flags,
+            underline_color: 0,
+        }
+    }
+}
+
+impl PackedAttrs {
+    /// Convierte a `Attrs`, resolviendo `underline_color` contra `term`.
+    pub fn to_attrs(&self, term: &Term) -> Attrs {
+        Attrs {
+            fg: self.fg(),
+            bg: self.bg(),
+            bold: self.bold(),
+            underline: self.underline(),
+            italic: self.italic(),
+            dim: self.dim(),
+            reverse: self.reverse(),
+            blink: self.blink(),
+            invisible: self.invisible(),
+            strikethrough: self.strikethrough(),
+            overline: self.overline(),
+            underline_style: self.underline_style(),
+            underline_color: self.underline_color(term),
+        }
+    }
+}
+
 /// Rango de un enlace bajo el cursor (fila logica + columnas inclusivas).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkRange {
@@ -265,6 +556,9 @@ pub struct Term {
     pub title_dirty: bool,
     pub cwd: Option<String>,
     pub hyperlinks: Vec<String>,
+    /// Colores de subrayado (SGR 58) internados, con dedup (indice desde
+    /// `PackedAttrs::underline_color`, `idx + 1`; `0` es `Color::Default`).
+    pub underline_colors: Vec<PackedColor>,
     /// Marcas de prompt (OSC 133). Preferir `prompt_marks()` para leer índices válidos.
     pub(crate) prompt_marks: Vec<PromptMark>,
     /// Último `scrollback_trimmed` ya aplicado a `prompt_marks`.
@@ -432,6 +726,7 @@ impl Term {
             title_dirty: false,
             cwd: None,
             hyperlinks: Vec::new(),
+            underline_colors: Vec::new(),
             prompt_marks: Vec::new(),
             last_reconciled_trim: 0,
             grapheme_extras: Vec::new(),
@@ -1759,6 +2054,22 @@ impl Term {
     fn clear_pending_grapheme(&mut self) {
         self.pending_grapheme.clear();
         self.last_grapheme_cell = None;
+    }
+
+    /// Interna un color de subrayado (SGR 58) en `underline_colors`, con
+    /// dedup. Devuelve `0` para `Color::Default`, o `idx + 1` en caso
+    /// contrario.
+    pub fn intern_underline_color(&mut self, color: Color) -> u16 {
+        if color == Color::Default {
+            return 0;
+        }
+        let packed: PackedColor = color.into();
+        if let Some(i) = self.underline_colors.iter().position(|c| *c == packed) {
+            (i + 1) as u16
+        } else {
+            self.underline_colors.push(packed);
+            self.underline_colors.len() as u16
+        }
     }
 
     fn refresh_pending_grapheme_extras(&mut self) {
