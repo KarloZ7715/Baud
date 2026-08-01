@@ -37,7 +37,10 @@ pub struct Cell {
 #[derive(Debug, Clone)]
 pub struct Grid {
     /// Matriz de celdas: rows[row][col].
-    pub rows: Vec<Vec<Cell>>,
+    /// `VecDeque` para que el scroll de pantalla completa (el caso dominante:
+    /// `\n` al final de la pantalla) sea O(1) con `pop_front`/`push_back` en
+    /// vez de un memmove sobre un `Vec`.
+    pub rows: VecDeque<Vec<Cell>>,
     /// Líneas que hicieron scroll por arriba de la región.
     /// La fila más reciente está al final.
     // ponytail: scrollback minimo con reflow.
@@ -101,7 +104,7 @@ impl Grid {
     pub fn new_sized_with_scrollback(rows: usize, cols: usize, max_scrollback: usize) -> Self {
         let cap = max_scrollback.min(1024);
         Self {
-            rows: vec![vec![Cell::default(); cols]; rows],
+            rows: vec![vec![Cell::default(); cols]; rows].into(),
             scrollback: VecDeque::with_capacity(cap),
             rows_count: rows,
             cols_count: cols,
@@ -225,18 +228,38 @@ impl Grid {
     pub fn scroll_up_region(&mut self, n: usize, top: usize, bottom: usize) {
         if top < self.rows_count && bottom < self.rows_count && top <= bottom {
             self.resync_continuations();
-            for _ in 0..n {
-                let blank = self.take_blank_row();
-                let saved = std::mem::replace(&mut self.rows[top], blank);
-                if let Some(recycled) = self.push_scrollback_recycling(saved) {
-                    self.recycle_blank_row(recycled);
+            if top == 0 && bottom == self.rows_count - 1 {
+                // Camino rapido: caso dominante (\n al final de pantalla, sin
+                // scroll region activa). pop_front/push_back es O(1) real,
+                // sin memmove ni rotate.
+                for _ in 0..n {
+                    let saved = self.rows.pop_front().expect("rows_count > 0");
+                    let blank = self.take_blank_row();
+                    self.rows.push_back(blank);
+                    if let Some(recycled) = self.push_scrollback_recycling(saved) {
+                        self.recycle_blank_row(recycled);
+                    }
+                    self.row_continuations.rotate_left(1);
+                    let last = self.row_continuations.len() - 1;
+                    self.row_continuations[last] = false;
                 }
-                self.rows[top..=bottom].rotate_left(1);
-                self.row_continuations[top..=bottom].rotate_left(1);
-                self.row_continuations[bottom] = false;
+                self.damage.mark_all();
+            } else {
+                for _ in 0..n {
+                    let blank = self.take_blank_row();
+                    let saved = std::mem::replace(&mut self.rows[top], blank);
+                    if let Some(recycled) = self.push_scrollback_recycling(saved) {
+                        self.recycle_blank_row(recycled);
+                    }
+                    self.rows.make_contiguous()[top..=bottom].rotate_left(1);
+                    self.row_continuations[top..=bottom].rotate_left(1);
+                    self.row_continuations[bottom] = false;
+                }
+                self.damage.mark_all();
             }
+        } else {
+            self.damage.mark_all();
         }
-        self.damage.mark_all();
     }
 
     /// Scroll down: mueve todas las filas de la región [top, bottom] una posición
@@ -247,7 +270,7 @@ impl Grid {
             for _ in 0..n {
                 let blank = self.take_blank_row();
                 let mut discarded = std::mem::replace(&mut self.rows[bottom], blank);
-                self.rows[top..=bottom].rotate_right(1);
+                self.rows.make_contiguous()[top..=bottom].rotate_right(1);
                 self.row_continuations[top..=bottom].rotate_right(1);
                 self.row_continuations[top] = false;
                 discarded.fill(Cell::default());
@@ -265,7 +288,7 @@ impl Grid {
             self.resync_continuations();
             let blank = self.take_blank_row();
             let mut discarded = std::mem::replace(&mut self.rows[self.rows_count - 1], blank);
-            self.rows[row..self.rows_count].rotate_right(1);
+            self.rows.make_contiguous()[row..self.rows_count].rotate_right(1);
             self.row_continuations[row..self.rows_count].rotate_right(1);
             self.row_continuations[row] = false;
             discarded.fill(Cell::default());
@@ -282,7 +305,7 @@ impl Grid {
             self.resync_continuations();
             let blank = self.take_blank_row();
             let mut discarded = std::mem::replace(&mut self.rows[row], blank);
-            self.rows[row..self.rows_count].rotate_left(1);
+            self.rows.make_contiguous()[row..self.rows_count].rotate_left(1);
             self.row_continuations[row..self.rows_count].rotate_left(1);
             self.row_continuations[self.rows_count - 1] = false;
             discarded.fill(Cell::default());
@@ -362,7 +385,7 @@ impl Grid {
 
         self.rows_count = new_rows;
         self.cols_count = new_cols;
-        Self::normalize_row_lengths(&mut self.rows, new_cols);
+        Self::normalize_row_lengths(self.rows.make_contiguous(), new_cols);
         self.damage.resize(new_rows, new_cols);
         rows_removed
     }
@@ -598,7 +621,7 @@ impl Grid {
         // ---- Step 4: if the grid was completely empty, just fill and return ----
 
         if flat.is_empty() {
-            self.rows = vec![vec![Cell::default(); new_cols]; self.rows_count];
+            self.rows = vec![vec![Cell::default(); new_cols]; self.rows_count].into();
             self.cols_count = new_cols;
             return cursor.map(|(r, c)| {
                 (
@@ -712,7 +735,7 @@ impl Grid {
 
         // ---- Step 8: assign ----
 
-        self.rows = new_rows;
+        self.rows = new_rows.into();
         self.row_continuations = new_continuations;
         self.cols_count = new_cols;
         self.damage.mark_all();
@@ -822,6 +845,38 @@ mod tests {
         // La fila nueva del fondo debe estar en blanco, no arrastrar contenido reciclado.
         let bottom = grid.rows_count - 1;
         assert_eq!(grid.rows[bottom][0], Cell::default());
+    }
+
+    #[test]
+    fn scroll_up_region_parcial_no_toca_filas_fuera_de_rango() {
+        // top != 0 y bottom != rows_count - 1: fuerza el camino make_contiguous.
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 10);
+        for r in 0..grid.rows_count {
+            grid.rows[r][0].ch = (b'a' + r as u8) as char;
+        }
+        grid.scroll_up_region(1, 1, 3);
+        assert_eq!(grid.rows[0][0].ch, 'a', "fuera de la region: intacta");
+        assert_eq!(grid.rows[1][0].ch, 'c');
+        assert_eq!(grid.rows[2][0].ch, 'd');
+        assert_eq!(grid.rows[3][0], Cell::default());
+        assert_eq!(grid.rows[4][0].ch, 'e', "fuera de la region: intacta");
+        // La region no incluye row 0, no debe ir al scrollback.
+        assert_eq!(grid.scrollback.len(), 1);
+        assert_eq!(grid.scrollback[0][0].ch, 'b');
+    }
+
+    #[test]
+    fn scroll_down_region_parcial_no_toca_filas_fuera_de_rango() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 10);
+        for r in 0..grid.rows_count {
+            grid.rows[r][0].ch = (b'a' + r as u8) as char;
+        }
+        grid.scroll_down_region(1, 1, 3);
+        assert_eq!(grid.rows[0][0].ch, 'a', "fuera de la region: intacta");
+        assert_eq!(grid.rows[1][0], Cell::default());
+        assert_eq!(grid.rows[2][0].ch, 'b');
+        assert_eq!(grid.rows[3][0].ch, 'c');
+        assert_eq!(grid.rows[4][0].ch, 'e', "fuera de la region: intacta");
     }
 
     #[test]
