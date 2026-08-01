@@ -548,9 +548,9 @@ GPU redraw pacing.
 
 ### render.max_fps {#config-render-max_fps}
 
-Maximum redraw rate in frames per second. `0` removes the cap.
+Maximum redraw rate in frames per second. Unset uses the monitor's native refresh rate; `0` removes the cap entirely.
 
-Type: `integer`. Default: `60`.
+Type: `integer (optional)`. Default: *(not set)*.
 
 ### render.vsync {#config-render-vsync}
 

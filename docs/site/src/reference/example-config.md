@@ -83,8 +83,6 @@ A fully commented `config.toml`, generated from the same defaults as the configu
 # login = false
 
 [render]
-# Maximum redraw rate in frames per second. `0` removes the cap.
-# max_fps = 60
 # Synchronize presentation with the monitor refresh rate. Disabling it lowers input latency at the cost of possible tearing.
 # vsync = true
 

@@ -54,6 +54,7 @@ const OPTIONAL_FIELD_TYPES: &[(&str, &str)] = &[
     ("process.startup_command", "string"),
     ("process.distro", "string"),
     ("process.wsl_cwd", "string"),
+    ("render.max_fps", "integer"),
 ];
 
 #[derive(Debug, serde::Deserialize)]

@@ -330,6 +330,9 @@ pub struct App {
     startup_instant: Option<Instant>,
     /// Factor de escala DPI de la ventana (1.0 = 96 DPI).
     scale_factor: f64,
+    /// Refresco del monitor en Hz; None si no se pudo resolver.
+    /// Se re-resuelve al crear la ventana y al moverla entre monitores.
+    monitor_refresh_hz: Option<u32>,
     // --- Sonda de latencia tecla→present (diagnostics.latency_probe) ---
     /// Instant en que se envió la última entrada al PTY; None si no hay
     /// eco pendiente. Solo se mide cuando el drain dispara el redraw, no
@@ -515,6 +518,7 @@ impl App {
             app_id,
             startup_instant: None,
             scale_factor: 1.0,
+            monitor_refresh_hz: None,
             pending_echo: None,
             drain_triggered_redraw: false,
             latency_probe: LatencyProbeStats::new(),
@@ -913,7 +917,9 @@ impl App {
 
         self.config = new_cfg;
         self.redraw_interval_nanos.store(
-            self.config.render.redraw_interval_nanos(),
+            self.config
+                .render
+                .redraw_interval_nanos_for_monitor(self.monitor_refresh_hz),
             Ordering::Relaxed,
         );
 
@@ -3122,6 +3128,26 @@ impl ApplicationHandler<UserEvent> for App {
         );
         self.window = Some(window.clone());
         self.scale_factor = window.scale_factor();
+        // Resolver el refresco del monitor para `max_fps` automático.
+        // current_monitor() devuelve None en algunos compositores Wayland y
+        // en headless; refresh_rate_millihertz() puede devolver None igualmente.
+        // El fallback a 60 Hz cubre ambos casos.
+        let monitor_hz = window
+            .current_monitor()
+            .and_then(|m| m.refresh_rate_millihertz())
+            .map(|millihz| millihz / 1000);
+        if let Some(hz) = monitor_hz {
+            tracing::info!("startup: monitor refresco {} Hz", hz);
+        } else {
+            tracing::info!("startup: monitor refresco desconocido, fallback 60 Hz");
+        }
+        self.monitor_refresh_hz = monitor_hz;
+        self.redraw_interval_nanos.store(
+            self.config
+                .render
+                .redraw_interval_nanos_for_monitor(monitor_hz),
+            Ordering::Relaxed,
+        );
         window.set_ime_allowed(true);
         tracing::info!(
             "startup: ventana creada en {}ms",
@@ -3397,6 +3423,21 @@ impl ApplicationHandler<UserEvent> for App {
                 let Some(renderer) = &mut self.renderer else {
                     return;
                 };
+                // Re-resolver el refresco del monitor: ScaleFactorChanged
+                // se dispara al mover la ventana entre monitores.
+                let monitor_hz = window
+                    .current_monitor()
+                    .and_then(|m| m.refresh_rate_millihertz())
+                    .map(|millihz| millihz / 1000);
+                if monitor_hz != self.monitor_refresh_hz {
+                    self.monitor_refresh_hz = monitor_hz;
+                    self.redraw_interval_nanos.store(
+                        self.config
+                            .render
+                            .redraw_interval_nanos_for_monitor(monitor_hz),
+                        Ordering::Relaxed,
+                    );
+                }
                 let size = window.inner_size();
                 renderer.set_scale_factor(scale_factor as f32);
                 renderer.resize(size.width, size.height, 0);

@@ -122,17 +122,18 @@ pub struct ReportingConfig {
 /// Configuración de render de la GUI.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RenderConfig {
-    /// FPS máximo de redraw. `0` desactiva el límite.
+    /// FPS máximo de redraw. `None` (default) = automático: usa el refresco
+    /// del monitor. `Some(0)` = sin límite. `Some(n)` = tope explícito en n fps.
     #[serde(default = "default_render_max_fps")]
-    pub max_fps: u32,
+    pub max_fps: Option<u32>,
     /// Sincroniza el present con el refresco del monitor. Desactivarlo baja
     /// la latencia de entrada a costa de posible tearing.
     #[serde(default = "default_render_vsync")]
     pub vsync: bool,
 }
 
-fn default_render_max_fps() -> u32 {
-    60
+fn default_render_max_fps() -> Option<u32> {
+    None
 }
 
 fn default_render_vsync() -> bool {
@@ -148,20 +149,44 @@ impl Default for RenderConfig {
     }
 }
 
+/// Intervalo mínimo entre redraws en nanosegundos para `fps`. `0` = sin límite.
+fn fps_to_interval_nanos(fps: u32) -> u64 {
+    if fps == 0 {
+        return 0;
+    }
+    Duration::from_secs_f64(1.0 / fps as f64)
+        .as_nanos()
+        .min(u64::MAX as u128) as u64
+}
+
 impl RenderConfig {
-    /// Intervalo mínimo entre redraws según `max_fps`.
+    /// FPS efectivo: resuelve `None` (auto) con el refresco del monitor,
+    /// con fallback a 60 Hz si no se conoce. `Some(0)` = sin límite.
+    pub fn effective_max_fps(&self, monitor_hz: Option<u32>) -> u32 {
+        match self.max_fps {
+            None => monitor_hz.unwrap_or(60),
+            Some(n) => n,
+        }
+    }
+
+    /// Intervalo mínimo entre redraws según `max_fps`. Antes de resolver el
+    /// monitor usa 60 Hz como fallback para `None` (auto).
     pub fn redraw_interval(&self) -> Option<Duration> {
-        if self.max_fps == 0 {
+        let fps = self.effective_max_fps(None);
+        if fps == 0 {
             return None;
         }
-        Some(Duration::from_secs_f64(1.0 / self.max_fps as f64))
+        Some(Duration::from_secs_f64(1.0 / fps as f64))
     }
 
     /// Intervalo mínimo en nanosegundos; `0` significa sin límite.
     pub fn redraw_interval_nanos(&self) -> u64 {
-        self.redraw_interval()
-            .map(|d| d.as_nanos().min(u64::MAX as u128) as u64)
-            .unwrap_or(0)
+        fps_to_interval_nanos(self.effective_max_fps(None))
+    }
+
+    /// Intervalo resolviendo el refresco real del monitor (para `max_fps` auto).
+    pub fn redraw_interval_nanos_for_monitor(&self, monitor_hz: Option<u32>) -> u64 {
+        fps_to_interval_nanos(self.effective_max_fps(monitor_hz))
     }
 }
 
@@ -1804,23 +1829,46 @@ dim_alpha = true
     #[test]
     fn test_render_config_default_and_parse() {
         let cfg = Config::default();
-        assert_eq!(cfg.render.max_fps, 60);
+        assert_eq!(cfg.render.max_fps, None);
         assert_eq!(
             cfg.render.redraw_interval_nanos(),
             Duration::from_secs_f64(1.0 / 60.0).as_nanos() as u64
         );
 
         let p: Config = toml::from_str("[render]\nmax_fps = 120\n").unwrap();
-        assert_eq!(p.render.max_fps, 120);
+        assert_eq!(p.render.max_fps, Some(120));
         assert_eq!(
             p.render.redraw_interval_nanos(),
             Duration::from_secs_f64(1.0 / 120.0).as_nanos() as u64
         );
 
         let uncapped: Config = toml::from_str("[render]\nmax_fps = 0\n").unwrap();
-        assert_eq!(uncapped.render.max_fps, 0);
+        assert_eq!(uncapped.render.max_fps, Some(0));
         assert_eq!(uncapped.render.redraw_interval_nanos(), 0);
         assert!(uncapped.render.redraw_interval().is_none());
+
+        // max_fps ausente resuelve a None (automático).
+        let auto: Config = toml::from_str("[render]\nvsync = true\n").unwrap();
+        assert_eq!(auto.render.max_fps, None);
+
+        // effective_max_fps: None con monitor usa el refresco; sin monitor, 60.
+        assert_eq!(cfg.render.effective_max_fps(Some(144)), 144);
+        assert_eq!(cfg.render.effective_max_fps(None), 60);
+        assert_eq!(
+            cfg.render.redraw_interval_nanos_for_monitor(Some(144)),
+            Duration::from_secs_f64(1.0 / 144.0).as_nanos() as u64
+        );
+        // None (auto) sin monitor cae a 60 Hz.
+        assert_eq!(
+            cfg.render.redraw_interval_nanos_for_monitor(None),
+            Duration::from_secs_f64(1.0 / 60.0).as_nanos() as u64
+        );
+        // Some(0) = sin límite, ignora el monitor.
+        assert_eq!(uncapped.render.effective_max_fps(Some(144)), 0);
+        assert_eq!(
+            uncapped.render.redraw_interval_nanos_for_monitor(Some(144)),
+            0
+        );
     }
 
     #[test]
