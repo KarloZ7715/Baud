@@ -103,6 +103,88 @@ impl Color {
     }
 }
 
+/// Representación compacta de `Color` en 32 bits, para uso dentro de `Cell`.
+///
+/// Bits 24-31: etiqueta (0 = Default, 1 = Indexed, 2 = Rgb, 3 = nombrado ANSI/bright).
+/// Bits 0-23: payload (índice de 0-255, o los tres bytes RGB, o el índice del color nombrado).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PackedColor(u32);
+
+impl PackedColor {
+    const TAG_DEFAULT: u32 = 0;
+    const TAG_INDEXED: u32 = 1;
+    const TAG_RGB: u32 = 2;
+    const TAG_NAMED: u32 = 3;
+
+    const fn pack(tag: u32, payload: u32) -> u32 {
+        (tag << 24) | (payload & 0x00ff_ffff)
+    }
+
+    /// Índices de los 16 colores nombrados (8 ANSI + 8 bright), en el mismo
+    /// orden que las variantes de `Color`.
+    const NAMED: [Color; 16] = [
+        Color::Black,
+        Color::Red,
+        Color::Green,
+        Color::Yellow,
+        Color::Blue,
+        Color::Magenta,
+        Color::Cyan,
+        Color::White,
+        Color::BrightBlack,
+        Color::BrightRed,
+        Color::BrightGreen,
+        Color::BrightYellow,
+        Color::BrightBlue,
+        Color::BrightMagenta,
+        Color::BrightCyan,
+        Color::BrightWhite,
+    ];
+
+    fn named_index(color: Color) -> Option<u32> {
+        Self::NAMED
+            .iter()
+            .position(|c| *c == color)
+            .map(|i| i as u32)
+    }
+}
+
+impl From<Color> for PackedColor {
+    fn from(color: Color) -> Self {
+        let raw = match color {
+            Color::Default => Self::pack(Self::TAG_DEFAULT, 0),
+            Color::Indexed(n) => Self::pack(Self::TAG_INDEXED, n as u32),
+            Color::Rgb(r, g, b) => Self::pack(
+                Self::TAG_RGB,
+                ((r as u32) << 16) | ((g as u32) << 8) | b as u32,
+            ),
+            named => {
+                let idx = Self::named_index(named).expect("Color variante nombrada sin índice");
+                Self::pack(Self::TAG_NAMED, idx)
+            }
+        };
+        PackedColor(raw)
+    }
+}
+
+impl From<PackedColor> for Color {
+    fn from(packed: PackedColor) -> Self {
+        let tag = packed.0 >> 24;
+        let payload = packed.0 & 0x00ff_ffff;
+        match tag {
+            PackedColor::TAG_INDEXED => Color::Indexed(payload as u8),
+            PackedColor::TAG_RGB => {
+                let r = ((payload >> 16) & 0xff) as u8;
+                let g = ((payload >> 8) & 0xff) as u8;
+                let b = (payload & 0xff) as u8;
+                Color::Rgb(r, g, b)
+            }
+            PackedColor::TAG_NAMED => PackedColor::NAMED[payload as usize],
+            _ => Color::Default,
+        }
+    }
+}
+
 /// Estilo de subrayado SGR (4:0..4:5).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum UnderlineStyle {
@@ -2578,6 +2660,61 @@ mod tests {
     fn feed(term: &mut Term, data: &[u8]) {
         let mut parser = vte::Parser::new();
         parser.advance(term, data);
+    }
+
+    #[test]
+    fn packed_color_roundtrip_nombrados() {
+        let nombrados = [
+            Color::Default,
+            Color::Black,
+            Color::Red,
+            Color::Green,
+            Color::Yellow,
+            Color::Blue,
+            Color::Magenta,
+            Color::Cyan,
+            Color::White,
+            Color::BrightBlack,
+            Color::BrightRed,
+            Color::BrightGreen,
+            Color::BrightYellow,
+            Color::BrightBlue,
+            Color::BrightMagenta,
+            Color::BrightCyan,
+            Color::BrightWhite,
+        ];
+        for color in nombrados {
+            let packed: PackedColor = color.into();
+            assert_eq!(Color::from(packed), color);
+        }
+    }
+
+    #[test]
+    fn packed_color_roundtrip_indexado() {
+        for n in 0..=255u8 {
+            let color = Color::Indexed(n);
+            let packed: PackedColor = color.into();
+            assert_eq!(Color::from(packed), color);
+        }
+    }
+
+    #[test]
+    fn packed_color_roundtrip_rgb() {
+        for r in (0..=255u8).step_by(17) {
+            for g in (0..=255u8).step_by(17) {
+                for b in (0..=255u8).step_by(17) {
+                    let color = Color::Rgb(r, g, b);
+                    let packed: PackedColor = color.into();
+                    assert_eq!(Color::from(packed), color);
+                }
+            }
+        }
+        // Esquinas exactas para no depender solo del muestreo por paso.
+        for (r, g, b) in [(0, 0, 0), (255, 255, 255), (1, 2, 3), (254, 1, 128)] {
+            let color = Color::Rgb(r, g, b);
+            let packed: PackedColor = color.into();
+            assert_eq!(Color::from(packed), color);
+        }
     }
 
     #[test]
