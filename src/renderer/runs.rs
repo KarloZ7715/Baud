@@ -172,7 +172,7 @@ pub struct LigRun {
 
 /// True si la celda puede participar en una secuencia ligable.
 pub fn is_ligable_cell(cell: &Cell) -> bool {
-    if cell.width != 1 || cell.ch == ' ' || cell.ch == '\0' || is_box_glyph(cell.ch) {
+    if cell.width() != 1 || cell.ch == ' ' || cell.ch == '\0' || is_box_glyph(cell.ch) {
         return false;
     }
     // Iconos Powerline/Nerd Font (PUA): siempre per-celda.
@@ -181,7 +181,7 @@ pub fn is_ligable_cell(cell: &Cell) -> bool {
 }
 
 fn same_style(a: &Cell, b: &Cell) -> bool {
-    a.attrs == b.attrs && a.hyperlink == b.hyperlink
+    a.attrs == b.attrs && a.hyperlink() == b.hyperlink()
 }
 
 fn pattern_matches(
@@ -258,7 +258,7 @@ mod tests {
         for (i, ch) in "a=>b".chars().enumerate() {
             row[i].ch = ch;
         }
-        row[3].attrs.fg = crate::ansi::Color::Red;
+        row[3].attrs.set_fg(crate::ansi::Color::Red);
         let runs = group_ligature_runs(&row, 4, |_| false);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].start_col, 1);
@@ -288,10 +288,7 @@ mod tests {
 
     #[test]
     fn pua_no_es_ligable() {
-        let cell = Cell {
-            ch: '\u{E0B0}',
-            ..Default::default()
-        };
+        let cell = Cell::with_ch('\u{E0B0}');
         assert!(!is_ligable_cell(&cell));
     }
 

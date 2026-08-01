@@ -116,7 +116,7 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[31mR\x1b[0m");
         let cell = &term.active_grid().rows[0][0];
-        assert_eq!(cell.attrs.fg, Color::Red);
+        assert_eq!(cell.attrs.fg(), Color::Red);
         let (r, _, _) = palette.rgb(Color::Red, false);
         assert!(r > 0);
     }
@@ -184,11 +184,11 @@ mod tests {
 
         for row in &term.active_grid().rows {
             for cell in row {
-                if cell.ch == ' ' || cell.attrs.fg == crate::ansi::Color::Default {
+                if cell.ch == ' ' || cell.attrs.fg() == crate::ansi::Color::Default {
                     continue;
                 }
-                let fg = palette.rgb(cell.attrs.fg, cell.attrs.bold);
-                let bg = palette.bg_rgb(cell.attrs.bg);
+                let fg = palette.rgb(cell.attrs.fg(), cell.attrs.bold());
+                let bg = palette.bg_rgb(cell.attrs.bg());
                 if fg == bg {
                     continue;
                 }

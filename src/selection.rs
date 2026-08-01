@@ -244,13 +244,7 @@ mod tests {
     fn test_expand_to_word() {
         use crate::grid::Cell;
 
-        let cells: Vec<Cell> = "hello world foo"
-            .chars()
-            .map(|c| Cell {
-                ch: c,
-                ..Default::default()
-            })
-            .collect();
+        let cells: Vec<Cell> = "hello world foo".chars().map(Cell::with_ch).collect();
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
 
         // Click en 'e' de "hello"
@@ -278,13 +272,7 @@ mod tests {
     fn test_expand_to_word_underscore() {
         use crate::grid::Cell;
 
-        let cells: Vec<Cell> = "my_var_name"
-            .chars()
-            .map(|c| Cell {
-                ch: c,
-                ..Default::default()
-            })
-            .collect();
+        let cells: Vec<Cell> = "my_var_name".chars().map(Cell::with_ch).collect();
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
 
         sel.expand_to_word(&cells, 3); // click on '_' after 'my_'
@@ -459,13 +447,7 @@ mod tests {
     /// Verifica que no haya off-by-one.
     #[test]
     fn test_expand_to_word_on_single_char() {
-        let cells: Vec<Cell> = "X"
-            .chars()
-            .map(|c| Cell {
-                ch: c,
-                ..Default::default()
-            })
-            .collect();
+        let cells: Vec<Cell> = "X".chars().map(Cell::with_ch).collect();
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
         sel.expand_to_word(&cells, 0);
         // Un solo carácter: expande a (0,0)-(0,0)
@@ -477,13 +459,7 @@ mod tests {
     /// Debe expandir hacia atrás correctamente.
     #[test]
     fn test_expand_to_word_on_boundary_last_char() {
-        let cells: Vec<Cell> = "hello world"
-            .chars()
-            .map(|c| Cell {
-                ch: c,
-                ..Default::default()
-            })
-            .collect();
+        let cells: Vec<Cell> = "hello world".chars().map(Cell::with_ch).collect();
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 10 });
         sel.expand_to_word(&cells, 10);
         // 'd' en col 10 (última) debe expandir a "world"
@@ -495,13 +471,7 @@ mod tests {
     /// start_col = 0, el while lo detecta y no hace underflow.
     #[test]
     fn test_expand_to_word_on_boundary_first_char() {
-        let cells: Vec<Cell> = "hello world"
-            .chars()
-            .map(|c| Cell {
-                ch: c,
-                ..Default::default()
-            })
-            .collect();
+        let cells: Vec<Cell> = "hello world".chars().map(Cell::with_ch).collect();
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
         sel.expand_to_word(&cells, 0);
         // 'h' en col 0 (primera)
@@ -526,13 +496,7 @@ mod tests {
     /// Solo espacios y puntuación. No debe expandir.
     #[test]
     fn test_expand_to_word_non_word_chars_only() {
-        let cells: Vec<Cell> = "...   !!!   ..."
-            .chars()
-            .map(|c| Cell {
-                ch: c,
-                ..Default::default()
-            })
-            .collect();
+        let cells: Vec<Cell> = "...   !!!   ...".chars().map(Cell::with_ch).collect();
         // Punto inicial en col 0 (.) -> no es word char -> no expande
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
         sel.expand_to_word(&cells, 0);
@@ -550,13 +514,7 @@ mod tests {
     /// No debe panic. Debe no-op.
     #[test]
     fn test_expand_to_word_col_out_of_bounds() {
-        let cells: Vec<Cell> = "hello"
-            .chars()
-            .map(|c| Cell {
-                ch: c,
-                ..Default::default()
-            })
-            .collect();
+        let cells: Vec<Cell> = "hello".chars().map(Cell::with_ch).collect();
         let mut sel = Selection::new(SelectionPoint { row: 0, col: 0 });
         // col=usize::MAX > len
         sel.expand_to_word(&cells, usize::MAX);

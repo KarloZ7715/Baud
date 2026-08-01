@@ -2626,7 +2626,7 @@ mod tests {
         feed(&mut term, b"\x1b[31mR\x1b[0m");
         let cell = &term.active_grid().rows[0][0];
         assert_eq!(cell.ch, 'R', "caracter en (0,0)");
-        assert_eq!(cell.attrs.fg, Color::Red, "fg de celda (0,0)");
+        assert_eq!(cell.attrs.fg(), Color::Red, "fg de celda (0,0)");
     }
 
     #[test]
@@ -2635,8 +2635,8 @@ mod tests {
         feed(&mut term, b"\x1b[1;31mB");
         let cell = &term.active_grid().rows[0][0];
         assert_eq!(cell.ch, 'B', "caracter en (0,0)");
-        assert!(cell.attrs.bold, "bold activo");
-        assert_eq!(cell.attrs.fg, Color::Red, "fg = Red");
+        assert!(cell.attrs.bold(), "bold activo");
+        assert_eq!(cell.attrs.fg(), Color::Red, "fg = Red");
     }
 
     // =====================================================================
@@ -2905,14 +2905,14 @@ mod tests {
         );
     }
 
-    /// Verifica que el parser ANSI propaga bg al Cell.attrs.bg (SGR 41-47).
+    /// Verifica que el parser ANSI propaga bg al Cell.attrs.bg() (SGR 41-47).
     #[test]
     fn test_sgr_bg_propagates_to_cell_attrs() {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[41mR\x1b[0m");
         let cell = &term.active_grid().rows[0][0];
         assert_eq!(cell.ch, 'R');
-        assert_eq!(cell.attrs.bg, Color::Red, "SGR 41 debe setear bg=Red");
+        assert_eq!(cell.attrs.bg(), Color::Red, "SGR 41 debe setear bg=Red");
     }
 
     /// Verifica que celdas con diferente bg producen spans separados.
@@ -2924,10 +2924,11 @@ mod tests {
         feed(&mut term, b"\x1b[41mA\x1b[44mB");
         let cell_a = &term.active_grid().rows[0][0];
         let cell_b = &term.active_grid().rows[0][1];
-        assert_eq!(cell_a.attrs.bg, Color::Red, "A debe tener bg=Red");
-        assert_eq!(cell_b.attrs.bg, Color::Blue, "B debe tener bg=Blue");
+        assert_eq!(cell_a.attrs.bg(), Color::Red, "A debe tener bg=Red");
+        assert_eq!(cell_b.attrs.bg(), Color::Blue, "B debe tener bg=Blue");
         assert_ne!(
-            cell_a.attrs.bg, cell_b.attrs.bg,
+            cell_a.attrs.bg(),
+            cell_b.attrs.bg(),
             "A y B deben tener bg diferente -> spans separados"
         );
     }
@@ -2939,11 +2940,11 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[31;44mX");
         let cell = &term.active_grid().rows[0][0];
-        assert_eq!(cell.attrs.fg, Color::Red);
-        assert_eq!(cell.attrs.bg, Color::Blue);
+        assert_eq!(cell.attrs.fg(), Color::Red);
+        assert_eq!(cell.attrs.bg(), Color::Blue);
 
-        let effective_fg_selected = cell.attrs.bg;
-        let effective_bg_selected = cell.attrs.fg;
+        let effective_fg_selected = cell.attrs.bg();
+        let effective_bg_selected = cell.attrs.fg();
         assert_eq!(effective_fg_selected, Color::Blue);
         assert_eq!(effective_bg_selected, Color::Red);
         assert_ne!(
@@ -2969,9 +2970,9 @@ mod tests {
         // Fila 1: bg=Default, bg=Green, bg=Default
         let mut row0 = vec![Cell::default(); 3];
         let mut row1 = vec![Cell::default(); 3];
-        row0[0].attrs.bg = Color::Red;
-        row0[2].attrs.bg = Color::Blue;
-        row1[1].attrs.bg = Color::Green;
+        row0[0].attrs.set_bg(Color::Red);
+        row0[2].attrs.set_bg(Color::Blue);
+        row1[1].attrs.set_bg(Color::Green);
 
         let row_sources: Vec<&[Cell]> = vec![&row0, &row1];
         let row_empty: Vec<bool> = vec![false, false];
@@ -2986,8 +2987,8 @@ mod tests {
             for col in 0..cols_count {
                 let default_cell = Cell::default();
                 let cell = source_row.get(col).unwrap_or(&default_cell);
-                if cell.attrs.bg != Color::Default {
-                    let bg_color = color_to_glyphon_bg(cell.attrs.bg, &theme);
+                if cell.attrs.bg() != Color::Default {
+                    let bg_color = color_to_glyphon_bg(cell.attrs.bg(), &theme);
                     bg_quads.push(glyphon::CustomGlyph {
                         id: 0,
                         left: col as f32 * cell_w,
@@ -3071,8 +3072,8 @@ mod tests {
                     snap_to_physical_pixel: true,
                     metadata: 0,
                 });
-            } else if cell.attrs.bg != Color::Default {
-                let bg_color = color_to_glyphon_bg(cell.attrs.bg, &theme);
+            } else if cell.attrs.bg() != Color::Default {
+                let bg_color = color_to_glyphon_bg(cell.attrs.bg(), &theme);
                 bg_quads.push(glyphon::CustomGlyph {
                     id: 0,
                     left: col as f32 * cell_w,
@@ -3117,8 +3118,8 @@ mod tests {
             for col in 0..cols_count {
                 let default_cell = Cell::default();
                 let cell = source_row.get(col).unwrap_or(&default_cell);
-                if cell.attrs.bg != Color::Default {
-                    let bg_color = color_to_glyphon_bg(cell.attrs.bg, &theme);
+                if cell.attrs.bg() != Color::Default {
+                    let bg_color = color_to_glyphon_bg(cell.attrs.bg(), &theme);
                     bg_quads.push(glyphon::CustomGlyph {
                         id: 0,
                         left: col as f32 * cell_w,

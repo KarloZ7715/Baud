@@ -1276,7 +1276,7 @@ impl Term {
         let grid = self.active_grid();
         for row in &grid.rows {
             for cell in row {
-                if cell.attrs.blink {
+                if cell.attrs.blink() {
                     return true;
                 }
             }
@@ -1487,14 +1487,14 @@ impl Term {
             return None;
         }
 
-        if let Some(idx) = row_cells[col].hyperlink {
+        if let Some(idx) = row_cells[col].hyperlink() {
             let url = self.hyperlinks.get(idx as usize)?.clone();
             let mut start = col;
-            while start > 0 && row_cells[start - 1].hyperlink == Some(idx) {
+            while start > 0 && row_cells[start - 1].hyperlink() == Some(idx) {
                 start -= 1;
             }
             let mut end = col;
-            while end + 1 < row_cells.len() && row_cells[end + 1].hyperlink == Some(idx) {
+            while end + 1 < row_cells.len() && row_cells[end + 1].hyperlink() == Some(idx) {
                 end += 1;
             }
             return Some((
@@ -1594,7 +1594,7 @@ impl Term {
             }
 
             for cell in row_cells[col_start..col_end].iter() {
-                if cell.ch != ' ' || cell.width > 0 {
+                if cell.ch != ' ' || cell.width() > 0 {
                     result.push(cell.ch);
                 }
             }
@@ -1858,7 +1858,7 @@ impl Term {
             .unwrap_or(0);
         let mut s = String::new();
         for cell in &cells[..end] {
-            if cell.width > 0 {
+            if cell.width() > 0 {
                 s.push(cell.ch);
             }
         }
@@ -2056,6 +2056,15 @@ impl Term {
         self.last_grapheme_cell = None;
     }
 
+    /// Empaqueta `self.attrs` (estado actual del parser) en `PackedAttrs`,
+    /// internando `underline_color` en `underline_colors` si hace falta.
+    pub fn packed_attrs(&mut self) -> PackedAttrs {
+        let underline_color = self.attrs.underline_color;
+        let mut packed = PackedAttrs::from(self.attrs);
+        packed.set_underline_color(self, underline_color);
+        packed
+    }
+
     /// Interna un color de subrayado (SGR 58) en `underline_colors`, con
     /// dedup. Devuelve `0` para `Color::Default`, o `idx + 1` en caso
     /// contrario.
@@ -2080,7 +2089,7 @@ impl Term {
         if extra.is_empty() {
             return;
         }
-        let existing = self.active_grid().get(row, col).extra_codepoints;
+        let existing = self.active_grid().get(row, col).extra_codepoints();
         let idx = match existing {
             Some(i) => {
                 self.grapheme_extras[i as usize] = extra;
@@ -2095,9 +2104,9 @@ impl Term {
                 }
             }
         };
-        let width = self.active_grid().get(row, col).width;
+        let width = self.active_grid().get(row, col).width();
         if let Some(cell) = self.active_grid_mut().cell(row, col) {
-            cell.extra_codepoints = Some(idx);
+            cell.set_extra_codepoints(Some(idx));
         }
         self.active_grid_mut().mark_cell_written(row, col, width);
     }
@@ -2110,7 +2119,7 @@ impl Term {
 
         let row = self.cursor.row;
         let col = self.cursor.col;
-        let attrs = self.attrs;
+        let attrs = self.packed_attrs();
         let link = self.current_link.map(|i| i as u32);
         let cols = self.cursor.cols_count;
 
@@ -2132,9 +2141,9 @@ impl Term {
                     if let Some(cell) = active.cell(row, col) {
                         cell.ch = c;
                         cell.attrs = attrs;
-                        cell.width = c_width as u8;
-                        cell.hyperlink = link;
-                        cell.extra_codepoints = None;
+                        cell.set_width(c_width as u8);
+                        cell.set_hyperlink(link);
+                        cell.set_extra_codepoints(None);
                     }
                     active.mark_cell_written(row, col, c_width as u8);
                     if c_width >= 2 {
@@ -2168,9 +2177,9 @@ impl Term {
                 if let Some(cell) = active.cell(row, col) {
                     cell.ch = c;
                     cell.attrs = attrs;
-                    cell.width = c_width as u8;
-                    cell.hyperlink = link;
-                    cell.extra_codepoints = None;
+                    cell.set_width(c_width as u8);
+                    cell.set_hyperlink(link);
+                    cell.set_extra_codepoints(None);
                 }
                 active.mark_cell_written(row, col, c_width as u8);
                 if c_width >= 2 {
@@ -3376,7 +3385,7 @@ mod tests {
         feed(&mut term, "e\u{0301}\u{0324}".as_bytes());
         let cell = term.active_grid().get(0, 0);
         assert_eq!(cell.ch, 'e');
-        let extra_idx = cell.extra_codepoints.expect("extras");
+        let extra_idx = cell.extra_codepoints().expect("extras");
         assert_eq!(term.grapheme_extras[extra_idx as usize], "\u{0301}\u{0324}");
         assert_eq!(term.cursor.col, 1);
     }
@@ -3734,9 +3743,9 @@ mod tests {
             &mut term,
             b"\x1b]8;;https://example.com\x07LINK\x1b]8;;\x07X",
         );
-        let idx = term.grid.rows[0][0].hyperlink.expect("celda con link");
+        let idx = term.grid.rows[0][0].hyperlink().expect("celda con link");
         assert_eq!(term.hyperlinks[idx as usize], "https://example.com");
-        assert!(term.grid.rows[0][4].hyperlink.is_none());
+        assert!(term.grid.rows[0][4].hyperlink().is_none());
     }
 
     #[test]
@@ -3914,27 +3923,27 @@ mod tests {
     fn test_sgr_blink() {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[5mX");
-        assert!(term.grid.rows[0][0].attrs.blink);
+        assert!(term.grid.rows[0][0].attrs.blink());
         feed(&mut term, b"\x1b[25mY");
-        assert!(!term.grid.rows[0][1].attrs.blink);
+        assert!(!term.grid.rows[0][1].attrs.blink());
     }
 
     #[test]
     fn test_sgr_invisible() {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[8mX");
-        assert!(term.grid.rows[0][0].attrs.invisible);
+        assert!(term.grid.rows[0][0].attrs.invisible());
         feed(&mut term, b"\x1b[28mY");
-        assert!(!term.grid.rows[0][1].attrs.invisible);
+        assert!(!term.grid.rows[0][1].attrs.invisible());
     }
 
     #[test]
     fn test_sgr_overline() {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[53mX");
-        assert!(term.grid.rows[0][0].attrs.overline);
+        assert!(term.grid.rows[0][0].attrs.overline());
         feed(&mut term, b"\x1b[55mY");
-        assert!(!term.grid.rows[0][1].attrs.overline);
+        assert!(!term.grid.rows[0][1].attrs.overline());
     }
 
     #[test]
@@ -3942,20 +3951,23 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[58;5;4mX");
         assert_eq!(
-            term.grid.rows[0][0].attrs.underline_color,
+            term.grid.rows[0][0].attrs.underline_color(&term),
             Color::Indexed(4)
         );
         feed(&mut term, b"\x1b[59mY");
-        assert_eq!(term.grid.rows[0][1].attrs.underline_color, Color::Default);
+        assert_eq!(
+            term.grid.rows[0][1].attrs.underline_color(&term),
+            Color::Default
+        );
     }
 
     #[test]
     fn test_sgr_strikethrough_y_reset() {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[9mX");
-        assert!(term.grid.rows[0][0].attrs.strikethrough);
+        assert!(term.grid.rows[0][0].attrs.strikethrough());
         feed(&mut term, b"\x1b[29mY");
-        assert!(!term.grid.rows[0][1].attrs.strikethrough);
+        assert!(!term.grid.rows[0][1].attrs.strikethrough());
     }
 
     #[test]
@@ -3963,7 +3975,7 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[4:3mX");
         assert_eq!(
-            term.grid.rows[0][0].attrs.underline_style,
+            term.grid.rows[0][0].attrs.underline_style(),
             UnderlineStyle::Curly
         );
     }
@@ -4006,7 +4018,7 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[31mR");
         assert_eq!(term.grid.rows[0][0].ch, 'R');
-        assert_eq!(term.grid.rows[0][0].attrs.fg, Color::Red);
+        assert_eq!(term.grid.rows[0][0].attrs.fg(), Color::Red);
     }
 
     #[test]
@@ -4020,14 +4032,14 @@ mod tests {
     fn test_sgr_bold() {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[1mX");
-        assert!(term.grid.rows[0][0].attrs.bold);
+        assert!(term.grid.rows[0][0].attrs.bold());
     }
 
     #[test]
     fn test_sgr_underline() {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[4mX");
-        assert!(term.grid.rows[0][0].attrs.underline);
+        assert!(term.grid.rows[0][0].attrs.underline());
     }
 
     #[test]
@@ -4035,8 +4047,8 @@ mod tests {
         let mut term = Term::new();
         // ponytail: 1;31 = bold + red
         feed(&mut term, b"\x1b[1;31mY");
-        assert!(term.grid.rows[0][0].attrs.bold);
-        assert_eq!(term.grid.rows[0][0].attrs.fg, Color::Red);
+        assert!(term.grid.rows[0][0].attrs.bold());
+        assert_eq!(term.grid.rows[0][0].attrs.fg(), Color::Red);
     }
 
     // -----------------------------------------------------------------------
@@ -4135,8 +4147,7 @@ mod tests {
         feed(&mut term, b"\x1b[2J");
         for row in &term.grid.rows {
             for cell in row {
-                assert_eq!(cell.ch, ' ');
-                assert_eq!(cell.attrs, Attrs::default());
+                assert!(cell.is_blank());
             }
         }
     }
@@ -4244,7 +4255,7 @@ mod tests {
         feed(&mut term, "e\u{0301}".as_bytes());
         let cell = term.active_grid().get(0, 0);
         assert_eq!(cell.ch, 'e');
-        let extra_idx = cell.extra_codepoints.expect("debe tener extra");
+        let extra_idx = cell.extra_codepoints().expect("debe tener extra");
         assert_eq!(term.grapheme_extras[extra_idx as usize], "\u{0301}");
         assert_eq!(term.cursor.col, 1);
     }
@@ -4255,13 +4266,13 @@ mod tests {
         let cluster = "\u{1F9D1}\u{200D}\u{1F33E}";
         feed(&mut term, cluster.as_bytes());
         let cell = term.active_grid().get(0, 0);
-        assert_eq!(cell.width, 2);
-        assert_eq!(term.active_grid().get(0, 1).width, 0);
+        assert_eq!(cell.width(), 2);
+        assert_eq!(term.active_grid().get(0, 1).width(), 0);
         assert_eq!(term.cursor.col, 2);
         // Ancho del primer codepoint coincide con el del cluster completo:
         // no hace falta medir UnicodeWidthStr del grafema entero.
         let full = unicode_width::UnicodeWidthStr::width(cluster);
-        assert_eq!(cell.width as usize, full);
+        assert_eq!(cell.width() as usize, full);
     }
 
     #[test]
@@ -4280,7 +4291,7 @@ mod tests {
         feed(&mut term, "\u{0301}".as_bytes());
         let cell = term.active_grid().get(0, 0);
         assert_eq!(cell.ch, 'e');
-        assert_eq!(cell.extra_codepoints, None);
+        assert_eq!(cell.extra_codepoints(), None);
     }
 
     #[test]
@@ -4291,10 +4302,10 @@ mod tests {
         feed(&mut term, cluster.as_bytes());
         let cell = term.active_grid().get(1, 0);
         assert_eq!(cell.ch, '\u{1F9D1}');
-        assert_eq!(cell.width, 2);
+        assert_eq!(cell.width(), 2);
         assert_eq!(term.active_grid().get(1, 1).ch, ' ');
-        assert_eq!(term.active_grid().get(1, 1).width, 0);
-        let extra_idx = cell.extra_codepoints.expect("extras ZWJ");
+        assert_eq!(term.active_grid().get(1, 1).width(), 0);
+        let extra_idx = cell.extra_codepoints().expect("extras ZWJ");
         assert_eq!(
             term.grapheme_extras[extra_idx as usize],
             "\u{200D}\u{1F33E}"
@@ -4308,13 +4319,13 @@ mod tests {
         let cluster = "\u{1F44B}\u{1F3FD}";
         feed(&mut term, cluster.as_bytes());
         let cell = term.active_grid().get(0, 0);
-        assert_eq!(cell.width, 2);
-        assert_eq!(term.active_grid().get(0, 1).width, 0);
+        assert_eq!(cell.width(), 2);
+        assert_eq!(term.active_grid().get(0, 1).width(), 0);
         assert_eq!(term.cursor.col, 2);
-        let extra_idx = cell.extra_codepoints.expect("skin tone");
+        let extra_idx = cell.extra_codepoints().expect("skin tone");
         assert_eq!(term.grapheme_extras[extra_idx as usize], "\u{1F3FD}");
         let full = unicode_width::UnicodeWidthStr::width(cluster);
-        assert_eq!(cell.width as usize, full);
+        assert_eq!(cell.width() as usize, full);
     }
 
     #[test]
@@ -4323,10 +4334,10 @@ mod tests {
         feed(&mut term, "中AB".as_bytes());
         let base = term.active_grid().get(0, 0);
         assert_eq!(base.ch, '中');
-        assert_eq!(base.width, 2);
+        assert_eq!(base.width(), 2);
         let cont = term.active_grid().get(0, 1);
         assert_eq!(cont.ch, ' ');
-        assert_eq!(cont.width, 0);
+        assert_eq!(cont.width(), 0);
         assert_eq!(term.active_grid().get(0, 2).ch, 'A');
         assert_eq!(term.active_grid().get(0, 3).ch, 'B');
         assert_eq!(term.cursor.col, 4);
@@ -4339,9 +4350,9 @@ mod tests {
         feed(&mut term, b"\r");
         feed(&mut term, "中".as_bytes());
         assert_eq!(term.active_grid().get(0, 0).ch, '中');
-        assert_eq!(term.active_grid().get(0, 0).width, 2);
+        assert_eq!(term.active_grid().get(0, 0).width(), 2);
         assert_eq!(term.active_grid().get(0, 1).ch, ' ');
-        assert_eq!(term.active_grid().get(0, 1).width, 0);
+        assert_eq!(term.active_grid().get(0, 1).width(), 0);
         assert_eq!(term.active_grid().get(0, 2).ch, 'X');
         assert_eq!(term.cursor.col, 2);
     }
@@ -4353,10 +4364,10 @@ mod tests {
         feed(&mut term, b"\r");
         feed(&mut term, b"A");
         assert_eq!(term.active_grid().get(0, 0).ch, 'A');
-        assert_eq!(term.active_grid().get(0, 0).width, 1);
+        assert_eq!(term.active_grid().get(0, 0).width(), 1);
         assert_eq!(term.active_grid().get(0, 1).ch, ' ');
         assert_eq!(
-            term.active_grid().get(0, 1).width,
+            term.active_grid().get(0, 1).width(),
             1,
             "la continuacion del glifo ancho previo debe volver a celda normal"
         );
@@ -4371,9 +4382,9 @@ mod tests {
         assert_eq!(term.active_grid().get(0, 0).ch, 'A');
         assert_eq!(term.active_grid().get(0, 1).ch, 'B');
         assert_eq!(term.active_grid().get(0, 2).ch, '中');
-        assert_eq!(term.active_grid().get(0, 2).width, 2);
+        assert_eq!(term.active_grid().get(0, 2).width(), 2);
         assert_eq!(term.active_grid().get(0, 3).ch, ' ');
-        assert_eq!(term.active_grid().get(0, 3).width, 0);
+        assert_eq!(term.active_grid().get(0, 3).width(), 0);
         assert_eq!(term.cursor.col, 3);
         assert!(term.pending_wrap);
     }
@@ -4386,8 +4397,8 @@ mod tests {
         feed(&mut term, "a\u{0301}".as_bytes());
         let c0 = term.active_grid().get(0, 0);
         let c2 = term.active_grid().get(0, 2);
-        let i0 = c0.extra_codepoints.expect("e acute");
-        let i2 = c2.extra_codepoints.expect("a acute");
+        let i0 = c0.extra_codepoints().expect("e acute");
+        let i2 = c2.extra_codepoints().expect("a acute");
         assert_eq!(i0, i2);
         assert_eq!(term.grapheme_extras.len(), 1);
     }
@@ -4405,9 +4416,9 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"\x1b[33mAB");
         assert_eq!(term.grid.rows[0][0].ch, 'A');
-        assert_eq!(term.grid.rows[0][0].attrs.fg, Color::Yellow);
+        assert_eq!(term.grid.rows[0][0].attrs.fg(), Color::Yellow);
         assert_eq!(term.grid.rows[0][1].ch, 'B');
-        assert_eq!(term.grid.rows[0][1].attrs.fg, Color::Yellow);
+        assert_eq!(term.grid.rows[0][1].attrs.fg(), Color::Yellow);
     }
 
     #[test]
@@ -4441,8 +4452,8 @@ mod tests {
 
         assert_eq!(term.grid.rows[0][0].ch, expected.grid.rows[0][0].ch);
         assert_eq!(
-            term.grid.rows[0][0].attrs.fg,
-            expected.grid.rows[0][0].attrs.fg
+            term.grid.rows[0][0].attrs.fg(),
+            expected.grid.rows[0][0].attrs.fg()
         );
         assert_eq!(term.cursor, expected.cursor);
     }
@@ -4920,12 +4931,12 @@ mod tests {
         // \\u{4e2d} = '?' (CJK, ancho 2)
         feed(&mut term, "\u{4e2d}".as_bytes());
         assert_eq!(term.grid.rows[0][0].ch, '\u{4e2d}');
-        assert_eq!(term.grid.rows[0][0].width, 2);
+        assert_eq!(term.grid.rows[0][0].width(), 2);
         // cursor avanzo 2 columnas
         assert_eq!(term.cursor.col, 2);
         // caracter latino tiene width 1
         feed(&mut term, b"A");
-        assert_eq!(term.grid.rows[0][2].width, 1);
+        assert_eq!(term.grid.rows[0][2].width(), 1);
         assert_eq!(term.cursor.col, 3);
     }
 
@@ -5418,13 +5429,7 @@ mod tests {
         let mut term = Term::new();
 
         // Poner datos en scrollback con menos columnas que el grid
-        let short_sb_row: Vec<Cell> = "SHORT"
-            .chars()
-            .map(|c| Cell {
-                ch: c,
-                ..Default::default()
-            })
-            .collect();
+        let short_sb_row: Vec<Cell> = "SHORT".chars().map(Cell::with_ch).collect();
         term.grid.scrollback.push_back(short_sb_row);
 
         let sb_len = term.scrollback_len();
@@ -5592,13 +5597,7 @@ mod tests {
         let mut term = Term::new();
 
         // Put data in scrollback directly
-        let sb_row: Vec<Cell> = "scrollback_line"
-            .chars()
-            .map(|c| Cell {
-                ch: c,
-                ..Default::default()
-            })
-            .collect();
+        let sb_row: Vec<Cell> = "scrollback_line".chars().map(Cell::with_ch).collect();
         term.grid.scrollback.push_back(sb_row);
 
         // Write data in the visible grid
@@ -5956,42 +5955,42 @@ mod tests {
     fn test_sgr_bright_foreground() {
         let mut term = Term::new();
         feed(&mut term, b"[91mX");
-        assert_eq!(term.grid.rows[0][0].attrs.fg, Color::BrightRed);
+        assert_eq!(term.grid.rows[0][0].attrs.fg(), Color::BrightRed);
     }
 
     #[test]
     fn test_sgr_bright_background() {
         let mut term = Term::new();
         feed(&mut term, b"[101mX");
-        assert_eq!(term.grid.rows[0][0].attrs.bg, Color::BrightRed);
+        assert_eq!(term.grid.rows[0][0].attrs.bg(), Color::BrightRed);
     }
 
     #[test]
     fn test_sgr_256_foreground() {
         let mut term = Term::new();
         feed(&mut term, b"[38;5;100mX");
-        assert_eq!(term.grid.rows[0][0].attrs.fg, Color::Indexed(100));
+        assert_eq!(term.grid.rows[0][0].attrs.fg(), Color::Indexed(100));
     }
 
     #[test]
     fn test_sgr_true_color_foreground() {
         let mut term = Term::new();
         feed(&mut term, b"[38;2;100;150;200mX");
-        assert_eq!(term.grid.rows[0][0].attrs.fg, Color::Rgb(100, 150, 200));
+        assert_eq!(term.grid.rows[0][0].attrs.fg(), Color::Rgb(100, 150, 200));
     }
 
     #[test]
     fn test_sgr_256_background() {
         let mut term = Term::new();
         feed(&mut term, b"[48;5;200mX");
-        assert_eq!(term.grid.rows[0][0].attrs.bg, Color::Indexed(200));
+        assert_eq!(term.grid.rows[0][0].attrs.bg(), Color::Indexed(200));
     }
 
     #[test]
     fn test_sgr_true_color_background() {
         let mut term = Term::new();
         feed(&mut term, b"[48;2;10;20;30mX");
-        assert_eq!(term.grid.rows[0][0].attrs.bg, Color::Rgb(10, 20, 30));
+        assert_eq!(term.grid.rows[0][0].attrs.bg(), Color::Rgb(10, 20, 30));
     }
 
     #[test]
@@ -6058,13 +6057,13 @@ mod tests {
             let mut term = Term::new();
             feed(&mut term, b"[31mR");
             assert_eq!(term.grid.rows[0][0].ch, 'R');
-            assert_eq!(term.grid.rows[0][0].attrs.fg, Color::Red);
+            assert_eq!(term.grid.rows[0][0].attrs.fg(), Color::Red);
         }
         // 40-47 background
         {
             let mut term = Term::new();
             feed(&mut term, b"[41mR");
-            assert_eq!(term.grid.rows[0][0].attrs.bg, Color::Red);
+            assert_eq!(term.grid.rows[0][0].attrs.bg(), Color::Red);
         }
         // Reset
         {
@@ -6076,8 +6075,8 @@ mod tests {
         {
             let mut term = Term::new();
             feed(&mut term, b"[1;31mY");
-            assert!(term.grid.rows[0][0].attrs.bold);
-            assert_eq!(term.grid.rows[0][0].attrs.fg, Color::Red);
+            assert!(term.grid.rows[0][0].attrs.bold());
+            assert_eq!(term.grid.rows[0][0].attrs.fg(), Color::Red);
         }
     }
 

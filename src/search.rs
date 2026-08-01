@@ -97,7 +97,7 @@ pub fn char_range_to_cols(
     let mut end_col = 0usize;
     let mut found_start = false;
     for (col, cell) in cells.iter().enumerate() {
-        if cell.width == 0 {
+        if cell.width() == 0 {
             continue;
         }
         if !found_start && ci == char_start {
@@ -105,7 +105,7 @@ pub fn char_range_to_cols(
             found_start = true;
         }
         if found_start && ci == char_start.saturating_add(char_len).saturating_sub(1) {
-            end_col = col + usize::from(cell.width);
+            end_col = col + usize::from(cell.width());
             return (start_col, end_col);
         }
         ci += 1;
@@ -230,10 +230,10 @@ mod tests {
     fn char_range_to_cols_wide_char() {
         let mut cells = vec![Cell::default(); 5];
         cells[1].ch = '中';
-        cells[1].width = 2;
-        cells[2].width = 0;
+        cells[1].set_width(2);
+        cells[2].set_width(0);
         cells[3].ch = 'x';
-        cells[3].width = 1;
+        cells[3].set_width(1);
         assert_eq!(char_range_to_cols(&cells, 0, 1), (0, 1));
         assert_eq!(char_range_to_cols(&cells, 1, 1), (1, 3));
         assert_eq!(char_range_to_cols(&cells, 2, 1), (3, 4));

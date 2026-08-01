@@ -312,12 +312,7 @@ mod tests {
     use super::*;
 
     fn cells(s: &str) -> Vec<Cell> {
-        s.chars()
-            .map(|c| Cell {
-                ch: c,
-                ..Default::default()
-            })
-            .collect()
+        s.chars().map(Cell::with_ch).collect()
     }
 
     #[test]

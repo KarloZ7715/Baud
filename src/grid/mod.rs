@@ -1,4 +1,4 @@
-use crate::ansi::Attrs;
+use crate::ansi::{Color, PackedAttrs, Term};
 use std::collections::VecDeque;
 
 mod damage;
@@ -16,21 +16,100 @@ pub const DEFAULT_MAX_SCROLLBACK: usize = 10_000;
 /// Alias histórico para tests y benches que fijaban el límite anterior.
 pub const MAX_SCROLLBACK: usize = DEFAULT_MAX_SCROLLBACK;
 
+/// Centinela de "sin índice" para `Cell::hyperlink`/`Cell::extra_codepoints`.
+/// `0` no sirve como centinela: sería un índice válido (el primer elemento).
+const NO_INDEX: u32 = u32::MAX;
+
 /// Celda individual del terminal: un carácter con sus atributos y ancho.
+///
+/// 24 bytes: `ch` (4) + `attrs` (12: fg/bg empaquetados + flags + índice de
+/// underline_color) + `hyperlink` (4) + `extra_codepoints` (4). Los campos
+/// crudos son privados; los accesores devuelven los mismos tipos que antes
+/// del empaquetado (`Option<u32>`, `Color`, `u8`) para minimizar el impacto
+/// en el resto del código.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Cell {
     /// Caracter almacenado.
     pub ch: char,
-    /// Atributos de estilo de esta celda.
-    pub attrs: Attrs,
-    /// Ancho del carácter (en columnas). 1 para latino, 2 para CJK, etc.
-    pub width: u8,
-    /// Indice en `Term::hyperlinks` (OSC 8); `None` si la celda no tiene link.
-    pub hyperlink: Option<u32>,
+    /// Atributos de estilo de esta celda, empaquetados.
+    pub attrs: PackedAttrs,
+    /// Indice en `Term::hyperlinks` (OSC 8); `NO_INDEX` si no tiene link.
+    hyperlink: u32,
     /// Indice en `Term::grapheme_extras`: codepoints del grafema mas alla
-    /// de `ch` (siempre el primer codepoint del cluster). `None` si la celda
-    /// tiene un solo codepoint.
-    pub extra_codepoints: Option<u32>,
+    /// de `ch` (siempre el primer codepoint del cluster). `NO_INDEX` si la
+    /// celda tiene un solo codepoint.
+    extra_codepoints: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<Cell>() == 24);
+
+impl Cell {
+    /// Ancho del carácter en columnas (0, 1 o 2). 0 marca la continuación
+    /// de un carácter ancho o un marcador de línea sin glifo propio.
+    pub fn width(&self) -> u8 {
+        self.attrs.width()
+    }
+    pub fn set_width(&mut self, width: u8) {
+        self.attrs.set_width(width);
+    }
+
+    pub fn hyperlink(&self) -> Option<u32> {
+        (self.hyperlink != NO_INDEX).then_some(self.hyperlink)
+    }
+    pub fn set_hyperlink(&mut self, hyperlink: Option<u32>) {
+        self.hyperlink = hyperlink.unwrap_or(NO_INDEX);
+    }
+
+    pub fn extra_codepoints(&self) -> Option<u32> {
+        (self.extra_codepoints != NO_INDEX).then_some(self.extra_codepoints)
+    }
+    pub fn set_extra_codepoints(&mut self, extra_codepoints: Option<u32>) {
+        self.extra_codepoints = extra_codepoints.unwrap_or(NO_INDEX);
+    }
+
+    /// Resuelve el color de subrayado (SGR 58) contra la tabla del `term`
+    /// del que salió esta celda.
+    pub fn underline_color(&self, term: &Term) -> Color {
+        self.attrs.underline_color(term)
+    }
+    pub fn set_underline_color(&mut self, term: &mut Term, color: Color) {
+        self.attrs.set_underline_color(term, color);
+    }
+
+    /// Convierte los atributos empaquetados a `Attrs`, resolviendo
+    /// `underline_color` contra `term`.
+    pub fn to_attrs(&self, term: &Term) -> crate::ansi::Attrs {
+        self.attrs.to_attrs(term)
+    }
+
+    /// Constructor de conveniencia: celda en blanco con un carácter dado.
+    pub fn with_ch(ch: char) -> Self {
+        Self {
+            ch,
+            ..Self::default()
+        }
+    }
+    /// Constructor de conveniencia: celda en blanco con un ancho dado
+    /// (0 para marcadores de continuación / newline).
+    pub fn with_width(width: u8) -> Self {
+        let mut cell = Self::default();
+        cell.set_width(width);
+        cell
+    }
+    /// Combina `with_ch` seguido de `set_width`, para marcadores como el
+    /// newline synthetic de reflow.
+    pub fn with_ch_and_width(ch: char, width: u8) -> Self {
+        let mut cell = Self::with_ch(ch);
+        cell.set_width(width);
+        cell
+    }
+
+    /// Verdadero si la celda es indistinguible de `Cell::default()`.
+    /// Con el layout empaquetado esto ya es una comparación de unos pocos
+    /// enteros (antes recorría tres enums y nueve booleanos por celda).
+    pub fn is_blank(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// Grid virtual con tamaño dinámico que representa el buffer del terminal.
@@ -72,12 +151,13 @@ const BLANK_ROW_POOL_CAP: usize = 4;
 
 impl Default for Cell {
     fn default() -> Self {
+        let mut attrs = PackedAttrs::default();
+        attrs.set_width(1);
         Self {
             ch: ' ',
-            attrs: Attrs::default(),
-            width: 1,
-            hyperlink: None,
-            extra_codepoints: None,
+            attrs,
+            hyperlink: NO_INDEX,
+            extra_codepoints: NO_INDEX,
         }
     }
 }
@@ -132,7 +212,7 @@ impl Grid {
     }
 
     /// Escribe un carácter y atributos en la celda (row, col).
-    pub fn set(&mut self, row: usize, col: usize, ch: char, attrs: Attrs) {
+    pub fn set(&mut self, row: usize, col: usize, ch: char, attrs: PackedAttrs) {
         if let Some(cell) = self.rows.get_mut(row).and_then(|r| r.get_mut(col)) {
             cell.ch = ch;
             cell.attrs = attrs;
@@ -141,12 +221,18 @@ impl Grid {
     }
 
     /// Marca columnas de continuacion de un glifo ancho (width >= 2).
-    pub fn mark_wide_continuation(&mut self, row: usize, col: usize, width: u8, attrs: Attrs) {
+    pub fn mark_wide_continuation(
+        &mut self,
+        row: usize,
+        col: usize,
+        width: u8,
+        attrs: PackedAttrs,
+    ) {
         let w = width.max(2) as usize;
         for c in (col + 1)..col.saturating_add(w).min(self.cols_count) {
             if let Some(cell) = self.rows.get_mut(row).and_then(|r| r.get_mut(c)) {
                 cell.ch = ' ';
-                cell.width = 0;
+                cell.set_width(0);
                 cell.attrs = attrs;
             }
             self.damage.mark_cell(row, c);
@@ -160,7 +246,7 @@ impl Grid {
             .rows
             .get(row)
             .and_then(|r| r.get(col))
-            .map(|c| c.width)
+            .map(|c| c.width())
             .unwrap_or(0);
         if old_w < 2 {
             return;
@@ -469,10 +555,7 @@ impl Grid {
     }
 
     fn push_wide_continuation(row: &mut Vec<Cell>) {
-        row.push(Cell {
-            width: 0,
-            ..Cell::default()
-        });
+        row.push(Cell::with_width(0));
     }
 
     /// Cuenta caracteres lógicos escritos antes de la posición del cursor.
@@ -495,14 +578,14 @@ impl Grid {
                     break;
                 }
                 let cell = row[col];
-                if cell.width == 0 {
+                if cell.width() == 0 {
                     col += 1;
                     continue;
                 }
-                if cell != Cell::default() {
+                if !cell.is_blank() {
                     offset += 1;
                 }
-                col += (cell.width as usize).max(1);
+                col += (cell.width() as usize).max(1);
             }
         }
         offset
@@ -518,12 +601,12 @@ impl Grid {
         let mut col = 0usize;
 
         for cell in flat {
-            if cell.ch == '\n' && cell.width == 0 {
+            if cell.ch == '\n' && cell.width() == 0 {
                 row_idx += 1;
                 col = 0;
                 continue;
             }
-            let w = cell.width as usize;
+            let w = cell.width() as usize;
             if w == 0 {
                 continue;
             }
@@ -576,7 +659,7 @@ impl Grid {
         // Encontrar la ultima fila con contenido no-default.
         let last_content_row = old_rows
             .iter()
-            .rposition(|row| row.iter().any(|cell| *cell != Cell::default()))
+            .rposition(|row| row.iter().any(|cell| !cell.is_blank()))
             .unwrap_or(0);
 
         // ---- Pasos 1-3: aplanar todas las filas en una secuencia logica ----
@@ -590,7 +673,7 @@ impl Grid {
 
             let content_len = old_row
                 .iter()
-                .rposition(|cell| *cell != Cell::default())
+                .rposition(|cell| !cell.is_blank())
                 .map(|pos| pos + 1)
                 .unwrap_or(0);
 
@@ -598,9 +681,9 @@ impl Grid {
             let mut i = 0;
             while i < content_len {
                 let cell = old_row[i];
-                if cell != Cell::default() {
+                if !cell.is_blank() {
                     flat.push(cell);
-                    i += cell.width as usize;
+                    i += cell.width() as usize;
                 } else {
                     flat.push(cell);
                     i += 1;
@@ -615,11 +698,7 @@ impl Grid {
                 let next_is_continuation =
                     old_row_continuations.get(idx + 1).copied().unwrap_or(false);
                 if !next_is_continuation {
-                    flat.push(Cell {
-                        ch: '\n',
-                        width: 0,
-                        ..Cell::default()
-                    });
+                    flat.push(Cell::with_ch_and_width('\n', 0));
                 }
             }
         }
@@ -651,7 +730,7 @@ impl Grid {
 
         for cell in &flat {
             // Newline marker: flush the current row (preserving empty rows).
-            if cell.ch == '\n' && cell.width == 0 {
+            if cell.ch == '\n' && cell.width() == 0 {
                 if current_row.is_empty() {
                     new_rows.push(vec![Cell::default(); new_cols]);
                 } else {
@@ -667,7 +746,7 @@ impl Grid {
                 continue;
             }
 
-            let w = cell.width as usize;
+            let w = cell.width() as usize;
 
             // Skip zero-width placeholders (shouldn't appear, but be safe).
             if w == 0 {
@@ -763,7 +842,13 @@ mod tests {
     #[test]
     fn cell_default_no_tiene_extra_codepoints() {
         let cell = Cell::default();
-        assert_eq!(cell.extra_codepoints, None);
+        assert_eq!(cell.extra_codepoints(), None);
+    }
+
+    #[test]
+    fn cell_default_no_tiene_hyperlink() {
+        let cell = Cell::default();
+        assert_eq!(cell.hyperlink(), None);
     }
     #[test]
     fn push_scrollback_incrementa_trimmed_al_recortar() {
@@ -1086,11 +1171,11 @@ mod tests {
         // '中' (U+4E2D) tiene width=2, colocar uno en col 0 y otro en col 4
         // Fila 0: [中(w=2), _, A(w=1), B(w=1), 中(w=2), _, C(w=1), ...]
         grid.rows[0][0].ch = '\u{4e2d}';
-        grid.rows[0][0].width = 2;
+        grid.rows[0][0].set_width(2);
         grid.rows[0][2].ch = 'A';
         grid.rows[0][3].ch = 'B';
         grid.rows[0][4].ch = '\u{4e2d}';
-        grid.rows[0][4].width = 2;
+        grid.rows[0][4].set_width(2);
         grid.rows[0][6].ch = 'C';
 
         // Reflow a 4 columnas (justo, fuerza division de CJK)
@@ -1103,14 +1188,14 @@ mod tests {
 
         // Row 0: 中 at col 0, default at col 1, A at col 2, B at col 3
         assert_eq!(grid.rows[0][0].ch, '\u{4e2d}');
-        assert_eq!(grid.rows[0][0].width, 2);
+        assert_eq!(grid.rows[0][0].width(), 2);
         assert_eq!(grid.rows[0][1].ch, ' ');
         assert_eq!(grid.rows[0][2].ch, 'A');
         assert_eq!(grid.rows[0][3].ch, 'B');
 
         // Row 1: 中 at col 0, default at col 1, C at col 2
         assert_eq!(grid.rows[1][0].ch, '\u{4e2d}');
-        assert_eq!(grid.rows[1][0].width, 2);
+        assert_eq!(grid.rows[1][0].width(), 2);
         assert_eq!(grid.rows[1][1].ch, ' ');
         assert_eq!(grid.rows[1][2].ch, 'C');
         assert_eq!(grid.rows[1][3].ch, ' ');

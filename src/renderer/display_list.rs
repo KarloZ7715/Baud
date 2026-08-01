@@ -323,9 +323,9 @@ fn resolve_bg_glyphon(bg: Color, palette: &Palette<'_>, bg_alpha: u8) -> glyphon
 }
 
 fn effective_underline_style(cell: &Cell) -> UnderlineStyle {
-    if cell.attrs.underline_style != UnderlineStyle::None {
-        cell.attrs.underline_style
-    } else if cell.hyperlink.is_some() || cell.attrs.underline {
+    if cell.attrs.underline_style() != UnderlineStyle::None {
+        cell.attrs.underline_style()
+    } else if cell.hyperlink().is_some() || cell.attrs.underline() {
         UnderlineStyle::Single
     } else {
         UnderlineStyle::None
@@ -341,6 +341,7 @@ fn underline_color_for_cell(
     bg: Color,
     bold: bool,
     cell: &Cell,
+    term: &Term,
     palette: &Palette<'_>,
     dim_alpha: bool,
     is_sel: bool,
@@ -348,16 +349,17 @@ fn underline_color_for_cell(
     is_link_hover: bool,
     cache: &mut ContrastCache,
 ) -> glyphon::Color {
-    let color = if cell.attrs.underline_color == Color::Default {
+    let underline_color = cell.underline_color(term);
+    let color = if underline_color == Color::Default {
         fg
     } else {
-        cell.attrs.underline_color
+        underline_color
     };
     let (contrast_bg, skip_contrast) =
         cell_contrast_context(color, bg, is_sel, cursor_block, palette, cell.ch);
     let mut resolved = resolve_fg_glyphon(
         color,
-        cell.attrs.dim,
+        cell.attrs.dim(),
         bold,
         palette,
         dim_alpha,
@@ -365,7 +367,7 @@ fn underline_color_for_cell(
         skip_contrast,
         cache,
     );
-    if cell.hyperlink.is_some() && !is_link_hover && cell.attrs.underline_color == Color::Default {
+    if cell.hyperlink().is_some() && !is_link_hover && underline_color == Color::Default {
         resolved = attenuate_glyphon(resolved);
     }
     resolved
@@ -571,7 +573,7 @@ impl DisplayListBuilder {
             && term.copy_mode.is_none()
             && term.cursor_visible
             && term.cursor.row == row;
-        let row_empty = source_row.is_empty() || source_row.iter().all(|c| *c == Cell::default());
+        let row_empty = source_row.is_empty() || source_row.iter().all(Cell::is_blank);
         if row_empty && !cursor_on_row {
             return;
         }
@@ -629,14 +631,14 @@ impl DisplayListBuilder {
             // lo desactivo, el cursor siempre es visible (independiente de
             // SGR 5 en el texto).
             let cursor_rendered = is_cursor && (blink_on || !term.cursor_blink_enabled);
-            let bold = cell.attrs.bold;
+            let bold = cell.attrs.bold();
 
             if cursor_rendered && matches!(term.cursor_style, CursorStyle::Bar) {
                 list.cursor_bars[row].push((row, col));
             }
 
-            let (mut fg, mut bg) = (cell.attrs.fg, cell.attrs.bg);
-            if cell.attrs.reverse {
+            let (mut fg, mut bg) = (cell.attrs.fg(), cell.attrs.bg());
+            if cell.attrs.reverse() {
                 std::mem::swap(&mut fg, &mut bg);
             }
 
@@ -650,7 +652,7 @@ impl DisplayListBuilder {
                 list.bg_quads[row].push(BgQuad {
                     row,
                     col,
-                    width_cells: cell.width.max(1),
+                    width_cells: cell.width().max(1),
                     color: selection_bg_glyphon(palette.theme),
                 });
             } else if let Some(current) = search_hit {
@@ -663,21 +665,21 @@ impl DisplayListBuilder {
                 list.bg_quads[row].push(BgQuad {
                     row,
                     col,
-                    width_cells: cell.width.max(1),
+                    width_cells: cell.width().max(1),
                     color,
                 });
             } else if cursor_rendered && matches!(term.cursor_style, CursorStyle::Block) {
                 list.bg_quads[row].push(BgQuad {
                     row,
                     col,
-                    width_cells: cell.width.max(1),
+                    width_cells: cell.width().max(1),
                     color: Self::cursor_color(palette),
                 });
             } else if bg != Color::Default {
                 list.bg_quads[row].push(BgQuad {
                     row,
                     col,
-                    width_cells: cell.width.max(1),
+                    width_cells: cell.width().max(1),
                     color: resolve_bg_glyphon(bg, palette, 255),
                 });
             }
@@ -693,7 +695,7 @@ impl DisplayListBuilder {
                 list.line_quads[row].push(LineQuad {
                     row,
                     col,
-                    width_cells: cell.width.max(1),
+                    width_cells: cell.width().max(1),
                     kind: LineKind::Under,
                     style: UnderlineStyle::Single,
                     color: Self::cursor_color(palette),
@@ -708,7 +710,7 @@ impl DisplayListBuilder {
                     list.line_quads[row].push(LineQuad {
                         row,
                         col,
-                        width_cells: cell.width.max(1),
+                        width_cells: cell.width().max(1),
                         kind: LineKind::Under,
                         style: underline_style,
                         color: underline_color_for_cell(
@@ -716,6 +718,7 @@ impl DisplayListBuilder {
                             bg,
                             bold,
                             cell,
+                            term,
                             palette,
                             dim_alpha,
                             is_sel,
@@ -727,16 +730,16 @@ impl DisplayListBuilder {
                 }
             }
 
-            if cell.attrs.strikethrough && cell.ch != ' ' {
+            if cell.attrs.strikethrough() && cell.ch != ' ' {
                 list.line_quads[row].push(LineQuad {
                     row,
                     col,
-                    width_cells: cell.width.max(1),
+                    width_cells: cell.width().max(1),
                     kind: LineKind::Strike,
                     style: UnderlineStyle::Single,
                     color: resolve_fg_glyphon(
                         fg,
-                        cell.attrs.dim,
+                        cell.attrs.dim(),
                         bold,
                         palette,
                         dim_alpha,
@@ -747,16 +750,16 @@ impl DisplayListBuilder {
                 });
             }
 
-            if cell.attrs.overline && cell.ch != ' ' {
+            if cell.attrs.overline() && cell.ch != ' ' {
                 list.line_quads[row].push(LineQuad {
                     row,
                     col,
-                    width_cells: cell.width.max(1),
+                    width_cells: cell.width().max(1),
                     kind: LineKind::Over,
                     style: UnderlineStyle::Single,
                     color: resolve_fg_glyphon(
                         fg,
-                        cell.attrs.dim,
+                        cell.attrs.dim(),
                         bold,
                         palette,
                         dim_alpha,
@@ -770,8 +773,8 @@ impl DisplayListBuilder {
             // SGR 5 (blink): oculta el glifo de texto en la fase "off".
             // El fondo y las decoraciones (subrayado, tachado, overline) se
             // mantienen, igual que en xterm.
-            let text_hidden_by_blink = cell.attrs.blink && !blink_on;
-            let emit_text = !cell.attrs.invisible
+            let text_hidden_by_blink = cell.attrs.blink() && !blink_on;
+            let emit_text = !cell.attrs.invisible()
                 && !text_hidden_by_blink
                 && (should_emit_text_glyph(cell)
                     || (cursor_rendered && matches!(term.cursor_style, CursorStyle::Block)));
@@ -817,7 +820,7 @@ impl DisplayListBuilder {
                         glyph_key: space_key,
                         fg: cursor_fg,
                         bold,
-                        dim: cell.attrs.dim,
+                        dim: cell.attrs.dim(),
                         contrast_bg: text_contrast_bg,
                         skip_contrast: text_skip_contrast,
                         custom_id: 0,
@@ -833,11 +836,11 @@ impl DisplayListBuilder {
             list.text_glyphs[row].push(TextGlyph {
                 row,
                 col,
-                width_cells: cell.width.max(1),
+                width_cells: cell.width().max(1),
                 glyph_key,
                 fg: cursor_fg,
                 bold,
-                dim: cell.attrs.dim,
+                dim: cell.attrs.dim(),
                 contrast_bg: text_contrast_bg,
                 skip_contrast: text_skip_contrast,
                 custom_id: 0,
@@ -882,21 +885,21 @@ impl DisplayListBuilder {
             let blink_hidden = (start..end).any(|c| {
                 source_row
                     .get(c)
-                    .is_some_and(|cell| cell.attrs.blink && !blink_on)
+                    .is_some_and(|cell| cell.attrs.blink() && !blink_on)
             });
-            if blink_hidden || cell.attrs.invisible {
+            if blink_hidden || cell.attrs.invisible() {
                 continue;
             }
 
-            let bold = cell.attrs.bold;
+            let bold = cell.attrs.bold();
             let shaped_glyphs = shape_run(
                 font_system,
                 metrics,
                 strings.family(family_id),
                 &run.text,
                 bold,
-                cell.attrs.italic,
-                cell.attrs.dim,
+                cell.attrs.italic(),
+                cell.attrs.dim(),
             );
 
             let rasterizes: Vec<bool> = shaped_glyphs
@@ -925,9 +928,9 @@ impl DisplayListBuilder {
                 };
                 let is_cursor = Self::shell_cursor_here(term, row, col, show_scrollback)
                     && (blink_on || !term.cursor_blink_enabled);
-                let mut fg = cell_at.attrs.fg;
-                let mut bg = cell_at.attrs.bg;
-                if cell_at.attrs.reverse {
+                let mut fg = cell_at.attrs.fg();
+                let mut bg = cell_at.attrs.bg();
+                if cell_at.attrs.reverse() {
                     std::mem::swap(&mut fg, &mut bg);
                 }
                 let is_sel = term.is_selected(row, col);
@@ -956,8 +959,8 @@ impl DisplayListBuilder {
                     ch: run.text.chars().nth(g.col_in_run).unwrap_or(' '),
                     extra: 0,
                     bold,
-                    italic: cell.attrs.italic,
-                    dim: cell.attrs.dim,
+                    italic: cell.attrs.italic(),
+                    dim: cell.attrs.dim(),
                     family: strings.intern_family(&format!(
                         "{}#lig:{}:{gi}",
                         strings.family(family_id),
@@ -970,8 +973,8 @@ impl DisplayListBuilder {
                     width_cells: g.cluster_cols.min(255) as u8,
                     glyph_key,
                     fg: fg_color,
-                    bold: cell_at.attrs.bold,
-                    dim: cell_at.attrs.dim,
+                    bold: cell_at.attrs.bold(),
+                    dim: cell_at.attrs.dim(),
                     contrast_bg: text_contrast_bg,
                     skip_contrast: text_skip_contrast,
                     custom_id: 0,
@@ -987,16 +990,19 @@ impl DisplayListBuilder {
 }
 
 fn should_emit_text_glyph(cell: &Cell) -> bool {
-    if cell.attrs.invisible {
+    if cell.attrs.invisible() {
         return false;
     }
-    if cell.width == 0 {
+    if cell.width() == 0 {
         return false;
     }
     if cell.ch != ' ' {
         return true;
     }
-    cell.attrs.bold || cell.attrs.italic || cell.attrs.dim || cell.attrs.fg != Color::Default
+    cell.attrs.bold()
+        || cell.attrs.italic()
+        || cell.attrs.dim()
+        || cell.attrs.fg() != Color::Default
 }
 
 #[cfg(test)]
@@ -1222,7 +1228,7 @@ mod tests {
         let dark = Color::Rgb(0x1e, 0x1e, 0x1e);
         let mut row = vec![Cell::default(); 1];
         row[0].ch = '\u{E0A0}';
-        row[0].attrs.fg = dark;
+        row[0].attrs.set_fg(dark);
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let mut term = Term::default();
         term.cursor_visible = false;
@@ -1334,9 +1340,9 @@ mod tests {
         let dark = Color::Rgb(0x1e, 0x1e, 0x1e);
         let mut row = vec![Cell::default(); 2];
         row[0].ch = '\u{2580}'; // ▀ geometrico
-        row[0].attrs.fg = dark;
+        row[0].attrs.set_fg(dark);
         row[1].ch = 'A';
-        row[1].attrs.fg = dark;
+        row[1].attrs.set_fg(dark);
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let mut term = Term::default();
         term.cursor_visible = false;
@@ -1401,7 +1407,7 @@ mod tests {
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 5];
         row[3].ch = 'X';
-        row[3].attrs.fg = Color::Red;
+        row[3].attrs.set_fg(Color::Red);
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let mut term = Term::default();
         term.cursor.move_to(0, 3);
@@ -1426,7 +1432,7 @@ mod tests {
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 1];
         row[0].ch = 'z';
-        row[0].attrs.strikethrough = true;
+        row[0].attrs.set_strikethrough(true);
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let mut term = Term::default();
         term.cursor_visible = false;
@@ -1447,7 +1453,7 @@ mod tests {
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 1];
         row[0].ch = 'z';
-        row[0].attrs.overline = true;
+        row[0].attrs.set_overline(true);
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let mut term = Term::default();
         term.cursor_visible = false;
@@ -1470,13 +1476,13 @@ mod tests {
 
         let mut link_row = vec![Cell::default(); 1];
         link_row[0].ch = 'L';
-        link_row[0].attrs.fg = Color::Green;
-        link_row[0].hyperlink = Some(0);
+        link_row[0].attrs.set_fg(Color::Green);
+        link_row[0].set_hyperlink(Some(0));
 
         let mut sgr_row = vec![Cell::default(); 1];
         sgr_row[0].ch = 'L';
-        sgr_row[0].attrs.fg = Color::Green;
-        sgr_row[0].attrs.underline = true;
+        sgr_row[0].attrs.set_fg(Color::Green);
+        sgr_row[0].attrs.set_underline(true);
 
         let mut term = Term::default();
         term.cursor_visible = false;
@@ -1523,7 +1529,7 @@ mod tests {
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 4];
         row[0].ch = '\u{1F600}';
-        row[0].width = 2;
+        row[0].set_width(2);
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let term = Term::default();
 
@@ -1544,10 +1550,10 @@ mod tests {
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 1];
         row[0].ch = 'X';
-        row[0].attrs.fg = Color::Red;
-        row[0].attrs.bg = Color::Blue;
-        row[0].attrs.reverse = true;
-        row[0].attrs.dim = true;
+        row[0].attrs.set_fg(Color::Red);
+        row[0].attrs.set_bg(Color::Blue);
+        row[0].attrs.set_reverse(true);
+        row[0].attrs.set_dim(true);
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let mut term = Term::new();
         term.cursor_visible = false;
@@ -1581,9 +1587,9 @@ mod tests {
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 1];
         row[0].ch = 'a';
-        row[0].attrs.fg = Color::Green;
-        row[0].attrs.underline = true;
-        row[0].attrs.dim = true;
+        row[0].attrs.set_fg(Color::Green);
+        row[0].attrs.set_underline(true);
+        row[0].attrs.set_dim(true);
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let term = Term::default();
         let palette = test_palette(&theme);
@@ -1603,10 +1609,7 @@ mod tests {
         let family = FontConfig::default().family;
         let row0 = row_with_box_top();
         let row1: Vec<Cell> = (0..4)
-            .map(|i| Cell {
-                ch: char::from_u32(b'a' as u32 + i as u32).unwrap(),
-                ..Default::default()
-            })
+            .map(|i| Cell::with_ch(char::from_u32(b'a' as u32 + i as u32).unwrap()))
             .collect();
         let row_sources: Vec<&[Cell]> = vec![row0.as_slice(), row1.as_slice()];
         let term = Term::default();
@@ -1675,7 +1678,7 @@ mod tests {
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 1];
         row[0].ch = 'x';
-        row[0].attrs.invisible = true;
+        row[0].attrs.set_invisible(true);
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let term = Term::default();
 
@@ -1699,11 +1702,11 @@ mod tests {
         let metrics = test_metrics();
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 1];
+        let mut term = Term::default();
         row[0].ch = 'a';
-        row[0].attrs.underline_style = UnderlineStyle::Curly;
-        row[0].attrs.underline_color = Color::Red;
+        row[0].attrs.set_underline_style(UnderlineStyle::Curly);
+        row[0].attrs.set_underline_color(&mut term, Color::Red);
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
-        let term = Term::default();
         let palette = test_palette(&theme);
 
         let list = build_full(&term, &metrics, &theme, &row_sources, 1, 1, &family);
@@ -1741,8 +1744,8 @@ mod tests {
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 1];
         row[0].ch = 'a';
-        row[0].attrs.fg = Color::Red;
-        row[0].attrs.dim = true;
+        row[0].attrs.set_fg(Color::Red);
+        row[0].attrs.set_dim(true);
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let mut term = Term::default();
         term.cursor_visible = false;
@@ -1772,7 +1775,7 @@ mod tests {
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 1];
         row[0].ch = 'L';
-        row[0].hyperlink = Some(0);
+        row[0].set_hyperlink(Some(0));
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let term = Term::default();
 
@@ -1881,9 +1884,9 @@ mod tests {
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 1];
         row[0].ch = 'x';
-        row[0].attrs.blink = true;
-        row[0].attrs.bg = Color::Red;
-        row[0].attrs.underline = true;
+        row[0].attrs.set_blink(true);
+        row[0].attrs.set_bg(Color::Red);
+        row[0].attrs.set_underline(true);
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let mut term = Term::new();
         term.cursor_visible = false;
@@ -1985,7 +1988,7 @@ mod tests {
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 1];
         row[0].ch = 'X';
-        row[0].attrs.blink = true;
+        row[0].attrs.set_blink(true);
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let mut term = Term::new();
         term.cursor.move_to(0, 0);
@@ -2020,12 +2023,12 @@ mod tests {
         let family = FontConfig::default().family;
         let mut row = vec![Cell::default(); 1];
         row[0].ch = 'x';
-        row[0].attrs.blink = true;
-        row[0].attrs.reverse = true;
+        row[0].attrs.set_blink(true);
+        row[0].attrs.set_reverse(true);
         // reverse intercambia fg<->bg en build_row: tras swap, el bg efectivo
         // es el fg original; por eso fg != Default para que haya bg_quad.
-        row[0].attrs.fg = Color::Red;
-        row[0].attrs.bg = Color::Default;
+        row[0].attrs.set_fg(Color::Red);
+        row[0].attrs.set_bg(Color::Default);
         let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
         let mut term = Term::new();
         term.cursor_visible = false;
@@ -2054,10 +2057,7 @@ mod tests {
     }
 
     fn char_row(ch: char) -> Vec<Cell> {
-        vec![Cell {
-            ch,
-            ..Cell::default()
-        }]
+        vec![Cell::with_ch(ch)]
     }
 
     /// Rebuild incremental con damage `Scrolled` sobre una cache existente

@@ -73,9 +73,8 @@ fn synthetic_grid(
     let grid_rows: Vec<Vec<Cell>> = (0..rows)
         .map(|r| {
             (0..cols)
-                .map(|c| Cell {
-                    ch: char::from_u32(b'A' as u32 + ((r + c) % 26) as u32).unwrap(),
-                    ..Default::default()
+                .map(|c| {
+                    Cell::with_ch(char::from_u32(b'A' as u32 + ((r + c) % 26) as u32).unwrap())
                 })
                 .collect()
         })

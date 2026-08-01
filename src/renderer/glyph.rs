@@ -136,7 +136,7 @@ pub fn is_wide_continuation(row: &[Cell], col: usize) -> bool {
     if col == 0 || col >= row.len() {
         return false;
     }
-    row[col - 1].width > 1
+    row[col - 1].width() > 1
 }
 
 /// Construye la clave de cache para la celda en `(row, col)`.
@@ -155,20 +155,20 @@ pub fn resolve_glyph_key(
         return None;
     }
     let cell = row.get(col)?;
-    if cell.width == 0 {
+    if cell.width() == 0 {
         return None;
     }
     let extra = cell
-        .extra_codepoints
+        .extra_codepoints()
         .and_then(|idx| grapheme_extras.get(idx as usize))
         .map(|s| strings.intern_extra(s))
         .unwrap_or(0);
     Some(GlyphKey {
         ch: cell.ch,
         extra,
-        bold: cell.attrs.bold,
-        italic: cell.attrs.italic,
-        dim: cell.attrs.dim,
+        bold: cell.attrs.bold(),
+        italic: cell.attrs.italic(),
+        dim: cell.attrs.dim(),
         family: family_id,
     })
 }
@@ -436,7 +436,7 @@ mod tests {
         let family_id = strings.intern_family(&family);
         let mut row = vec![Cell::default(); 4];
         row[0].ch = '\u{4e2d}';
-        row[0].width = 2;
+        row[0].set_width(2);
 
         let key = resolve_glyph_key(&row, 0, family_id, &[], &mut strings);
         assert!(key.is_some(), "col 0 debe producir clave");
@@ -457,8 +457,8 @@ mod tests {
         let family_id = strings.intern_family("monospace");
         let mut row = vec![Cell::default(); 2];
         row[0].ch = 'e';
-        row[0].width = 1;
-        row[0].extra_codepoints = Some(0);
+        row[0].set_width(1);
+        row[0].set_extra_codepoints(Some(0));
         let key = resolve_glyph_key(&row, 0, family_id, &extras, &mut strings).expect("key");
         assert_eq!(strings.extra(key.extra), "\u{0301}");
     }
@@ -470,7 +470,7 @@ mod tests {
         let family_id = strings.intern_family("monospace");
         let mut row = vec![Cell::default(); 1];
         row[0].ch = 'a';
-        row[0].width = 1;
+        row[0].set_width(1);
         let key = resolve_glyph_key(&row, 0, family_id, &extras, &mut strings).expect("key");
         assert_eq!(strings.extra(key.extra), "");
     }
