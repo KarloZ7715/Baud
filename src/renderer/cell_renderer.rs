@@ -422,6 +422,7 @@ fn text_glyph_to_customs(
             italic: text.glyph_key.italic,
             dim: text.glyph_key.dim,
             family: text.glyph_key.family,
+            lig_slot: text.glyph_key.lig_slot,
         };
         let overlay_shaped = ShapedGlyph {
             cache_key: overlay.cache_key,
@@ -764,6 +765,7 @@ mod tests {
                 italic: false,
                 dim: false,
                 family: strings.intern_family(&font_config.family),
+                lig_slot: None,
             },
             fg: Color::Green,
             bold: false,
@@ -838,6 +840,7 @@ mod tests {
                 italic: false,
                 dim: false,
                 family: strings.intern_family(&font_config.family),
+                lig_slot: None,
             },
             fg: Color::Green,
             bold: false,
@@ -951,6 +954,7 @@ mod tests {
                 italic: false,
                 dim: false,
                 family: strings.intern_family(&font_config.family),
+                lig_slot: None,
             },
             fg: Color::Default,
             bold: false,
@@ -1012,6 +1016,7 @@ mod tests {
                 italic: false,
                 dim: false,
                 family: strings.intern_family(&font_config.family),
+                lig_slot: None,
             },
             fg: Color::Default,
             bold: true,
@@ -1111,6 +1116,7 @@ mod tests {
                 italic: false,
                 dim: false,
                 family: strings.intern_family(&font_config.family),
+                lig_slot: None,
             },
             fg: Color::Default,
             bold: false,
@@ -1174,6 +1180,7 @@ mod tests {
                 italic: false,
                 dim: false,
                 family: strings.intern_family(&font_config.family),
+                lig_slot: None,
             },
             fg: Color::Default,
             bold: false,
@@ -1223,6 +1230,7 @@ mod tests {
             italic: false,
             dim: false,
             family: strings.intern_family(&font_config.family),
+            lig_slot: None,
         };
         let glyph_id =
             cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &strings, key);
@@ -1266,6 +1274,7 @@ mod tests {
             italic: false,
             dim: false,
             family: strings.intern_family(&font_config.family),
+            lig_slot: None,
         };
         let glyph_id =
             cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &strings, key);

@@ -133,6 +133,7 @@ pub use glyph::{
 };
 pub use glyph_cache::{CachedGlyph, CachedRaster, GlyphCache};
 pub use metrics::CellMetrics;
+pub use runs::RunShapeCache;
 
 /// Estado del preedit IME para dibujar el overlay sobre el cursor.
 #[derive(Debug)]
@@ -243,6 +244,8 @@ pub struct Renderer {
     /// Interning de las cadenas de `GlyphKey` (familias y extras de grafema).
     /// Vive aqui y no en `Term` porque el cache es compartido entre sessions.
     glyph_strings: GlyphStrings,
+    /// Cache de shaping de runs de ligadura (line_y + `Vec<RunGlyph>`).
+    run_shape_cache: runs::RunShapeCache,
     /// Display list por sesion, reutilizada entre frames para damage parcial.
     pane_display_lists: HashMap<SessionId, DisplayList>,
     /// Custom glyphs por sesion y fila, reconstruidos solo para filas sucias.
@@ -542,6 +545,7 @@ impl Renderer {
             cell_metrics,
             glyph_cache: GlyphCache::new(),
             glyph_strings: GlyphStrings::new(),
+            run_shape_cache: runs::RunShapeCache::new(),
             pane_display_lists: HashMap::new(),
             pane_custom_glyphs: HashMap::new(),
             prev_theme: ThemeConfig::default(),
@@ -669,6 +673,7 @@ impl Renderer {
     /// Invalida caches GPU tras cambio de metricas (resize).
     fn reset_glyph_pipeline(&mut self) {
         self.glyph_cache.clear();
+        self.run_shape_cache.clear();
         builtin::clear_cache();
         self.reset_text_atlas();
         self.swash_cache = glyphon::SwashCache::new();
@@ -692,9 +697,22 @@ impl Renderer {
         );
     }
 
+    /// Resetea el atlas si `GlyphCache` purgo por saturacion de `next_id`
+    /// durante la conversion a `CustomGlyph` del frame actual. El resto de
+    /// panes ya emitidos este frame pueden quedar con ids obsoletos (hipo de
+    /// un frame); `pane_custom_glyphs.clear()` fuerza a todos a reconstruirse
+    /// en el siguiente, igual que tras un cambio de metricas.
+    fn handle_glyph_cache_saturation(&mut self) {
+        if self.glyph_cache.take_needs_atlas_reset() {
+            self.reset_text_atlas();
+            self.pane_custom_glyphs.clear();
+        }
+    }
+
     /// Sincroniza métricas del cache de glifos y resetea el atlas si cambiaron.
     fn prepare_glyph_metrics(&mut self, metrics: &CellMetrics) {
         if self.glyph_cache.metrics_changed(metrics) {
+            self.run_shape_cache.clear();
             self.reset_text_atlas();
             self.pane_custom_glyphs.clear();
         }
@@ -1189,6 +1207,7 @@ impl Renderer {
             &DamageSnapshot::Cells(Vec::new()),
             &mut pane_glyphs,
         )?;
+        self.handle_glyph_cache_saturation();
         out.extend(pane_glyphs);
         Ok(true)
     }
@@ -1389,6 +1408,7 @@ impl Renderer {
             &mut swash_cache,
             &mut self.contrast_cache,
             &mut self.glyph_strings,
+            &mut self.run_shape_cache,
         );
 
         let mut pane_glyphs = Vec::new();
@@ -1407,6 +1427,7 @@ impl Renderer {
             &damage,
             &mut pane_glyphs,
         )?;
+        self.handle_glyph_cache_saturation();
         out.extend(pane_glyphs);
         Ok(())
     }

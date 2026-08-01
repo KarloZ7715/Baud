@@ -11,7 +11,7 @@ use super::decorations::cursor_glyph;
 use super::glyph::{is_wide_continuation, resolve_glyph_key, GlyphKey, GlyphStrings};
 use super::metrics::CellMetrics;
 use super::palette::Palette;
-use super::runs::{group_ligature_runs, shape_run};
+use super::runs::group_ligature_runs;
 use super::selection_bg_glyphon;
 
 /// Factor de atenuacion RGB para SGR dim (2) cuando `dim_alpha` esta desactivado.
@@ -400,6 +400,7 @@ impl DisplayListBuilder {
         swash_cache: &mut Option<&mut glyphon::SwashCache>,
         contrast_cache: &mut ContrastCache,
         strings: &mut GlyphStrings,
+        run_shape_cache: &mut super::runs::RunShapeCache,
     ) {
         let family_id = strings.intern_family(font_family);
         list.ensure_rows(rows);
@@ -424,6 +425,7 @@ impl DisplayListBuilder {
                     swash_cache,
                     contrast_cache,
                     strings,
+                    run_shape_cache,
                 );
             }
         } else {
@@ -453,6 +455,7 @@ impl DisplayListBuilder {
                     swash_cache,
                     contrast_cache,
                     strings,
+                    run_shape_cache,
                 );
             }
         }
@@ -525,6 +528,7 @@ impl DisplayListBuilder {
                             italic: false,
                             dim: false,
                             family: family_id,
+                            lig_slot: None,
                         },
                     });
                 }
@@ -567,6 +571,7 @@ impl DisplayListBuilder {
         swash_cache: &mut Option<&mut glyphon::SwashCache>,
         contrast_cache: &mut ContrastCache,
         strings: &mut GlyphStrings,
+        run_shape_cache: &mut super::runs::RunShapeCache,
     ) {
         let source_row = row_sources.get(row).copied().unwrap_or(&[]);
         let cursor_on_row = !show_scrollback
@@ -607,6 +612,7 @@ impl DisplayListBuilder {
                     blink_on,
                     contrast_cache,
                     strings,
+                    run_shape_cache,
                 ),
                 _ => HashSet::new(),
             }
@@ -809,6 +815,7 @@ impl DisplayListBuilder {
                         italic: false,
                         dim: false,
                         family: family_id,
+                        lig_slot: None,
                     };
                     if bold {
                         space_key.bold = true;
@@ -870,9 +877,8 @@ impl DisplayListBuilder {
         blink_on: bool,
         _contrast_cache: &mut ContrastCache,
         strings: &mut GlyphStrings,
+        run_shape_cache: &mut super::runs::RunShapeCache,
     ) -> HashSet<usize> {
-        use super::glyph_cache::cache_key_rasterizes;
-
         let mut handled = HashSet::new();
         for run in lig_runs {
             if run.text.is_empty() {
@@ -892,9 +898,11 @@ impl DisplayListBuilder {
             }
 
             let bold = cell.attrs.bold();
-            let shaped_glyphs = shape_run(
+            let (run_id, shaped_glyphs, rasterizes) = run_shape_cache.shape(
                 font_system,
+                swash_cache,
                 metrics,
+                family_id,
                 strings.family(family_id),
                 &run.text,
                 bold,
@@ -902,10 +910,6 @@ impl DisplayListBuilder {
                 cell.attrs.dim(),
             );
 
-            let rasterizes: Vec<bool> = shaped_glyphs
-                .iter()
-                .map(|g| cache_key_rasterizes(font_system, swash_cache, g.cache_key))
-                .collect();
             if !rasterizes.iter().any(|&ok| ok) {
                 continue;
             }
@@ -956,16 +960,13 @@ impl DisplayListBuilder {
                     (contrast_bg, skip_contrast)
                 };
                 let glyph_key = GlyphKey {
-                    ch: run.text.chars().nth(g.col_in_run).unwrap_or(' '),
+                    ch: g.ch,
                     extra: 0,
                     bold,
                     italic: cell.attrs.italic(),
                     dim: cell.attrs.dim(),
-                    family: strings.intern_family(&format!(
-                        "{}#lig:{}:{gi}",
-                        strings.family(family_id),
-                        run.text
-                    )),
+                    family: family_id,
+                    lig_slot: Some((run_id, gi as u16)),
                 };
                 list.text_glyphs[row].push(TextGlyph {
                     row,
@@ -1054,6 +1055,7 @@ mod tests {
         let mut list = DisplayList::default();
         let mut contrast_cache = ContrastCache::default();
         let mut strings = GlyphStrings::new();
+        let mut run_shape_cache = crate::renderer::RunShapeCache::new();
         DisplayListBuilder::build(
             &mut list,
             term,
@@ -1073,6 +1075,7 @@ mod tests {
             &mut None,
             &mut contrast_cache,
             &mut strings,
+            &mut run_shape_cache,
         );
         list
     }
@@ -1093,6 +1096,7 @@ mod tests {
         let mut list = DisplayList::default();
         let mut contrast_cache = ContrastCache::default();
         let mut strings = GlyphStrings::new();
+        let mut run_shape_cache = crate::renderer::RunShapeCache::new();
         DisplayListBuilder::build(
             &mut list,
             term,
@@ -1112,6 +1116,7 @@ mod tests {
             &mut None,
             &mut contrast_cache,
             &mut strings,
+            &mut run_shape_cache,
         );
         list
     }
@@ -1132,6 +1137,7 @@ mod tests {
         let mut list = DisplayList::default();
         let mut contrast_cache = ContrastCache::default();
         let mut strings = GlyphStrings::new();
+        let mut run_shape_cache = crate::renderer::RunShapeCache::new();
         DisplayListBuilder::build(
             &mut list,
             term,
@@ -1151,6 +1157,7 @@ mod tests {
             &mut None,
             &mut contrast_cache,
             &mut strings,
+            &mut run_shape_cache,
         );
         list
     }
@@ -1617,6 +1624,7 @@ mod tests {
         let mut list = DisplayList::default();
         let mut contrast_cache = ContrastCache::default();
         let mut strings = GlyphStrings::new();
+        let mut run_shape_cache = crate::renderer::RunShapeCache::new();
 
         DisplayListBuilder::build(
             &mut list,
@@ -1637,6 +1645,7 @@ mod tests {
             &mut None,
             &mut contrast_cache,
             &mut strings,
+            &mut run_shape_cache,
         );
         let full_glyphs = list.text_glyphs_flat().count();
         assert_eq!(full_glyphs, 8);
@@ -1665,6 +1674,7 @@ mod tests {
             &mut None,
             &mut contrast_cache,
             &mut strings,
+            &mut run_shape_cache,
         );
 
         assert_eq!(list.text_glyphs_flat().count(), full_glyphs);
@@ -2089,6 +2099,7 @@ mod tests {
         let palette = test_palette(&theme);
         let mut contrast_cache = ContrastCache::default();
         let mut strings = GlyphStrings::new();
+        let mut run_shape_cache = crate::renderer::RunShapeCache::new();
         DisplayListBuilder::build(
             &mut cache,
             &term,
@@ -2112,9 +2123,81 @@ mod tests {
             &mut None,
             &mut contrast_cache,
             &mut strings,
+            &mut run_shape_cache,
         );
 
         let expected = build_full(&term, &metrics, &theme, &after, 1, 3, &family);
         assert_eq!(cache, expected);
+    }
+
+    /// Test de no-regresion de la fuga descrita en el plan: antes de la clave
+    /// de ligadura estructurada, cada glifo de cada run de ligadura internaba
+    /// una pseudo-familia nueva (`family#lig:texto:idx`) que nunca se
+    /// liberaba. Reconstruir muchas veces la misma fila con ligaduras no debe
+    /// hacer crecer la tabla de familias internadas mas alla de la familia
+    /// base.
+    #[test]
+    fn ligature_repeated_builds_no_hacen_crecer_las_familias_internadas() {
+        let theme = ThemeConfig::default();
+        let family = FontConfig::default().family;
+        let mut font_system = super::super::terminal_fallback::create_font_system();
+        let metrics = CellMetrics::measure(
+            &mut font_system,
+            &family,
+            14.0,
+            1.0,
+            crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+        );
+        let mut swash_cache = glyphon::SwashCache::new();
+        let term = Term::default();
+        let palette = test_palette(&theme);
+
+        let text = "a=>b!=c->d::e...f==g<=h";
+        let mut row = vec![Cell::default(); text.chars().count()];
+        for (i, ch) in text.chars().enumerate() {
+            row[i].ch = ch;
+        }
+        let cols = row.len();
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+
+        let mut list = DisplayList::default();
+        let mut contrast_cache = ContrastCache::default();
+        let mut strings = GlyphStrings::new();
+        let mut run_shape_cache = crate::renderer::RunShapeCache::new();
+
+        let mut family_count_after_first_frame = None;
+        for _ in 0..100 {
+            DisplayListBuilder::build(
+                &mut list,
+                &term,
+                &metrics,
+                &palette,
+                theme.dim_alpha,
+                &row_sources,
+                cols,
+                1,
+                &family,
+                &DamageSnapshot::Full,
+                false,
+                true,
+                true,
+                true,
+                &mut Some(&mut font_system),
+                &mut Some(&mut swash_cache),
+                &mut contrast_cache,
+                &mut strings,
+                &mut run_shape_cache,
+            );
+            let count = strings.family_count();
+            match family_count_after_first_frame {
+                None => family_count_after_first_frame = Some(count),
+                Some(expected) => assert_eq!(
+                    count, expected,
+                    "familias internadas crecio entre frames identicos"
+                ),
+            }
+        }
+        // Solo la familia base deberia internarse; ya no hay pseudo-familias.
+        assert_eq!(family_count_after_first_frame, Some(1));
     }
 }

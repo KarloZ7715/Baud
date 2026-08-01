@@ -3,7 +3,7 @@ use baud::config::ThemeConfig;
 use baud::grid::{Cell, DamageSnapshot, Grid};
 use baud::renderer::{
     clear_builtin_cache, CellGeometry, CellMetrics, CellRenderer, ContrastCache, DisplayList,
-    DisplayListBuilder, GlyphCache, GlyphStrings, Palette,
+    DisplayListBuilder, GlyphCache, GlyphStrings, Palette, RunShapeCache,
 };
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use glyphon::{FontSystem, SwashCache};
@@ -95,6 +95,7 @@ fn bench_display_list_build(c: &mut Criterion) {
             let palette = Palette::from_theme(&theme);
             let mut contrast_cache = ContrastCache::default();
             let mut strings = baud::renderer::GlyphStrings::new();
+            let mut run_shape_cache = RunShapeCache::new();
             b.iter(|| {
                 let mut list = DisplayList::default();
                 DisplayListBuilder::build(
@@ -116,10 +117,99 @@ fn bench_display_list_build(c: &mut Criterion) {
                     &mut None,
                     &mut contrast_cache,
                     &mut strings,
+                    &mut run_shape_cache,
                 );
             });
         });
     }
+}
+
+/// Grid con contenido rico en secuencias de ligadura repetidas por fila, para
+/// medir el camino de `font.ligatures = true` (shaping de runs, no solo
+/// per-celda). Con cache de runs, el shaping real solo debe pagarse una vez
+/// por combinacion distinta de familia/estilo/texto de run.
+fn synthetic_ligature_grid(
+    rows: usize,
+    cols: usize,
+    family: &str,
+) -> (Term, ThemeConfig, CellMetrics, Vec<Vec<Cell>>) {
+    let term = Term::default();
+    let theme = ThemeConfig::default();
+    let mut font_system = FontSystem::new();
+    let metrics = CellMetrics::measure(
+        &mut font_system,
+        family,
+        14.0,
+        1.0,
+        baud::config::GlyphOffset { x: 0.0, y: 0.0 },
+    );
+
+    let patterns = ["=>", "!==", "<=>", "->", "::", "..."];
+    let grid_rows: Vec<Vec<Cell>> = (0..rows)
+        .map(|r| {
+            let mut row = vec![Cell::default(); cols];
+            let mut col = 0;
+            let mut i = 0;
+            while col < cols {
+                let pattern = patterns[(r + i) % patterns.len()];
+                for ch in pattern.chars() {
+                    if col >= cols {
+                        break;
+                    }
+                    row[col].ch = ch;
+                    col += 1;
+                }
+                if col < cols {
+                    row[col].ch = ' ';
+                    col += 1;
+                }
+                i += 1;
+            }
+            row
+        })
+        .collect();
+
+    (term, theme, metrics, grid_rows)
+}
+
+fn bench_display_list_build_ligatures(c: &mut Criterion) {
+    let (rows, cols) = (50, 200);
+    let family = "monospace".to_string();
+    let (term, theme, metrics, grid_rows) = synthetic_ligature_grid(rows, cols, &family);
+    let row_sources: Vec<&[Cell]> = grid_rows.iter().map(|r| r.as_slice()).collect();
+
+    c.bench_function("display_list_build_200x50_ligatures", |b| {
+        let palette = Palette::from_theme(&theme);
+        let mut contrast_cache = ContrastCache::default();
+        let mut strings = GlyphStrings::new();
+        let mut run_shape_cache = RunShapeCache::new();
+        let mut font_system = FontSystem::new();
+        let mut swash_cache = SwashCache::new();
+        b.iter(|| {
+            let mut list = DisplayList::default();
+            DisplayListBuilder::build(
+                &mut list,
+                &term,
+                &metrics,
+                &palette,
+                theme.dim_alpha,
+                &row_sources,
+                cols,
+                rows,
+                &family,
+                &DamageSnapshot::Full,
+                false,
+                true,
+                true,
+                true,
+                &mut Some(&mut font_system),
+                &mut Some(&mut swash_cache),
+                &mut contrast_cache,
+                &mut strings,
+                &mut run_shape_cache,
+            );
+        });
+    });
 }
 
 /// Mide `CellRenderer::build_custom_glyphs` con damage total (fila fria),
@@ -134,6 +224,7 @@ fn bench_custom_glyphs_build(c: &mut Criterion) {
     let palette = Palette::from_theme(&theme);
     let mut contrast_cache = ContrastCache::default();
     let mut strings = GlyphStrings::new();
+    let mut run_shape_cache = RunShapeCache::new();
 
     let mut list = DisplayList::default();
     DisplayListBuilder::build(
@@ -155,6 +246,7 @@ fn bench_custom_glyphs_build(c: &mut Criterion) {
         &mut None,
         &mut contrast_cache,
         &mut strings,
+        &mut run_shape_cache,
     );
 
     c.bench_function("custom_glyphs_build_200x50", |b| {
@@ -291,6 +383,7 @@ criterion_group!(
     bench_scroll_pop,
     bench_reflow,
     bench_display_list_build,
+    bench_display_list_build_ligatures,
     bench_custom_glyphs_build,
     bench_builtin_render_cached,
     bench_parse_throughput

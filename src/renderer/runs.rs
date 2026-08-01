@@ -1,5 +1,7 @@
 //! Agrupacion de secuencias ligables y shaping multi-caracter.
 
+use std::collections::HashMap;
+
 use glyphon::cosmic_text::{FeatureTag, FontFeatures, Hinting, Metrics, Shaping, Style, Weight};
 use glyphon::CacheKey;
 
@@ -8,6 +10,11 @@ use crate::grid::Cell;
 use super::builtin::is_box_glyph;
 use super::metrics::CellMetrics;
 use super::resolve_family;
+
+/// Tope de entradas del cache de runs shapeados: acota la memoria si una
+/// fuente tiene un repertorio de ligaduras enorme. El repertorio real de una
+/// fuente son decenas de patrones, no miles.
+const MAX_RUN_CACHE_ENTRIES: usize = 4096;
 
 /// Secuencias tipograficas habituales en fuentes con ligaduras (Fira Code, etc.).
 /// Ordenadas de mayor a menor longitud para greedy match.
@@ -19,6 +26,8 @@ const LIGATURE_PATTERNS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunGlyph {
     pub cache_key: CacheKey,
+    /// Caracter fuente del cluster (evita recorrer `run.text` con `chars().nth()`).
+    pub ch: char,
     /// Primera columna del cluster dentro del run (0..run.cols).
     pub col_in_run: usize,
     /// Celdas de grid que cubre este cluster (1 = sin ligadura).
@@ -93,6 +102,11 @@ pub(crate) fn ligature_collapsed(glyphs: &[RunGlyph], char_count: usize) -> bool
 }
 
 /// Shapea una secuencia corta con ligaduras (sin forzar ancho monospace).
+///
+/// Sin cache: solo para tests, que necesitan verificar el shaping puro
+/// desacoplado de [`RunShapeCache`]. El camino de render usa
+/// `RunShapeCache::shape`.
+#[cfg(test)]
 pub fn shape_run(
     font_system: &mut glyphon::FontSystem,
     metrics: &CellMetrics,
@@ -101,6 +115,32 @@ pub fn shape_run(
     bold: bool,
     italic: bool,
     dim: bool,
+) -> Vec<RunGlyph> {
+    let line_y = reference_line_y(font_system, metrics, family, bold, italic, dim);
+    shape_run_with_line_y(
+        font_system,
+        metrics,
+        family,
+        text,
+        bold,
+        italic,
+        dim,
+        line_y,
+    )
+}
+
+/// Igual que [`shape_run`] pero con `line_y` ya resuelto (evita recalcularlo
+/// cuando el llamante lo mantiene en cache, ver [`RunShapeCache`]).
+#[allow(clippy::too_many_arguments)]
+fn shape_run_with_line_y(
+    font_system: &mut glyphon::FontSystem,
+    metrics: &CellMetrics,
+    family: &str,
+    text: &str,
+    bold: bool,
+    italic: bool,
+    dim: bool,
+    line_y: f32,
 ) -> Vec<RunGlyph> {
     let ct = Metrics::new(metrics.font_size, metrics.cell_h);
     let mut buf = glyphon::Buffer::new(font_system, ct);
@@ -114,8 +154,6 @@ pub fn shape_run(
     buf.set_text(font_system, text, &attrs, Shaping::Advanced, None);
     buf.shape_until_scroll(font_system, false);
 
-    let line_y = reference_line_y(font_system, metrics, family, bold, italic, dim);
-
     let mut out = Vec::new();
     if let Some(run) = buf.layout_runs().next() {
         let glyphs: Vec<_> = run.glyphs.iter().collect();
@@ -124,6 +162,7 @@ pub fn shape_run(
             let physical = g.physical((metrics.glyph_offset_x, line_y), 1.0);
             let anchor = g.physical((metrics.glyph_offset_x, 0.0), 1.0);
             let byte_start = g.start.min(text.len());
+            let ch = text[byte_start..].chars().next().unwrap_or(' ');
             let col_in_run = text[..byte_start].chars().count();
             let next_col = if gi + 1 < glyphs.len() {
                 let next_start = glyphs[gi + 1].start.min(text.len());
@@ -134,6 +173,7 @@ pub fn shape_run(
             let cluster_cols = (next_col - col_in_run).max(1);
             out.push(RunGlyph {
                 cache_key: physical.cache_key,
+                ch,
                 col_in_run,
                 cluster_cols,
                 top: anchor.y as f32,
@@ -145,6 +185,127 @@ pub fn shape_run(
         }
     }
     out
+}
+
+/// Clave del cache de runs shapeados: la cardinalidad real esta acotada por
+/// el repertorio de ligaduras de la fuente (un run son 2-4 caracteres), no
+/// por el contenido de la pantalla.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RunShapeKey {
+    family: u32,
+    bold: bool,
+    italic: bool,
+    dim: bool,
+    text: String,
+}
+
+/// Cache de shaping de runs de ligadura, vive en el `Renderer` junto al
+/// `GlyphCache` y se invalida con el mismo disparador de metricas.
+///
+/// `next_run_id` nunca se resetea al vaciar `runs` (limite de memoria): un
+/// `GlyphKey::lig_slot` guarda el `run_id` con el que se shapeo, y si los ids
+/// se reciclaran una entrada vieja del `GlyphCache` podria interpretarse como
+/// perteneciente a un run distinto tras el vaciado (la misma clase de bug que
+/// la saturacion de `GlyphCache::next_id`). Al cambiar metricas, todo el
+/// `GlyphCache` se limpia igualmente, asi que los ids viejos dejan de
+/// referenciarse desde ahi.
+#[derive(Debug, Default)]
+pub struct RunShapeCache {
+    line_y: HashMap<(u32, bool, bool, bool), f32>,
+    /// `run_id`, glifos shapeados y si cada uno rasteriza (bitmap no vacio).
+    /// El chequeo de rasterizado usa `SwashCache::get_image_uncached`, que
+    /// rasteriza de verdad (no es gratis): cachearlo junto al shaping evita
+    /// pagarlo cada frame para el mismo run ya visto.
+    runs: HashMap<RunShapeKey, (u32, Vec<RunGlyph>, Vec<bool>)>,
+    next_run_id: u32,
+}
+
+impl RunShapeCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Invalida ambos caches (p. ej. al cambiar metricas de celda).
+    pub fn clear(&mut self) {
+        self.line_y.clear();
+        self.runs.clear();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_line_y(
+        &mut self,
+        font_system: &mut glyphon::FontSystem,
+        metrics: &CellMetrics,
+        family_id: u32,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        dim: bool,
+    ) -> f32 {
+        let key = (family_id, bold, italic, dim);
+        if let Some(&v) = self.line_y.get(&key) {
+            return v;
+        }
+        let v = reference_line_y(font_system, metrics, family, bold, italic, dim);
+        self.line_y.insert(key, v);
+        v
+    }
+
+    /// Devuelve el `run_id` estable, los glifos shapeados y que glifo
+    /// rasteriza (bitmap no vacio) para `text`; shapea y rasteriza (y
+    /// cachea) solo si es la primera vez que se ve esa combinacion de
+    /// familia/estilo/texto.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shape(
+        &mut self,
+        font_system: &mut glyphon::FontSystem,
+        swash_cache: &mut glyphon::SwashCache,
+        metrics: &CellMetrics,
+        family_id: u32,
+        family: &str,
+        text: &str,
+        bold: bool,
+        italic: bool,
+        dim: bool,
+    ) -> (u32, Vec<RunGlyph>, Vec<bool>) {
+        let key = RunShapeKey {
+            family: family_id,
+            bold,
+            italic,
+            dim,
+            text: text.to_string(),
+        };
+        if let Some((id, glyphs, rasterizes)) = self.runs.get(&key) {
+            return (*id, glyphs.clone(), rasterizes.clone());
+        }
+
+        let line_y = self.cached_line_y(font_system, metrics, family_id, family, bold, italic, dim);
+        let glyphs = shape_run_with_line_y(
+            font_system,
+            metrics,
+            family,
+            text,
+            bold,
+            italic,
+            dim,
+            line_y,
+        );
+        let rasterizes: Vec<bool> = glyphs
+            .iter()
+            .map(|g| {
+                super::glyph_cache::cache_key_rasterizes(font_system, swash_cache, g.cache_key)
+            })
+            .collect();
+
+        if self.runs.len() >= MAX_RUN_CACHE_ENTRIES {
+            self.runs.clear();
+        }
+        let id = self.next_run_id;
+        self.next_run_id += 1;
+        self.runs
+            .insert(key, (id, glyphs.clone(), rasterizes.clone()));
+        (id, glyphs, rasterizes)
+    }
 }
 
 /// Convierte un glifo shaped de run al formato de cache por celda.
@@ -320,6 +481,76 @@ mod tests {
     }
 
     #[test]
+    fn run_shape_cache_reutiliza_shaping_para_texto_repetido() {
+        let mut fs = crate::renderer::terminal_fallback::create_font_system();
+        let fam = crate::config::FontConfig::default().family;
+        let m = crate::renderer::metrics::CellMetrics::measure(
+            &mut fs,
+            &fam,
+            14.0,
+            1.0,
+            crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+        );
+        let mut swash = glyphon::SwashCache::new();
+        let mut cache = RunShapeCache::new();
+        let (id_a, glyphs_a, _) =
+            cache.shape(&mut fs, &mut swash, &m, 0, &fam, "=>", false, false, false);
+        let (id_b, glyphs_b, _) =
+            cache.shape(&mut fs, &mut swash, &m, 0, &fam, "=>", false, false, false);
+        assert_eq!(id_a, id_b, "el mismo texto/estilo debe reusar el run_id");
+        assert_eq!(glyphs_a, glyphs_b);
+
+        let (id_c, ..) = cache.shape(&mut fs, &mut swash, &m, 0, &fam, "->", false, false, false);
+        assert_ne!(
+            id_c, id_a,
+            "texto distinto debe producir un run_id distinto"
+        );
+    }
+
+    #[test]
+    fn run_shape_cache_no_recicla_run_id_al_vaciar_por_tope() {
+        let mut cache = RunShapeCache::new();
+        // Llenar hasta el tope con entradas sinteticas: evita miles de shapings
+        // reales solo para forzar el vaciado por limite de memoria.
+        for i in 0..MAX_RUN_CACHE_ENTRIES {
+            let key = RunShapeKey {
+                family: 0,
+                bold: false,
+                italic: false,
+                dim: false,
+                text: format!("t{i}"),
+            };
+            cache
+                .runs
+                .insert(key, (cache.next_run_id, Vec::new(), Vec::new()));
+            cache.next_run_id += 1;
+        }
+        let next_id_before_evict = cache.next_run_id;
+        assert_eq!(cache.runs.len(), MAX_RUN_CACHE_ENTRIES);
+
+        let mut fs = crate::renderer::terminal_fallback::create_font_system();
+        let fam = crate::config::FontConfig::default().family;
+        let m = crate::renderer::metrics::CellMetrics::measure(
+            &mut fs,
+            &fam,
+            14.0,
+            1.0,
+            crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+        );
+        let mut swash = glyphon::SwashCache::new();
+        let (id, ..) = cache.shape(&mut fs, &mut swash, &m, 0, &fam, "=>", false, false, false);
+
+        assert!(
+            cache.runs.len() <= 1,
+            "el vaciado por tope debe limpiar las entradas viejas"
+        );
+        assert!(
+            id >= next_id_before_evict,
+            "el run_id nunca debe reciclarse tras vaciar por tope (evita colisiones en GlyphCache)"
+        );
+    }
+
+    #[test]
     fn shape_run_clusters_cubren_todo_el_patron() {
         let mut fs = crate::renderer::terminal_fallback::create_font_system();
         let fam = crate::config::FontConfig::default().family;
@@ -377,6 +608,7 @@ mod tests {
             .next()
             .expect("glifo");
         let mut strings = crate::renderer::GlyphStrings::new();
+        let mut line_y_cache = crate::renderer::glyph::LineYCache::new();
         let cell_g = crate::renderer::glyph::shape_glyph(
             &mut fs,
             &m,
@@ -386,10 +618,12 @@ mod tests {
                 bold: false,
                 italic: false,
                 dim: false,
+                lig_slot: None,
                 family: strings.intern_family(&fam),
             },
             &fam,
             "",
+            &mut line_y_cache,
         );
         let run_anchor = run_g.line_y + run_g.top;
         let cell_anchor = cell_g.line_y + cell_g.top;
@@ -469,6 +703,7 @@ mod tests {
         );
         let mut swash = glyphon::SwashCache::new();
         let mut strings = crate::renderer::GlyphStrings::new();
+        let mut line_y_cache = crate::renderer::glyph::LineYCache::new();
         let cell = crate::renderer::glyph::shape_glyph(
             &mut fs,
             &m,
@@ -478,10 +713,12 @@ mod tests {
                 bold: false,
                 italic: false,
                 dim: false,
+                lig_slot: None,
                 family: strings.intern_family("Fira Code"),
             },
             "Fira Code",
             "",
+            &mut line_y_cache,
         );
         let run_g = super::shape_run(&mut fs, &m, "Fira Code", "==", false, false, false);
         assert!(
@@ -520,8 +757,9 @@ mod tests {
         let mut swash = glyphon::SwashCache::new();
         let mut cache = crate::renderer::glyph_cache::GlyphCache::new();
         let mut strings = crate::renderer::GlyphStrings::new();
+        let family_id = strings.intern_family("Fira Code");
 
-        for pattern in ["==", "===", ".."] {
+        for (run_id, pattern) in ["==", "===", ".."].into_iter().enumerate() {
             let glyphs = super::shape_run(&mut fs, &m, "Fira Code", pattern, false, false, false);
             let visible: Vec<_> = glyphs
                 .iter()
@@ -535,12 +773,13 @@ mod tests {
                 let shaped = super::run_glyph_to_shaped(g);
                 let gi = g.col_in_run;
                 let key = crate::renderer::glyph::GlyphKey {
-                    ch: pattern.chars().nth(g.col_in_run).unwrap_or(' '),
+                    ch: g.ch,
                     extra: 0,
                     bold: false,
                     italic: false,
                     dim: false,
-                    family: strings.intern_family(&format!("Fira Code#lig:{pattern}:{gi}")),
+                    family: family_id,
+                    lig_slot: Some((run_id as u32, gi as u16)),
                 };
                 let id = cache.get_or_insert_shaped(&mut fs, &mut swash, &m, key, &shaped);
                 let cached = cache.get_by_custom_id(id).expect("glifo cacheado");
@@ -640,6 +879,7 @@ mod ligature_probe {
             return false;
         };
         let mut strings = crate::renderer::GlyphStrings::new();
+        let mut line_y_cache = crate::renderer::glyph::LineYCache::new();
         let per_char_ids: Vec<u16> = pattern
             .chars()
             .map(|ch| {
@@ -652,10 +892,12 @@ mod ligature_probe {
                         bold: false,
                         italic: false,
                         dim: false,
+                        lig_slot: None,
                         family: strings.intern_family(family),
                     },
                     family,
                     "",
+                    &mut line_y_cache,
                 )
                 .cache_key
                 .glyph_id

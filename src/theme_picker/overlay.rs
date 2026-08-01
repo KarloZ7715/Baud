@@ -176,6 +176,7 @@ pub fn build_sample_custom_glyphs(
     };
 
     let mut list = DisplayList::default();
+    let mut run_shape_cache = crate::renderer::RunShapeCache::new();
     DisplayListBuilder::build(
         &mut list,
         &term,
@@ -195,6 +196,7 @@ pub fn build_sample_custom_glyphs(
         &mut None,
         contrast_cache,
         glyph_strings,
+        &mut run_shape_cache,
     );
 
     let mut glyphs = Vec::new();
