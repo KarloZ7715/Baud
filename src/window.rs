@@ -148,6 +148,8 @@ fn clamp_font_size(current: u16, dir: i8) -> u16 {
 const GUI_METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 /// Ventana para doble/triple clic y retardo de copy-on-select.
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(200);
+/// Cadencia del sondeo de proceso en primer plano para el titulo de tabs.
+const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 struct GuiRedrawMetrics {
     redraws: u64,
@@ -315,6 +317,9 @@ pub struct App {
     title_bar_drag_last_click: Option<Instant>,
     /// Marca de tiempo para interpolar el fade del ×.
     tab_anim_last: Instant,
+    /// Ultimo sondeo del proceso en primer plano de las tabs (cadencia de
+    /// `PROCESS_POLL_INTERVAL`). `None` fuerza un sondeo en el primer tick.
+    last_process_poll: Option<Instant>,
     /// Reintenta sync de grids cuando un pane estaba bloqueado por el drain.
     pending_pane_sync: bool,
     /// Feedback de carga de config pendiente hasta que exista renderer.
@@ -518,6 +523,7 @@ impl App {
             title_bar_hover: None,
             title_bar_drag_last_click: None,
             tab_anim_last: Instant::now(),
+            last_process_poll: None,
             pending_pane_sync: false,
             pending_config_source: Some(config_source),
             watchdog,
@@ -1149,21 +1155,20 @@ impl App {
         renderer: &Renderer,
         title_bar: Option<&TitleBarLayout>,
     ) -> Option<TabBarLayout> {
-        let has_custom_chrome = self.config.window.decorations.kind() == DecorationsKind::Custom;
-        if (self.tabs.len() <= 1 && !has_custom_chrome)
-            || (has_custom_chrome && self.is_fullscreen())
-        {
+        if !self.tab_bar_visible() {
             return None;
         }
+        let has_custom_chrome = self.config.window.decorations.kind() == DecorationsKind::Custom;
         let (titles, activities): (Vec<String>, Vec<bool>) =
             if self.tabs.len() == 1 && has_custom_chrome {
                 let s = self.focused_session();
                 let cwd = s.term.try_lock().ok().and_then(|t| t.cwd.clone());
+                let process = s.foreground_cache.as_ref().map(|(_, n)| n.as_str());
                 (
                     vec![crate::renderer::resolve_tab_title(
                         &s.title,
                         cwd.as_deref(),
-                        None,
+                        process,
                     )],
                     vec![false],
                 )
@@ -1174,10 +1179,11 @@ impl App {
                     if let Some(idx) = self.session_by_id(tab.focused()) {
                         let s = &self.sessions[idx].session;
                         let cwd = s.term.try_lock().ok().and_then(|t| t.cwd.clone());
+                        let process = s.foreground_cache.as_ref().map(|(_, n)| n.as_str());
                         titles.push(crate::renderer::resolve_tab_title(
                             &s.title,
                             cwd.as_deref(),
-                            None,
+                            process,
                         ));
                         activities.push(s.has_activity);
                     }
@@ -1237,6 +1243,52 @@ impl App {
             self.tab_close_tab = None;
         }
         (self.tab_close_alpha - prev).abs() > 0.005
+    }
+
+    /// `true` si la barra de tabs/titulo se dibuja en el estado actual
+    /// (misma condicion que `tab_bar_layout`, sin construir el layout).
+    fn tab_bar_visible(&self) -> bool {
+        let has_custom_chrome = self.config.window.decorations.kind() == DecorationsKind::Custom;
+        !((self.tabs.len() <= 1 && !has_custom_chrome)
+            || (has_custom_chrome && self.is_fullscreen()))
+    }
+
+    /// Sondea el proceso en primer plano de las sesiones visibles en la
+    /// barra, como mucho cada `PROCESS_POLL_INTERVAL`. Vive en el tick del
+    /// bucle de eventos, nunca en el camino de render (plan 011, verificacion
+    /// 9). Devuelve si algun titulo cambio y, si la barra esta visible, el
+    /// proximo instante en que hay que volver a sondear.
+    fn tick_foreground_process_poll(&mut self) -> (bool, Option<Instant>) {
+        if !self.tab_bar_visible() {
+            return (false, None);
+        }
+        let now = Instant::now();
+        if let Some(last) = self.last_process_poll {
+            let deadline = last + PROCESS_POLL_INTERVAL;
+            if now < deadline {
+                return (false, Some(deadline));
+            }
+        }
+        self.last_process_poll = Some(now);
+
+        let indices: Vec<usize> = if self.tabs.len() == 1 {
+            self.session_by_id(self.tabs[0].focused())
+                .into_iter()
+                .collect()
+        } else {
+            self.tabs
+                .iter()
+                .filter_map(|tab| self.session_by_id(tab.focused()))
+                .collect()
+        };
+        let mut changed = false;
+        for idx in indices {
+            let session = &mut self.sessions[idx].session;
+            if let Some(probe) = &session.foreground_probe {
+                changed |= crate::pty::foreground::poll(probe, &mut session.foreground_cache);
+            }
+        }
+        (changed, Some(now + PROCESS_POLL_INTERVAL))
     }
 
     fn update_tab_hover(&mut self, x: f64, y: f64) -> bool {
@@ -3076,6 +3128,15 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // Despertar al expirar el status para ocultarlo sin esperar input.
         let mut wake_at: Option<Instant> = None;
+        let (process_titles_changed, process_poll_wake) = self.tick_foreground_process_poll();
+        if process_titles_changed {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+        if let Some(deadline) = process_poll_wake {
+            wake_at = Some(deadline);
+        }
         if let Some(deadline) = self.renderer.as_ref().and_then(|r| r.status_expiry()) {
             let now = Instant::now();
             if now >= deadline {
@@ -4977,6 +5038,8 @@ mod tests {
             hold: false,
             close_on_exit: false,
             has_activity: false,
+            foreground_probe: None,
+            foreground_cache: None,
             input_reset_pending: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -4996,6 +5059,94 @@ mod tests {
             None,
         )
     }
+
+    #[test]
+    fn tab_bar_visible_falso_con_una_tab_y_decoraciones_de_sistema() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let app = test_app(term);
+        assert!(!app.tab_bar_visible());
+    }
+
+    #[test]
+    fn tab_bar_visible_verdadero_con_varias_tabs() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term.clone());
+        let second = test_session(term);
+        let second_id = second.id;
+        app.sessions.push(SessionHost::test(second));
+        app.tabs.push(TabLayout::new(second_id));
+        assert!(app.tab_bar_visible());
+    }
+
+    #[test]
+    fn tick_foreground_process_poll_no_hace_nada_con_la_barra_oculta() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term);
+        let (changed, wake) = app.tick_foreground_process_poll();
+        assert!(!changed);
+        assert!(wake.is_none());
+    }
+
+    #[test]
+    fn tick_foreground_process_poll_respeta_la_cadencia() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term.clone());
+        let second = test_session(term);
+        let second_id = second.id;
+        app.sessions.push(SessionHost::test(second));
+        app.tabs.push(TabLayout::new(second_id));
+
+        let (_, first_wake) = app.tick_foreground_process_poll();
+        assert!(
+            first_wake.is_some(),
+            "la barra esta visible, debe programar el proximo sondeo"
+        );
+
+        let (changed_again, second_wake) = app.tick_foreground_process_poll();
+        assert!(
+            !changed_again,
+            "no debe volver a sondear antes de PROCESS_POLL_INTERVAL"
+        );
+        assert_eq!(first_wake, second_wake);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tick_foreground_process_poll_actualiza_el_cache_de_la_sesion() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term.clone());
+        let mut second = test_session(term);
+        let second_id = second.id;
+        let master = crate::pty::spawn("sleep", &["2"]).expect("spawn");
+        second.foreground_probe = crate::pty::foreground::make_probe(&master).ok();
+        app.sessions.push(SessionHost::test(second));
+        app.tabs.push(TabLayout::new(second_id));
+
+        let mut resolved = false;
+        for _ in 0..50 {
+            let (changed, _) = app.tick_foreground_process_poll();
+            if changed {
+                resolved = true;
+                break;
+            }
+            app.last_process_poll = None; // fuerza el siguiente sondeo sin esperar 500ms reales
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            resolved,
+            "tick_foreground_process_poll nunca reporto el proceso"
+        );
+        let idx = app.session_by_id(second_id).unwrap();
+        assert_eq!(
+            app.sessions[idx]
+                .session
+                .foreground_cache
+                .as_ref()
+                .map(|(_, n)| n.as_str()),
+            Some("sleep")
+        );
+    }
+
     #[test]
     fn system_color_scheme_conmuta_tema_en_modo_auto() {
         use crate::config::ColorScheme;

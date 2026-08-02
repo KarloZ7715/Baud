@@ -30,6 +30,12 @@ pub struct Session {
     pub close_on_exit: bool,
     /// Salida del PTY mientras la sesion no estaba enfocada (punto de actividad).
     pub has_activity: bool,
+    /// Fd/handle duplicado del master, usado para sondear el proceso en
+    /// primer plano desde el hilo de la GUI. `None` si no se pudo duplicar.
+    pub foreground_probe: Option<crate::pty::foreground::Probe>,
+    /// Ultimo (pgid, nombre) del proceso en primer plano resuelto por
+    /// `crate::pty::foreground::poll`.
+    pub foreground_cache: Option<(i32, String)>,
     /// Reset de vista pendiente tras input del usuario (ver
     /// `Term::apply_input_reset`). Lo activa `send_input` y lo consumen el
     /// hilo de drain o la GUI, segun quien consiga el lock del term.

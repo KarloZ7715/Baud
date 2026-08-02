@@ -1,6 +1,7 @@
 pub mod channel;
 pub mod config;
 pub mod contract;
+pub mod foreground;
 pub mod wsl;
 
 #[cfg(unix)]
