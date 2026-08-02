@@ -3265,6 +3265,20 @@ impl ApplicationHandler<UserEvent> for App {
             "startup: surface config lista en {}ms",
             t_surface_cfg.elapsed().as_millis()
         );
+        // El formato de surface decide todo el pipeline de color del frame;
+        // se registra con las capacidades crudas para diagnosticar diferencias
+        // entre servidores graficos (Wayland vs X11) y drivers.
+        let adapter_info = adapter.get_info();
+        tracing::info!(
+            "wgpu: surface formato={:?} alpha_mode={:?} present_mode={:?} \
+             backend={:?} adaptador={:?} formatos_soportados={:?}",
+            config.format,
+            config.alpha_mode,
+            config.present_mode,
+            adapter_info.backend,
+            adapter_info.name,
+            surface.get_capabilities(&adapter).formats,
+        );
 
         // Pintar el fondo del tema y presentar ya: la ventana no queda vacia
         // mientras el hilo de fuentes sigue escaneando en segundo plano.
