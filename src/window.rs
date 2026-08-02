@@ -2128,6 +2128,10 @@ impl App {
             guard.apply_input_reset();
             session.input_reset_pending.store(false, Ordering::Release);
         }
+        // Marca que el proximo output de esta sesion lleva el eco de una
+        // tecla: el drain lo usara para avisar sin esperar al intervalo de
+        // max_fps.
+        session.echo_pending.store(true, Ordering::Release);
         tracing::debug!("send_input: {} bytes: {:02x?}", bytes.len(), bytes);
         let _ = session.pty_tx.send(PtyCommand::Input(bytes));
     }
@@ -5275,6 +5279,7 @@ mod tests {
             foreground_probe: None,
             foreground_cache: None,
             input_reset_pending: Arc::new(AtomicBool::new(false)),
+            echo_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 

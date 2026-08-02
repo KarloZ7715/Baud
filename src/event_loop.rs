@@ -124,6 +124,21 @@ pub(crate) fn should_redraw(last: Instant, now: Instant, interval_nanos: u64) ->
     now.duration_since(last).as_nanos() >= interval_nanos as u128
 }
 
+/// Como `should_redraw`, pero un eco de teclado pendiente salta el throttle.
+///
+/// El intervalo de `max_fps` existe para que una rafaga de salida no genere un
+/// frame por chunk. Aplicarlo al eco de una tecla solo añade hasta un frame de
+/// espera a un caracter que ya esta en el grid, y una pulsacion humana no llega
+/// a 10 eventos por segundo, asi que no puede saturar nada.
+pub(crate) fn should_redraw_with_echo(
+    last: Instant,
+    now: Instant,
+    interval_nanos: u64,
+    echo_pending: bool,
+) -> bool {
+    echo_pending || should_redraw(last, now, interval_nanos)
+}
+
 struct DrainMetrics {
     redraws: u64,
     bytes: u64,
@@ -435,6 +450,8 @@ pub fn spawn_session(
     let proxy_for_drain = proxy.clone();
     let input_reset_pending = Arc::new(AtomicBool::new(false));
     let input_reset_drain = Arc::clone(&input_reset_pending);
+    let echo_pending = Arc::new(AtomicBool::new(false));
+    let echo_drain = Arc::clone(&echo_pending);
 
     let drain_handle = thread::spawn(move || {
         let mut parser = vte::Parser::new();
@@ -542,7 +559,10 @@ pub fn spawn_session(
             send_title_and_clipboard(&proxy_for_drain, session_id, title, clipboard_pending);
 
             let interval_nanos = redraw_interval_nanos.load(Ordering::Relaxed);
-            if should_redraw(last_redraw, Instant::now(), interval_nanos) {
+            // El eco se consume aqui, ya con el grid actualizado bajo el lock
+            // que se acaba de soltar: este aviso es el que lleva el caracter.
+            let echo = echo_drain.swap(false, Ordering::AcqRel);
+            if should_redraw_with_echo(last_redraw, Instant::now(), interval_nanos, echo) {
                 send_redraw(&proxy_for_drain, session_id);
                 metrics.record_redraw();
                 last_redraw = Instant::now();
@@ -595,6 +615,7 @@ pub fn spawn_session(
         foreground_probe,
         foreground_cache: None,
         input_reset_pending,
+        echo_pending,
     };
 
     Ok(SpawnedSession {
@@ -868,6 +889,28 @@ mod tests {
         assert!(should_redraw(t0, t0 + Duration::from_millis(20), fps60));
         assert!(should_redraw(t0, t0 + Duration::from_millis(9), fps120));
         assert!(should_redraw(t0, t0 + Duration::from_millis(1), 0));
+    }
+
+    #[test]
+    fn eco_pendiente_fuerza_redraw_fuera_del_throttle() {
+        let t0 = Instant::now();
+        let fps60 = Duration::from_secs_f64(1.0 / 60.0).as_nanos() as u64;
+        let just_now = t0 + Duration::from_millis(1);
+
+        // Sin eco pendiente, 1ms despues del ultimo redraw el throttle manda.
+        assert!(!should_redraw_with_echo(t0, just_now, fps60, false));
+
+        // Con eco pendiente, el frame sale ya: la tecla no espera al siguiente
+        // intervalo de max_fps.
+        assert!(should_redraw_with_echo(t0, just_now, fps60, true));
+
+        // El throttle sigue vigente para todo lo demas.
+        assert!(should_redraw_with_echo(
+            t0,
+            t0 + Duration::from_millis(20),
+            fps60,
+            false
+        ));
     }
 
     #[cfg(unix)]

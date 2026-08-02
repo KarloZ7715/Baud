@@ -40,6 +40,10 @@ pub struct Session {
     /// `Term::apply_input_reset`). Lo activa `send_input` y lo consumen el
     /// hilo de drain o la GUI, segun quien consiga el lock del term.
     pub input_reset_pending: Arc<AtomicBool>,
+    /// Puesta a `true` por la GUI en cada `send_input`; el hilo drain la
+    /// consume con `swap(false)` para sacar ese redraw del throttle de
+    /// `max_fps`. Mismo patron que `input_reset_pending`.
+    pub echo_pending: Arc<AtomicBool>,
 }
 
 #[cfg(test)]
