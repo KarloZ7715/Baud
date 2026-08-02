@@ -23,10 +23,10 @@ pub use decorations::SOLID_MASK_GLYPH_ID;
 pub use palette::{ColorOverrides, Palette};
 pub use tab_bar::{
     build_inactive_hover_chrome, build_segment_chrome, build_tab_track, compute_layout,
-    format_tab_label, push_close_scrub, segment_close_left_px, segment_title_label,
-    shorten_tab_title, tab_bar_inner_width, tab_chrome_reserve_px, tab_close_at, tab_index_at,
-    TabBarLayout, TabBarMouseState, TabSegment, TAB_CLOSE_WIDTH_CELLS, TAB_CONTENT_GAP_PX,
-    TAB_LABEL_PAD_CELLS,
+    format_tab_label, push_close_scrub, resolve_tab_title, segment_close_left_px,
+    segment_title_label, shorten_tab_title, tab_bar_inner_width, tab_chrome_reserve_px,
+    tab_close_at, tab_index_at, TabBarLayout, TabBarMouseState, TabSegment, TAB_CLOSE_WIDTH_CELLS,
+    TAB_CONTENT_GAP_PX, TAB_LABEL_PAD_CELLS,
 };
 pub(crate) use terminal_fallback::create_font_system_with_fallback;
 pub use title_bar::{

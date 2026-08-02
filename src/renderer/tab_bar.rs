@@ -103,6 +103,59 @@ fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
+/// Basename del cwd con `~` para `$HOME` (fuente OSC 7).
+pub fn cwd_basename(cwd: &str) -> Option<String> {
+    if let Some(home) = std::env::var_os("HOME").and_then(|h| h.into_string().ok()) {
+        if cwd == home {
+            return Some("~".to_string());
+        }
+    }
+    let name = std::path::Path::new(cwd)
+        .file_name()?
+        .to_string_lossy()
+        .to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// `true` si el nombre corresponde a un shell (no se muestra como titulo).
+fn is_shell(name: &str) -> bool {
+    matches!(
+        name,
+        "zsh" | "bash" | "fish" | "sh" | "dash" | "nu" | "pwsh" | "cmd"
+    )
+}
+
+/// Cadena de resolucion del titulo de una tab, en orden de prioridad:
+///
+/// * proceso en primer plano (si no es el shell)
+/// * basename del cwd (OSC 7) con `~` para `$HOME`
+/// * titulo OSC 0/2 acortado
+///
+/// Devuelve vacio si ninguna fuente aporta; el layout cae al indice.
+pub fn resolve_tab_title(title: &str, cwd: Option<&str>, process: Option<&str>) -> String {
+    if let Some(proc_name) = process {
+        let base = proc_name.rsplit('/').next().unwrap_or(proc_name);
+        if !base.is_empty() && !is_shell(base) {
+            return base.to_string();
+        }
+    }
+    if let Some(cwd) = cwd {
+        if let Some(name) = cwd_basename(cwd) {
+            return name;
+        }
+    }
+    let short = shorten_tab_title(title);
+    if !short.is_empty() {
+        short
+    } else {
+        String::new()
+    }
+}
+
 /// Trunca por el final.
 pub fn truncate_end(text: &str, width: usize) -> String {
     if width == 0 {
@@ -579,6 +632,45 @@ pub fn build_segment_chrome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cwd_basename_extrae_ultimo_segmento() {
+        assert_eq!(cwd_basename("/foo/bar/baz").as_deref(), Some("baz"));
+        assert_eq!(cwd_basename("/foo").as_deref(), Some("foo"));
+        assert_eq!(cwd_basename("/").as_deref(), None);
+    }
+
+    #[test]
+    fn resolve_tab_title_prefiere_cwd_sobre_osc() {
+        assert_eq!(
+            resolve_tab_title("user@host ~/x", Some("/home/u/Dev/baud"), None),
+            "baud"
+        );
+    }
+
+    #[test]
+    fn resolve_tab_title_cae_a_osc_sin_cwd() {
+        assert_eq!(
+            resolve_tab_title("carloscc@cachy ~/Documentos/Dev/baud", None, None),
+            "baud"
+        );
+    }
+
+    #[test]
+    fn resolve_tab_title_proceso_no_shell_gana() {
+        assert_eq!(
+            resolve_tab_title("x", Some("/home/u/Dev/baud"), Some("/usr/bin/nvim")),
+            "nvim"
+        );
+    }
+
+    #[test]
+    fn resolve_tab_title_proceso_shell_cae_a_cwd() {
+        assert_eq!(
+            resolve_tab_title("x", Some("/home/u/Dev/baud"), Some("/bin/bash")),
+            "baud"
+        );
+    }
 
     #[test]
     fn shorten_extrae_basename_de_ruta() {

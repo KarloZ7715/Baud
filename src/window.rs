@@ -1154,17 +1154,23 @@ impl App {
             return None;
         }
         let titles: Vec<String> = if self.tabs.len() == 1 && has_custom_chrome {
-            vec![crate::renderer::shorten_tab_title(
-                &self.focused_session().title,
+            let s = self.focused_session();
+            let cwd = s.term.try_lock().ok().and_then(|t| t.cwd.clone());
+            vec![crate::renderer::resolve_tab_title(
+                &s.title,
+                cwd.as_deref(),
+                None,
             )]
         } else {
             self.tabs
                 .iter()
                 .filter_map(|tab| {
-                    self.session_by_id(tab.focused())
-                        .map(|idx| self.sessions[idx].session.title.clone())
+                    self.session_by_id(tab.focused()).map(|idx| {
+                        let s = &self.sessions[idx].session;
+                        let cwd = s.term.try_lock().ok().and_then(|t| t.cwd.clone());
+                        crate::renderer::resolve_tab_title(&s.title, cwd.as_deref(), None)
+                    })
                 })
-                .map(|t| crate::renderer::shorten_tab_title(&t))
                 .collect()
         };
         let (pad_x, _) = renderer.content_padding();
