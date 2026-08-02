@@ -693,8 +693,12 @@ impl App {
                             self.sessions[i].session.dirty = true;
                         }
                     } else {
+                        // El dirty se limpia en `settle_frame_result`, cuando el
+                        // frame ya se presento. Limpiarlo aqui lo perdia si el
+                        // frame acababa saltandose (ventana ocluida, fallo de
+                        // adquisicion) o sirviendose desde cache.
                         if let Some(i) = idx {
-                            self.sessions[i].session.dirty = false;
+                            self.sessions[i].session.dirty = true;
                         }
                         if let Some(window) = &self.window {
                             window.request_redraw();
@@ -5596,7 +5600,7 @@ import = false
     }
 
     #[test]
-    fn redraw_needed_tras_esu_limpia_dirty() {
+    fn redraw_needed_tras_esu_conserva_dirty() {
         let term = Arc::new(Mutex::new(Term::new()));
         {
             let mut guard = term.lock().expect("term mutex");
@@ -5609,8 +5613,8 @@ import = false
         app.sessions[0].session.dirty = true;
         app.dispatch_user_event(UserEvent::RedrawNeeded(id));
         assert!(
-            !app.sessions[0].session.dirty,
-            "tras ESU el redraw final debe limpiar dirty"
+            app.sessions[0].session.dirty,
+            "tras ESU se pide el redraw final, pero el dirty se limpia al presentar"
         );
     }
 
@@ -5631,19 +5635,39 @@ import = false
         app.sessions[0].session.dirty = true;
         app.dispatch_user_event(UserEvent::RedrawNeeded(id));
         assert!(
-            !app.sessions[0].session.dirty,
-            "tras timeout el modo sigue activo pero ya no se difiere"
+            app.sessions[0].session.dirty,
+            "tras timeout el modo sigue activo pero ya no se difiere: dirty \
+             sobrevive hasta presentar"
         );
     }
 
     #[test]
-    fn redraw_needed_enfocada_limpia_dirty_sin_sync() {
+    fn redraw_needed_enfocada_conserva_dirty_hasta_presentar() {
         let term = Arc::new(Mutex::new(Term::new()));
         let mut app = test_app(term);
         let id = app.sessions[0].session.id;
         app.sessions[0].session.dirty = true;
         app.dispatch_user_event(UserEvent::RedrawNeeded(id));
-        assert!(!app.sessions[0].session.dirty);
+        assert!(
+            app.sessions[0].session.dirty,
+            "pedir el redraw no es haberlo pintado: el dirty se limpia en \
+             settle_frame_result, cuando el frame ya se presento"
+        );
+    }
+
+    #[test]
+    fn redraw_needed_no_limpia_dirty_antes_de_pintar() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term);
+        let id = app.sessions[0].session.id;
+
+        app.dispatch_user_event(UserEvent::RedrawNeeded(id));
+
+        assert!(
+            app.sessions[0].session.dirty,
+            "pedir el redraw no es haberlo pintado: el dirty se limpia en \
+             settle_frame_result, cuando el frame ya se presento"
+        );
     }
 
     #[test]
