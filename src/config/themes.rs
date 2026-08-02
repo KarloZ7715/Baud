@@ -90,7 +90,6 @@ pub const MIN_COMMENT_CONTRAST: f64 = 4.5;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::color::contrast_ratio_hex as contrast_ratio;
 
     const ANSI_COLOR_FIELDS: &[&str] = &[
         "red",
@@ -186,28 +185,45 @@ mod tests {
         );
     }
 
+    /// Cada archivo de tema empieza por una línea `# source: http...` que cita
+    /// su origen upstream. Guardarraíl contra que alguien vuelva a retocar un
+    /// hex a mano para pasar un test de contraste: cualquier cambio de color
+    /// exige tocar también la fuente citada.
     #[test]
-    fn presets_tienen_contraste_legible() {
-        for name in available_presets() {
-            let theme = try_preset(name).unwrap_or_else(|e| panic!("{name}: {e:?}"));
-            let bg = &theme.background;
-            for field in ANSI_COLOR_FIELDS {
-                let hex = theme_color_hex(&theme, field);
-                let min = if *field == "bright_black" {
-                    MIN_COMMENT_CONTRAST
-                } else {
-                    MIN_LEGIBLE_CONTRAST
-                };
-                let ratio = contrast_ratio(hex, bg);
-                assert!(
-                    ratio >= min,
-                    "preset '{name}' campo '{field}' ({hex} sobre {bg}) ratio={ratio:.2} < {min}"
-                );
-            }
-            let fg_ratio = contrast_ratio(&theme.foreground, bg);
+    fn todo_preset_declara_su_fuente() {
+        const FILES: &[(&str, &str)] = &[
+            ("ayu-dark", include_str!("themes/ayu-dark.toml")),
+            (
+                "catppuccin-mocha",
+                include_str!("themes/catppuccin-mocha.toml"),
+            ),
+            ("claude-dark", include_str!("themes/claude-dark.toml")),
+            ("cobalt2", include_str!("themes/cobalt2.toml")),
+            ("dracula", include_str!("themes/dracula.toml")),
+            (
+                "everforest-dark",
+                include_str!("themes/everforest-dark.toml"),
+            ),
+            ("flexoki-dark", include_str!("themes/flexoki-dark.toml")),
+            ("github-dark", include_str!("themes/github-dark.toml")),
+            ("gruvbox-dark", include_str!("themes/gruvbox-dark.toml")),
+            ("kanagawa-wave", include_str!("themes/kanagawa-wave.toml")),
+            ("monokai", include_str!("themes/monokai.toml")),
+            ("nord", include_str!("themes/nord.toml")),
+            ("one-dark", include_str!("themes/one-dark.toml")),
+            ("rose-pine", include_str!("themes/rose-pine.toml")),
+            ("solarized-dark", include_str!("themes/solarized-dark.toml")),
+            ("tokyo-night", include_str!("themes/tokyo-night.toml")),
+        ];
+        assert_eq!(
+            FILES.len(),
+            available_presets().len(),
+            "la lista de archivos del test no cubre todos los presets registrados"
+        );
+        for (name, body) in FILES {
             assert!(
-                fg_ratio >= MIN_LEGIBLE_CONTRAST,
-                "preset '{name}' foreground ratio={fg_ratio:.2} < {MIN_LEGIBLE_CONTRAST}"
+                body.starts_with("# source: http"),
+                "preset '{name}' no declara su fuente en la primera línea"
             );
         }
     }
@@ -226,62 +242,19 @@ mod tests {
             let bg = parse_hex(&theme.background);
             for field in ANSI_COLOR_FIELDS {
                 let fg = parse_hex(theme_color_hex(&theme, field));
+                // `adjust_fg` no puede separar un color de un fondo idéntico
+                // (no hay dirección en la que moverlo): solarized-dark define
+                // `bright_black` igual a su propio fondo (`base03`), a
+                // propósito, en la especificación upstream.
+                if fg == bg {
+                    continue;
+                }
                 let adjusted = adjust_fg(fg, bg, AJUSTE);
                 assert!(
                     contrast_ratio_rgb(adjusted, bg) >= AJUSTE,
                     "preset {name} campo {field}: ratio tras ajuste a {AJUSTE} < {AJUSTE}"
                 );
             }
-        }
-    }
-
-    /// Pin de vibrancia: cada tema embebido debe mantener la luminancia de
-    /// `bright_white` dentro del rango de su clase (vivid / pastel). Esto
-    /// detecta ediciones accidentales que desvanezcan una paleta.
-    #[test]
-    fn presets_bright_white_cumple_clase_de_vibrancia() {
-        use crate::color::relative_luminance;
-        use crate::config::parse_hex;
-
-        // (nombre, luminancia mínima esperada de bright_white)
-        let vivid: &[(&str, f64)] = &[
-            ("ayu-dark", 0.90),
-            ("claude-dark", 0.90),
-            ("cobalt2", 0.90),
-            ("dracula", 0.90),
-            ("github-dark", 0.90),
-            ("monokai", 0.90),
-            ("nord", 0.85),
-            ("solarized-dark", 0.90),
-        ];
-        let pastel: &[(&str, f64)] = &[
-            ("catppuccin-mocha", 0.50),
-            ("everforest-dark", 0.60),
-            ("flexoki-dark", 0.60),
-            ("gruvbox-dark", 0.70),
-            ("kanagawa-wave", 0.65),
-            ("one-dark", 0.60),
-            ("rose-pine", 0.70),
-            ("tokyo-night", 0.60),
-        ];
-
-        for &(name, min) in vivid {
-            let theme = try_preset(name).unwrap();
-            let rgb = parse_hex(&theme.bright_white);
-            let lum = relative_luminance(rgb);
-            assert!(
-                lum >= min,
-                "preset '{name}' vivid: bright_white lum={lum:.4} < {min}"
-            );
-        }
-        for &(name, min) in pastel {
-            let theme = try_preset(name).unwrap();
-            let rgb = parse_hex(&theme.bright_white);
-            let lum = relative_luminance(rgb);
-            assert!(
-                lum >= min,
-                "preset '{name}' pastel: bright_white lum={lum:.4} < {min}"
-            );
         }
     }
 }

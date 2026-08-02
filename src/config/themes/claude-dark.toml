@@ -1,3 +1,4 @@
+# source: https://github.com/KarloZ7715/Baud/commit/2cde243f8092254da896fd8b9fa0b22ac6bd526c (paleta original de Baud, sin puerto externo)
 foreground = "#ececec"
 background = "#0a0a0a"
 cursor = "#d97757"

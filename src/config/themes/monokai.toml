@@ -1,3 +1,4 @@
+# source: https://github.com/mbadolato/iTerm2-Color-Schemes/blob/master/windowsterminal/Monokai%20Classic.json
 foreground = "#fdfff1"
 background = "#272822"
 cursor = "#c0c1b5"
@@ -11,7 +12,7 @@ blue = "#fd971f"
 magenta = "#ae81ff"
 cyan = "#66d9ef"
 white = "#fdfff1"
-bright_black = "#8e8e8e"
+bright_black = "#6e7066"
 bright_red = "#f92672"
 bright_green = "#a6e22e"
 bright_yellow = "#e6db74"

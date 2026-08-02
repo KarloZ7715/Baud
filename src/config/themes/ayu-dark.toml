@@ -1,3 +1,4 @@
+# source: https://github.com/mbadolato/iTerm2-Color-Schemes/blob/master/windowsterminal/Ayu.json
 foreground = "#bfbdb6"
 background = "#0b0e14"
 cursor = "#e6b450"
@@ -11,7 +12,7 @@ blue = "#53bdfa"
 magenta = "#cda1fa"
 cyan = "#90e1c6"
 white = "#c7c7c7"
-bright_black = "#7a7a7a"
+bright_black = "#686868"
 bright_red = "#f07178"
 bright_green = "#aad94c"
 bright_yellow = "#ffb454"
