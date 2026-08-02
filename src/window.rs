@@ -355,6 +355,11 @@ pub struct App {
     drain_triggered_redraw: bool,
     /// Acumulador de muestras de latencia; emite p50/p95/p99 al llenarse.
     latency_probe: LatencyProbeStats,
+    /// True mientras el compositor reporta la ventana como no visible
+    /// (`WindowEvent::Occluded`). Pedir imagenes del swapchain en ese estado
+    /// bloquea el event loop hasta el timeout de wgpu sin que nadie vea el
+    /// resultado.
+    occluded: bool,
 }
 
 /// Recopila muestras de latencia (µs) y registra p50/p95/p99 cada N.
@@ -534,6 +539,7 @@ impl App {
             pending_echo: None,
             drain_triggered_redraw: false,
             latency_probe: LatencyProbeStats::new(),
+            occluded: false,
         }
     }
 
@@ -2822,6 +2828,26 @@ impl App {
         None
     }
 
+    /// Actualiza el estado de oclusión. Al volver a ser visible se pide un
+    /// redraw: mientras estuvo oculta se acumuló dirty sin pintar.
+    pub(crate) fn set_occluded(&mut self, hidden: bool) {
+        if self.occluded == hidden {
+            return;
+        }
+        self.occluded = hidden;
+        tracing::debug!("ventana {}", if hidden { "ocluida" } else { "visible" });
+        if !hidden {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    /// True si este frame no debe intentar adquirir imagen del swapchain.
+    pub(crate) fn should_skip_frame(&self) -> bool {
+        self.occluded
+    }
+
     fn pane_is_dirty(&self, id: SessionId) -> bool {
         let Some(idx) = self.session_by_id(id) else {
             return false;
@@ -3521,6 +3547,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // esperara 100ms, y morira. El Pty se dropea con SIGKILL safety net.
                 event_loop.exit();
             }
+            WindowEvent::Occluded(hidden) => {
+                self.set_occluded(hidden);
+            }
             WindowEvent::Focused(focused) => {
                 let Ok(guard) = self.focused_term().try_lock() else {
                     self.watchdog.note_term_lock_busy();
@@ -3661,6 +3690,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.update_ime_area();
             }
             WindowEvent::RedrawRequested => {
+                if self.should_skip_frame() {
+                    tracing::debug!("RedrawRequested: skip (ventana ocluida)");
+                    return;
+                }
                 if self.pending_pane_sync {
                     self.sync_after_tab_change();
                 }
@@ -5090,6 +5123,39 @@ import = false
         app.dispatch_user_event(UserEvent::RedrawNeeded(id_a));
         assert!(app.sessions[0].session.dirty);
         assert!(!app.sessions[1].session.dirty);
+    }
+
+    #[test]
+    fn ventana_ocluida_salta_el_frame_sin_perder_dirty() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term);
+
+        assert!(!app.should_skip_frame(), "visible: se pinta normalmente");
+
+        app.set_occluded(true);
+        assert!(
+            app.should_skip_frame(),
+            "ocluida: no se pide imagen al swapchain"
+        );
+
+        // Hay contenido pendiente de pintar mientras esta oculta. El skip del
+        // frame no debe tocarlo: al reaparecer hay que pintar lo acumulado, no
+        // un frame viejo.
+        app.sessions[0].session.dirty = true;
+        assert!(
+            app.sessions[0].session.dirty,
+            "ocluida: el dirty pendiente sobrevive al frame saltado"
+        );
+
+        app.set_occluded(false);
+        assert!(
+            !app.should_skip_frame(),
+            "visible de nuevo: se vuelve a pintar"
+        );
+        assert!(
+            app.sessions[0].session.dirty,
+            "el dirty acumulado sigue pendiente"
+        );
     }
 
     fn feed_term(term: &mut Term, data: &[u8]) {

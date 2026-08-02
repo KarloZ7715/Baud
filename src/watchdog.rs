@@ -297,6 +297,7 @@ pub fn window_event_phase(event: &winit::event::WindowEvent) -> &'static str {
         WindowEvent::ModifiersChanged(_) => "ModifiersChanged",
         WindowEvent::Ime(_) => "Ime",
         WindowEvent::Focused(_) => "Focused",
+        WindowEvent::Occluded(_) => "Occluded",
         WindowEvent::CloseRequested => "CloseRequested",
         WindowEvent::ScaleFactorChanged { .. } => "ScaleFactorChanged",
         _ => "WindowEvent",
