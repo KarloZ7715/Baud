@@ -150,6 +150,10 @@ const GUI_METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(200);
 /// Cadencia del sondeo de proceso en primer plano para el titulo de tabs.
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Tasa de decaimiento exponencial del fondo de hover de tab (~120 ms).
+const TAB_HOVER_FADE_RATE: f32 = 25.0;
+/// Tasa de decaimiento exponencial del fondo de hover de boton de ventana (~100 ms).
+const TITLE_BAR_HOVER_FADE_RATE: f32 = 30.0;
 
 struct GuiRedrawMetrics {
     redraws: u64,
@@ -307,12 +311,25 @@ pub struct App {
     detached_hosts: Vec<SessionHost>,
     /// Tab bajo el cursor en la barra (indice de sesion).
     tab_hover: Option<usize>,
+    /// Tab que dibuja el fondo de hover (persiste durante el fade-out, igual
+    /// que `tab_close_tab`).
+    tab_hover_display: Option<usize>,
+    /// Opacidad animada del fondo de hover de tab (0..1, ~120 ms).
+    tab_hover_alpha: f32,
+    /// Marca de tiempo para interpolar `tab_hover_alpha`.
+    tab_hover_anim_last: Instant,
     /// Tab que renderiza el boton × (incluye fade-out).
     tab_close_tab: Option<usize>,
     /// Opacidad animada del boton × (0..1).
     tab_close_alpha: f32,
     /// Botón de la barra de título bajo hover (solo modo custom).
     title_bar_hover: Option<TitleButtonKind>,
+    /// Boton que dibuja el fondo de hover (persiste durante el fade-out).
+    title_bar_hover_display: Option<TitleButtonKind>,
+    /// Opacidad animada del fondo de hover de boton (0..1, ~100 ms).
+    title_bar_hover_alpha: f32,
+    /// Marca de tiempo para interpolar `title_bar_hover_alpha`.
+    title_bar_hover_anim_last: Instant,
     /// Marca de tiempo del último clic en zona de arrastre de la barra.
     title_bar_drag_last_click: Option<Instant>,
     /// Marca de tiempo para interpolar el fade del ×.
@@ -518,9 +535,15 @@ impl App {
             pending_exit: false,
             detached_hosts: Vec::new(),
             tab_hover: None,
+            tab_hover_display: None,
+            tab_hover_alpha: 0.0,
+            tab_hover_anim_last: Instant::now(),
             tab_close_tab: None,
             tab_close_alpha: 0.0,
             title_bar_hover: None,
+            title_bar_hover_display: None,
+            title_bar_hover_alpha: 0.0,
+            title_bar_hover_anim_last: Instant::now(),
             title_bar_drag_last_click: None,
             tab_anim_last: Instant::now(),
             last_process_poll: None,
@@ -1210,7 +1233,8 @@ impl App {
         title_bar: Option<&TitleBarLayout>,
     ) -> Option<TabBarLayout> {
         let mut layout = self.tab_bar_layout(renderer, title_bar)?;
-        layout.mouse.hover_index = self.tab_hover;
+        layout.mouse.hover_index = self.tab_hover_display;
+        layout.mouse.hover_alpha = self.tab_hover_alpha;
         layout.mouse.close_tab = self.tab_close_tab;
         layout.mouse.close_alpha = self.tab_close_alpha;
         Some(layout)
@@ -1241,6 +1265,70 @@ impl App {
             self.tab_close_tab = None;
         }
         (self.tab_close_alpha - prev).abs() > 0.005
+    }
+
+    /// Anima el fondo de hover de una tab inactiva hacia 1.0 mientras
+    /// `tab_hover` apunte a una tab, y hacia 0.0 al salir (~120 ms). El
+    /// indice mostrado (`tab_hover_display`) persiste durante el fade-out,
+    /// igual que `tab_close_tab` para el boton ×.
+    fn tick_tab_hover_fade(&mut self) -> bool {
+        if self.tab_hover.is_some() {
+            self.tab_hover_display = self.tab_hover;
+        }
+        let target = if self.tab_hover.is_some() { 1.0 } else { 0.0 };
+        if (self.tab_hover_alpha - target).abs() < 0.005 {
+            if target == 0.0 && self.tab_hover_alpha != 0.0 {
+                self.tab_hover_alpha = 0.0;
+                self.tab_hover_display = None;
+                return true;
+            }
+            return false;
+        }
+        let dt = self.tab_hover_anim_last.elapsed().as_secs_f32().min(0.05);
+        self.tab_hover_anim_last = Instant::now();
+        let prev = self.tab_hover_alpha;
+        self.tab_hover_alpha +=
+            (target - self.tab_hover_alpha) * (TAB_HOVER_FADE_RATE * dt).min(1.0);
+        if target == 0.0 && self.tab_hover_alpha < 0.02 {
+            self.tab_hover_alpha = 0.0;
+            self.tab_hover_display = None;
+        }
+        (self.tab_hover_alpha - prev).abs() > 0.005
+    }
+
+    /// Anima el fondo de hover de un boton de ventana hacia 1.0 mientras
+    /// `title_bar_hover` apunte a un boton, y hacia 0.0 al salir (~100 ms).
+    fn tick_title_bar_hover_fade(&mut self) -> bool {
+        if self.title_bar_hover.is_some() {
+            self.title_bar_hover_display = self.title_bar_hover;
+        }
+        let target = if self.title_bar_hover.is_some() {
+            1.0
+        } else {
+            0.0
+        };
+        if (self.title_bar_hover_alpha - target).abs() < 0.005 {
+            if target == 0.0 && self.title_bar_hover_alpha != 0.0 {
+                self.title_bar_hover_alpha = 0.0;
+                self.title_bar_hover_display = None;
+                return true;
+            }
+            return false;
+        }
+        let dt = self
+            .title_bar_hover_anim_last
+            .elapsed()
+            .as_secs_f32()
+            .min(0.05);
+        self.title_bar_hover_anim_last = Instant::now();
+        let prev = self.title_bar_hover_alpha;
+        self.title_bar_hover_alpha +=
+            (target - self.title_bar_hover_alpha) * (TITLE_BAR_HOVER_FADE_RATE * dt).min(1.0);
+        if target == 0.0 && self.title_bar_hover_alpha < 0.02 {
+            self.title_bar_hover_alpha = 0.0;
+            self.title_bar_hover_display = None;
+        }
+        (self.title_bar_hover_alpha - prev).abs() > 0.005
     }
 
     /// `true` si la barra de tabs/titulo se dibuja en el estado actual
@@ -3115,7 +3203,10 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         self.apply_pending_input_reset();
-        if self.tick_tab_close_fade() {
+        let close_fade_changed = self.tick_tab_close_fade();
+        let tab_hover_changed = self.tick_tab_hover_fade();
+        let title_hover_changed = self.tick_title_bar_hover_fade();
+        if close_fade_changed || tab_hover_changed || title_hover_changed {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
@@ -3853,7 +3944,8 @@ impl ApplicationHandler<UserEvent> for App {
                     preedit,
                     tab_layout.as_ref(),
                     title_bar_layout.as_ref(),
-                    self.title_bar_hover,
+                    self.title_bar_hover_display,
+                    self.title_bar_hover_alpha,
                     maximized,
                 ) {
                     Ok(updated) => {
@@ -5056,6 +5148,68 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn tick_tab_hover_fade_sube_hacia_1_y_baja_hacia_0() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term);
+        app.tab_hover = Some(0);
+        let mut risen = false;
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            app.tick_tab_hover_fade();
+            if app.tab_hover_alpha > 0.3 {
+                risen = true;
+                break;
+            }
+        }
+        assert!(risen, "el fade de hover de tab nunca subio");
+        assert_eq!(app.tab_hover_display, Some(0));
+
+        app.tab_hover = None;
+        let mut settled = false;
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            app.tick_tab_hover_fade();
+            if app.tab_hover_alpha == 0.0 {
+                settled = true;
+                break;
+            }
+        }
+        assert!(settled, "el fade de hover de tab nunca se asento");
+        assert_eq!(app.tab_hover_display, None);
+    }
+
+    #[test]
+    fn tick_title_bar_hover_fade_sube_hacia_1_y_baja_hacia_0() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term);
+        app.title_bar_hover = Some(TitleButtonKind::Close);
+        let mut risen = false;
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            app.tick_title_bar_hover_fade();
+            if app.title_bar_hover_alpha > 0.3 {
+                risen = true;
+                break;
+            }
+        }
+        assert!(risen, "el fade de hover de boton nunca subio");
+        assert_eq!(app.title_bar_hover_display, Some(TitleButtonKind::Close));
+
+        app.title_bar_hover = None;
+        let mut settled = false;
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            app.tick_title_bar_hover_fade();
+            if app.title_bar_hover_alpha == 0.0 {
+                settled = true;
+                break;
+            }
+        }
+        assert!(settled, "el fade de hover de boton nunca se asento");
+        assert_eq!(app.title_bar_hover_display, None);
     }
 
     #[test]

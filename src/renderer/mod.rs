@@ -842,6 +842,7 @@ impl Renderer {
         tabs: Option<&TabBarLayout>,
         tbar_layout: Option<&TitleBarLayout>,
         tbar_hover: Option<TitleButtonKind>,
+        tbar_hover_alpha: f32,
         maximized: bool,
     ) -> Result<Vec<SessionId>, String> {
         let t0 = Instant::now();
@@ -922,6 +923,7 @@ impl Renderer {
                 tabs,
                 tbar_layout,
                 tbar_hover,
+                tbar_hover_alpha,
                 maximized,
                 frame,
                 &view,
@@ -955,6 +957,7 @@ impl Renderer {
         tabs: Option<&TabBarLayout>,
         tbar_layout: Option<&TitleBarLayout>,
         tbar_hover: Option<TitleButtonKind>,
+        tbar_hover_alpha: f32,
         maximized: bool,
         frame: wgpu::SurfaceTexture,
         view: &wgpu::TextureView,
@@ -1101,6 +1104,7 @@ impl Renderer {
                 &mut self.title_bar_track_glyphs,
                 &mut extra_areas,
                 tbar_hover,
+                tbar_hover_alpha,
                 &mut self.contrast_cache,
                 maximized,
                 self.scale_factor,
@@ -2242,6 +2246,7 @@ fn push_title_bar<'a>(
     track_glyphs: &'a mut Vec<glyphon::CustomGlyph>,
     extra_areas: &mut Vec<glyphon::TextArea<'a>>,
     hovered_button: Option<crate::renderer::TitleButtonKind>,
+    hover_alpha: f32,
     contrast_cache: &mut ContrastCache,
     maximized: bool,
     scale_factor: f32,
@@ -2287,7 +2292,7 @@ fn push_title_bar<'a>(
         };
         glyphs.clear();
         if is_hovered {
-            crate::renderer::build_button_hover(btn, is_close, theme, glyphs);
+            crate::renderer::build_button_hover(btn, is_close, hover_alpha, theme, glyphs);
         }
         crate::renderer::push_button_icon(btn, btn.kind, maximized, scale_factor, color, glyphs);
         extra_areas.push(glyphon::TextArea {
@@ -2408,7 +2413,13 @@ fn push_tab_bar<'a>(
                 chrome,
             );
         } else if hovered {
-            crate::renderer::build_inactive_hover_chrome(seg.width_px, bar_h, 1.0, theme, chrome);
+            crate::renderer::build_inactive_hover_chrome(
+                seg.width_px,
+                bar_h,
+                layout.mouse.hover_alpha,
+                theme,
+                chrome,
+            );
         }
         if seg.activity {
             // Punto de actividad: salida reciente mientras la sesion no estaba enfocada.

@@ -185,19 +185,26 @@ pub fn build_title_bar_track(
 }
 
 /// Fondo sutil de un botón bajo hover.
+/// `alpha` (0..1) escala la opacidad del fondo de hover: anima la entrada y
+/// salida (~100 ms) en vez de un corte binario.
 pub fn build_button_hover(
     btn: &TitleButton,
     active: bool,
+    alpha: f32,
     theme: &ThemeConfig,
     out: &mut Vec<CustomGlyph>,
 ) {
     out.clear();
+    if alpha <= 0.0 {
+        return;
+    }
+    let a = alpha.clamp(0.0, 1.0);
     let color = if active {
         // Rojo de Fluent: se lee como "cerrar" en cualquier tema, claro u oscuro.
-        glyphon::Color::rgb(0xc4, 0x2b, 0x1c)
+        glyphon::Color::rgba(0xc4, 0x2b, 0x1c, (255.0 * a).round() as u8)
     } else {
         let (fr, fg, fb) = parse_hex(&theme.foreground);
-        glyphon::Color::rgba(fr, fg, fb, 26)
+        glyphon::Color::rgba(fr, fg, fb, (26.0 * a).round() as u8)
     };
     out.push(CustomGlyph {
         id: SOLID_MASK_GLYPH_ID,

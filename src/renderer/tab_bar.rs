@@ -26,7 +26,10 @@ pub const TAB_CORNER_RADIUS_LOGICAL: f32 = 7.0;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TabBarMouseState {
+    /// Tab que dibuja el fondo de hover (persiste durante fade-out).
     pub hover_index: Option<usize>,
+    /// Opacidad animada del fondo de hover (0..1, ~120 ms).
+    pub hover_alpha: f32,
     /// Tab que muestra el boton × (persiste durante fade-out).
     pub close_tab: Option<usize>,
     /// Opacidad animada del boton cerrar (0..1).
