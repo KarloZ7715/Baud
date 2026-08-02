@@ -144,7 +144,7 @@ Type: `string`. Default: `"#c47ad4"`.
 
 Minimum WCAG contrast ratio enforced between foreground and effective background per cell. `1.0` disables the adjustment and keeps raw theme colors; `3.0` is the large-text floor; `4.5` matches WCAG AA body text.
 
-Type: `float`. Default: `1.0`.
+Type: `float`. Default: `1.5`.
 
 ### theme.red {#config-theme-red}
 

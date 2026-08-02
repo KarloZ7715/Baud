@@ -145,7 +145,7 @@
 # ANSI color 5 (SGR 35/45) and its background counterpart.
 # magenta = "#c47ad4"
 # Minimum WCAG contrast ratio enforced between foreground and effective background per cell. `1.0` disables the adjustment and keeps raw theme colors; `3.0` is the large-text floor; `4.5` matches WCAG AA body text.
-# minimum_contrast = 1.0
+# minimum_contrast = 1.5
 # ANSI color 1 (SGR 31/41) and its background counterpart.
 # red = "#e85d5d"
 # Background color of selected text. Unset falls back to a semi-transparent `theme.black`.

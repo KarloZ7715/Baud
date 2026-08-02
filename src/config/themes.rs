@@ -96,10 +96,14 @@ pub fn preset_entries() -> Vec<(&'static str, ThemeConfig)> {
         .collect()
 }
 
-/// Contraste mínimo exigido para texto legible sobre el fondo del tema.
+/// Piso de contraste del chrome de Baud (theme picker, barra de estado, tabs,
+/// title bar): fijo, no depende de `theme.minimum_contrast` — ese ajuste es
+/// del usuario para el texto de sus aplicaciones, no para la interfaz del
+/// terminal. Ya no valida la paleta cruda de los presets.
 pub const MIN_LEGIBLE_CONTRAST: f64 = 3.0;
 
-/// Contraste mínimo para comentarios (`bright_black`) sobre el fondo.
+/// Piso de contraste del chrome para texto secundario/tenue (comentarios de
+/// UI, no de la paleta ANSI). Mismo motivo que `MIN_LEGIBLE_CONTRAST`.
 pub const MIN_COMMENT_CONTRAST: f64 = 4.5;
 
 #[cfg(test)]
@@ -174,8 +178,8 @@ mod tests {
     }
 
     #[test]
-    fn minimum_contrast_default_es_uno() {
-        assert!((ThemeConfig::default().minimum_contrast - 1.0).abs() < f64::EPSILON);
+    fn minimum_contrast_default_es_uno_punto_cinco() {
+        assert!((ThemeConfig::default().minimum_contrast - 1.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -255,6 +259,35 @@ mod tests {
                 body.starts_with("# source: http"),
                 "preset '{name}' no declara su fuente en la primera línea"
             );
+        }
+    }
+
+    /// Valida la salida (lo que ve el usuario al pintar), no el insumo: cada
+    /// preset y cada color ANSI, ajustado al piso por defecto (1.5), alcanza
+    /// ese piso sobre su fondo. Sustituye a la vieja `presets_tienen_contraste_legible`,
+    /// que exigía el piso sobre el hex crudo del tema y por eso forzaba a
+    /// retocar paletas a mano.
+    #[test]
+    fn presets_ajustados_cumplen_piso_por_defecto() {
+        use crate::color::contrast_ratio_rgb;
+        use crate::config::parse_hex;
+        use crate::renderer::adjust_fg;
+
+        let ajuste = ThemeConfig::default().minimum_contrast;
+        for name in available_presets() {
+            let theme = try_preset(name).unwrap();
+            let bg = parse_hex(&theme.background);
+            for field in ANSI_COLOR_FIELDS {
+                let fg = parse_hex(theme_color_hex(&theme, field));
+                if fg == bg {
+                    continue;
+                }
+                let adjusted = adjust_fg(fg, bg, ajuste);
+                assert!(
+                    contrast_ratio_rgb(adjusted, bg) >= ajuste,
+                    "preset {name} campo {field}: ratio tras ajuste al piso por defecto < {ajuste}"
+                );
+            }
         }
     }
 

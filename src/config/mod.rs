@@ -11,11 +11,13 @@
 //! `bold_is_bright` puede declararse en la raíz del TOML o en `[theme]`; si
 //! cualquiera de los dos es `true`, el renderer aplica el mapeo bold→bright.
 //!
-//! `[theme].minimum_contrast` (default `1.0`) ajusta dinámicamente el fg sobre
-//! el bg efectivo de cada celda para cumplir contraste WCAG. Use `1.0` para
-//! desactivar el ajuste y conservar colores crudos del tema; `3.0` piso de
-//! texto grande; `4.5` piso de cuerpo de texto (WCAG AA). Rango útil 1.0–21.0,
-//! valores fuera se ajustan al límite con un warning.
+//! `[theme].minimum_contrast` (default `1.5`) ajusta dinámicamente el fg sobre
+//! el bg efectivo de cada celda para cumplir contraste WCAG. `1.5` rescata
+//! solo lo genuinamente ilegible sin tocar grises de bajo contraste
+//! intencionados (Catppuccin, Solarized...); use `1.0` para desactivar el
+//! ajuste y conservar colores crudos del tema; `3.0` piso de texto grande;
+//! `4.5` piso de cuerpo de texto (WCAG AA). Rango útil 1.0–21.0, valores fuera
+//! se ajustan al límite con un warning.
 
 pub mod persist;
 mod themes;
@@ -863,7 +865,7 @@ fn default_foreground() -> String {
     "#ececec".into()
 }
 fn default_minimum_contrast() -> f64 {
-    1.0
+    1.5
 }
 
 /// Rango útil de contraste WCAG: 1.0 (sin ajuste) ..= 21.0 (negro/blanco puros).
@@ -1384,7 +1386,7 @@ mod tests {
     #[test]
     fn minimum_contrast_precedencia_usuario_tema_default() {
         let default_cfg: Config = toml::from_str("").unwrap();
-        assert!((default_cfg.theme.minimum_contrast - 1.0).abs() < f64::EPSILON);
+        assert!((default_cfg.theme.minimum_contrast - 1.5).abs() < f64::EPSILON);
 
         let named: Config = toml::from_str(r#"theme = "solarized-dark""#).unwrap();
         assert!((named.theme.minimum_contrast - 3.0).abs() < f64::EPSILON);
