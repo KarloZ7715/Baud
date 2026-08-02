@@ -3338,9 +3338,16 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             wgpu::PresentMode::AutoNoVsync
         };
-        // Una GUI con poco trabajo GPU por frame no necesita 2 frames en cola;
-        // a 60 Hz el default suma ~33 ms de latencia a cada eco.
-        config.desired_maximum_frame_latency = 1;
+        // wgpu traduce esto a `min_image_count = valor + 1`
+        // (wgpu-hal/src/vulkan/swapchain/native.rs). Con 1 el swapchain queda
+        // en 2 imagenes, que es el minimo absoluto para FIFO: cada `acquire`
+        // bloquea hasta que el compositor libera la anterior, y si tarda
+        // (workspace oculto, direct scanout de otra ventana, VRR) se agota el
+        // timeout interno de wgpu — 1000 ms con el event loop entero parado.
+        // 2 da 3 imagenes: un frame de cola a cambio de que el hilo GUI no se
+        // bloquee. El frame de latencia se recupera en el plan 002, que quita
+        // el throttle de max_fps del camino del eco.
+        config.desired_maximum_frame_latency = 2;
         // Si hay transparencia, asegurar que el alpha mode sea compatible
         if opacity < 1.0 {
             match select_alpha_mode(opacity, &caps.alpha_modes) {
@@ -3369,10 +3376,12 @@ impl ApplicationHandler<UserEvent> for App {
         let adapter_info = adapter.get_info();
         tracing::info!(
             "wgpu: surface formato={:?} alpha_mode={:?} present_mode={:?} \
-             backend={:?} adaptador={:?} formatos_soportados={:?}",
+             frame_latency={} backend={:?} adaptador={:?} \
+             formatos_soportados={:?}",
             config.format,
             config.alpha_mode,
             config.present_mode,
+            config.desired_maximum_frame_latency,
             adapter_info.backend,
             adapter_info.name,
             caps.formats,
