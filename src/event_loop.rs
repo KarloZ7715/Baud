@@ -762,6 +762,9 @@ pub fn run(opts: LaunchOptions) -> Result<(), Box<dyn std::error::Error>> {
     let config_watch = Arc::new(Mutex::new(crate::config::watch::WatchState::new(
         crate::config::watch::config_mtime(),
     )));
+    if let Ok(mut watch) = config_watch.lock() {
+        watch.set_import_targets(app_config.theme_import_watch_paths.clone());
+    }
     let watch_for_thread = Arc::clone(&config_watch);
     let proxy_cfg = proxy.clone();
     thread::spawn(move || loop {

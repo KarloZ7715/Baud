@@ -979,9 +979,14 @@ impl App {
     /// (`UserEvent::SystemColorScheme`), el brazo `WindowEvent::ThemeChanged`
     /// de winit, y `apply_config` tras una recarga desde disco.
     fn reconcile_theme(&mut self) {
-        let (theme, preset) = self.config.resolve_active_theme(self.system_color_scheme);
-        self.config.theme = theme;
-        self.config.theme_preset = preset;
+        let active = self.config.resolve_active_theme(self.system_color_scheme);
+        self.config.theme = active.theme;
+        self.config.theme_preset = active.preset;
+        self.config.theme_import_label = active.import_label;
+        self.config.theme_import_watch_paths = active.import_watch_paths;
+        if let Ok(mut watch) = self.config_watch.lock() {
+            watch.set_import_targets(self.config.theme_import_watch_paths.clone());
+        }
         if let Ok(mut guard) = self.focused_term().try_lock() {
             guard.mark_dirty();
         }
@@ -4981,6 +4986,7 @@ mod tests {
 mode = "auto"
 dark = "claude-dark"
 light = "catppuccin-latte"
+import = false
 "##;
         app.config = toml::from_str(toml).unwrap();
         let light_bg = crate::config::try_preset("catppuccin-latte")
@@ -5013,6 +5019,7 @@ light = "catppuccin-latte"
 mode = "dark"
 dark = "nord"
 light = "catppuccin-latte"
+import = false
 "##;
         app.config = toml::from_str(toml).unwrap();
         let nord_bg = crate::config::try_preset("nord")

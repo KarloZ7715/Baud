@@ -20,6 +20,7 @@
 //! se ajustan al límite con un warning.
 
 pub mod persist;
+mod theme_import;
 mod themes;
 pub mod watch;
 
@@ -84,6 +85,17 @@ pub struct Config {
     /// Overrides sueltos de `[theme]`, re-aplicados al cambiar de variante.
     #[serde(skip)]
     theme_overrides: ThemeOverrides,
+    /// Ajuste de import (`[theme].import`) tal como quedó declarado; se
+    /// reutiliza para re-resolver sin releer disco cuando cambia el SO.
+    #[serde(skip)]
+    theme_import_setting: ImportSetting,
+    /// Etiqueta legible del import activo (origen Omarchy o ruta), si hay uno.
+    #[serde(skip)]
+    pub theme_import_label: Option<String>,
+    /// Rutas a vigilar por el import activo (archivo importado y, si fue
+    /// autodetección, el enlace `current` de Omarchy). Vacío sin import.
+    #[serde(skip)]
+    pub theme_import_watch_paths: Vec<watch::WatchTarget>,
     #[serde(default)]
     pub font: FontConfig,
     #[serde(default)]
@@ -433,6 +445,38 @@ define_theme_overrides!(
     bright_white,
 );
 
+/// Valor crudo de `[theme].import`: una ruta, o `false` para desactivar la
+/// autodetección sin fijar una ruta explícita.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum RawImportSetting {
+    Path(String),
+    Enabled(bool),
+}
+
+/// Ajuste de import resuelto desde `[theme].import`.
+///
+/// `Auto` (nada declarado) intenta autodetectar Omarchy; `Disabled`
+/// (`import = false`) apaga la autodetección sin fijar ruta; `Explicit` trae
+/// una ruta concreta.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum ImportSetting {
+    #[default]
+    Auto,
+    Disabled,
+    Explicit(String),
+}
+
+impl From<Option<RawImportSetting>> for ImportSetting {
+    fn from(raw: Option<RawImportSetting>) -> Self {
+        match raw {
+            None | Some(RawImportSetting::Enabled(true)) => Self::Auto,
+            Some(RawImportSetting::Enabled(false)) => Self::Disabled,
+            Some(RawImportSetting::Path(p)) => Self::Explicit(p),
+        }
+    }
+}
+
 /// Tabla `[theme]` cruda del TOML: modelo claro/oscuro + overrides sueltos.
 ///
 /// `name` es la forma legada: equivale a fijar ambas variantes a ese preset
@@ -449,6 +493,8 @@ struct ThemeTable {
     dark: Option<String>,
     #[serde(default)]
     light: Option<String>,
+    #[serde(default)]
+    import: Option<RawImportSetting>,
     #[serde(flatten)]
     overrides: ThemeOverrides,
 }
@@ -531,15 +577,21 @@ struct ThemeModel {
     mode: ColorMode,
     dark: Option<String>,
     light: Option<String>,
+    import: ImportSetting,
     overrides: ThemeOverrides,
 }
 
 fn resolve_theme_model(raw: RawTheme) -> ThemeModel {
     match raw {
+        // Forma legada (`theme = "nombre"`): un único valor explícito, sin
+        // tabla donde declarar `import`. Ya fija `mode = dark` en vez de
+        // `auto`; por la misma razón no participa en la autodetección de
+        // Omarchy — es la forma "quiero exactamente este preset".
         RawTheme::Named(name) => ThemeModel {
             mode: ColorMode::Dark,
             dark: Some(name.clone()),
             light: Some(name),
+            import: ImportSetting::Disabled,
             overrides: ThemeOverrides::default(),
         },
         RawTheme::Table(table) => {
@@ -558,7 +610,67 @@ fn resolve_theme_model(raw: RawTheme) -> ThemeModel {
                 mode,
                 dark,
                 light,
+                import: table.import.into(),
                 overrides: table.overrides,
+            }
+        }
+    }
+}
+
+/// Tema activo resuelto: colores + procedencia, lista para volcar en `Config`.
+pub(crate) struct ActiveTheme {
+    pub(crate) theme: ThemeConfig,
+    pub(crate) preset: Option<String>,
+    /// Etiqueta legible del import activo, si lo hay (para el picker/log).
+    pub(crate) import_label: Option<String>,
+    /// Rutas a vigilar por el import activo (archivo, y enlace de Omarchy si
+    /// fue autodetección). Vacío si no hay import.
+    pub(crate) import_watch_paths: Vec<watch::WatchTarget>,
+}
+
+/// Lee y parsea el import declarado en `setting`, con log del origen.
+///
+/// Un import inválido no es fatal: se avisa por log y se cae al preset (`None`).
+fn resolve_theme_import(
+    setting: &ImportSetting,
+) -> Option<(theme_import::ImportedTheme, String, Vec<watch::WatchTarget>)> {
+    match setting {
+        ImportSetting::Disabled => None,
+        ImportSetting::Explicit(raw) => {
+            let config_dir = dirs::config_dir().map(|d| d.join("baud"));
+            let path = theme_import::expand_import_path(raw, config_dir.as_deref());
+            match theme_import::import_from_path(&path) {
+                Ok(imported) => {
+                    tracing::info!("tema: import explícito desde '{}'", path.display());
+                    let label = theme_import::import_label(&path, false);
+                    Some((imported, label, vec![watch::WatchTarget::File(path)]))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "tema: import '{}' inválido ({e}); se usa el preset",
+                        path.display()
+                    );
+                    None
+                }
+            }
+        }
+        ImportSetting::Auto => {
+            let dir = theme_import::omarchy_theme_dir()?;
+            let path = theme_import::pick_desktop_theme_file(&dir)?;
+            match theme_import::import_from_path(&path) {
+                Ok(imported) => {
+                    tracing::info!("tema: autodetectado desde '{}'", path.display());
+                    let label = theme_import::import_label(&path, true);
+                    let watch_paths = theme_import::omarchy_watch_paths(&path);
+                    Some((imported, label, watch_paths))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "tema: autodetección de Omarchy en '{}' inválida ({e}); se usa el preset",
+                        path.display()
+                    );
+                    None
+                }
             }
         }
     }
@@ -569,7 +681,9 @@ impl ThemeModel {
     ///
     /// `scheme = None` (desconocido, p. ej. al cargar antes de tener ventana)
     /// cae a oscuro en modo `auto` — nunca bloquea el arranque.
-    fn resolve(&self, scheme: Option<ColorScheme>) -> (ThemeConfig, Option<String>) {
+    ///
+    /// Precedencia: preset embebido → import → overrides sueltos de `[theme]`.
+    fn resolve(&self, scheme: Option<ColorScheme>) -> ActiveTheme {
         let active = match self.mode {
             ColorMode::Dark => ColorScheme::Dark,
             ColorMode::Light => ColorScheme::Light,
@@ -586,8 +700,29 @@ impl ThemeModel {
             ColorScheme::Light => Some(DEFAULT_LIGHT_PRESET),
         });
         let mut base = preset_name.map(theme_base_from_name).unwrap_or_default();
+
+        let imported = resolve_theme_import(&self.import);
+        let (import_label, import_watch_paths) = match &imported {
+            Some((theme, label, watch_paths)) => {
+                let palette = match active {
+                    ColorScheme::Dark => &theme.dark,
+                    ColorScheme::Light => &theme.light,
+                };
+                if let Some(palette) = palette {
+                    palette.apply_to(&mut base);
+                }
+                (Some(label.clone()), watch_paths.clone())
+            }
+            None => (None, Vec::new()),
+        };
+
         apply_theme_overrides(&mut base, &self.overrides);
-        (base, preset_name.map(str::to_string))
+        ActiveTheme {
+            theme: base,
+            preset: preset_name.map(str::to_string),
+            import_label,
+            import_watch_paths,
+        }
     }
 }
 
@@ -597,14 +732,17 @@ impl From<RawConfig> for Config {
         // Al cargar, el esquema del SO aún se desconoce: resolver con `None`
         // cae a la variante oscura. El runtime re-resuelve (`reconcile_theme`)
         // cuando el portal/winit responde.
-        let (theme, theme_preset) = model.resolve(None);
+        let active = model.resolve(None);
         Self {
-            theme,
-            theme_preset,
+            theme: active.theme,
+            theme_preset: active.preset,
             theme_mode: model.mode,
             theme_dark: model.dark,
             theme_light: model.light,
             theme_overrides: model.overrides,
+            theme_import_setting: model.import,
+            theme_import_label: active.import_label,
+            theme_import_watch_paths: active.import_watch_paths,
             font: raw.font,
             window: raw.window,
             selection: raw.selection,
@@ -1268,19 +1406,23 @@ impl Config {
         self.theme_preset.as_deref()
     }
 
+    /// Etiqueta legible del import activo (para el picker), si hay uno.
+    pub fn active_import_label(&self) -> Option<&str> {
+        self.theme_import_label.as_deref()
+    }
+
     /// Re-resuelve el tema activo para un esquema de SO dado, usando el modelo
-    /// (`mode`/`dark`/`light`/overrides) almacenado sin releer disco.
+    /// (`mode`/`dark`/`light`/import/overrides) almacenado sin releer disco de
+    /// config (el archivo importado, si hay uno, sí se relee: es pequeño y
+    /// esto sólo ocurre en carga/recarga, nunca por frame).
     ///
-    /// Devuelve el `ThemeConfig` resuelto y el nombre del preset activo. Lo
-    /// usa el runtime (`reconcile_theme`) cuando el SO cambia de modo.
-    pub fn resolve_active_theme(
-        &self,
-        scheme: Option<ColorScheme>,
-    ) -> (ThemeConfig, Option<String>) {
+    /// Lo usa el runtime (`reconcile_theme`) cuando el SO cambia de modo.
+    pub(crate) fn resolve_active_theme(&self, scheme: Option<ColorScheme>) -> ActiveTheme {
         ThemeModel {
             mode: self.theme_mode,
             dark: self.theme_dark.clone(),
             light: self.theme_light.clone(),
+            import: self.theme_import_setting.clone(),
             overrides: self.theme_overrides.clone(),
         }
         .resolve(scheme)
@@ -1440,10 +1582,12 @@ mod tests {
         assert!(!process.shell.is_empty());
     }
 
-    /// Verifica que `Config::default()` use el tema oscuro.
+    /// Verifica que los defaults de Baud usan el tema oscuro `claude-dark`.
+    /// `import = false` fija el resultado: sin él, una máquina con Omarchy
+    /// instalado autodetectaría su paleta en vez de estos valores.
     #[test]
     fn test_config_default_values() {
-        let config = Config::default();
+        let config: Config = toml::from_str("[theme]\nimport = false\n").unwrap();
 
         assert_eq!(config.theme.foreground, "#ececec");
         assert_eq!(config.theme.background, "#0a0a0a");
@@ -1898,6 +2042,7 @@ fallback = ["Noto Color Emoji", "Noto Sans CJK SC"]
     fn test_config_partial_toml() {
         let toml_str = r##"
 [theme]
+import = false
 foreground = "#aabbcc"
 background = "#ddeeff"
 "##;
@@ -1929,6 +2074,7 @@ background = "#ddeeff"
         let toml = r##"
 [theme]
 name = "nord"
+import = false
 background = "#000000"
 "##;
         let cfg: Config = toml::from_str(toml).unwrap();
@@ -1954,6 +2100,7 @@ background = "#000000"
         let toml = r##"
 [theme]
 name = "bogus"
+import = false
 background = "#000000"
 "##;
         let cfg: Config = toml::from_str(toml).unwrap();
@@ -1966,6 +2113,7 @@ background = "#000000"
         let toml = r##"
 [theme]
 name = "nord"
+import = false
 bold_is_bright = true
 dim_alpha = true
 "##;
@@ -1978,7 +2126,7 @@ dim_alpha = true
 
     #[test]
     fn theme_legacy_name_equivale_a_dark_ambas_variantes() {
-        let cfg: Config = toml::from_str("[theme]\nname = \"nord\"\n").unwrap();
+        let cfg: Config = toml::from_str("[theme]\nname = \"nord\"\nimport = false\n").unwrap();
         assert_eq!(cfg.theme_mode, ColorMode::Dark);
         assert_eq!(cfg.theme_dark.as_deref(), Some("nord"));
         assert_eq!(cfg.theme_light.as_deref(), Some("nord"));
@@ -2010,19 +2158,20 @@ light = "catppuccin-latte"
 mode = "auto"
 dark = "claude-dark"
 light = "catppuccin-latte"
+import = false
 "##;
         let cfg: Config = toml::from_str(toml).unwrap();
-        let (dark_theme, dark_name) = cfg.resolve_active_theme(Some(ColorScheme::Dark));
-        assert_eq!(dark_name.as_deref(), Some("claude-dark"));
+        let dark = cfg.resolve_active_theme(Some(ColorScheme::Dark));
+        assert_eq!(dark.preset.as_deref(), Some("claude-dark"));
         assert_eq!(
-            dark_theme.background,
+            dark.theme.background,
             crate::config::try_preset("claude-dark").unwrap().background
         );
 
-        let (light_theme, light_name) = cfg.resolve_active_theme(Some(ColorScheme::Light));
-        assert_eq!(light_name.as_deref(), Some("catppuccin-latte"));
+        let light = cfg.resolve_active_theme(Some(ColorScheme::Light));
+        assert_eq!(light.preset.as_deref(), Some("catppuccin-latte"));
         assert_eq!(
-            light_theme.background,
+            light.theme.background,
             crate::config::try_preset("catppuccin-latte")
                 .unwrap()
                 .background
@@ -2036,11 +2185,12 @@ light = "catppuccin-latte"
 mode = "auto"
 dark = "nord"
 light = "catppuccin-latte"
+import = false
 "##;
         let cfg: Config = toml::from_str(toml).unwrap();
-        let (theme, name) = cfg.resolve_active_theme(None);
-        assert_eq!(name.as_deref(), Some("nord"));
-        assert_eq!(theme, crate::config::try_preset("nord").unwrap());
+        let active = cfg.resolve_active_theme(None);
+        assert_eq!(active.preset.as_deref(), Some("nord"));
+        assert_eq!(active.theme, crate::config::try_preset("nord").unwrap());
     }
 
     #[test]
@@ -2050,11 +2200,12 @@ light = "catppuccin-latte"
 mode = "dark"
 dark = "nord"
 light = "catppuccin-latte"
+import = false
 "##;
         let cfg: Config = toml::from_str(toml).unwrap();
-        let (theme, name) = cfg.resolve_active_theme(Some(ColorScheme::Light));
-        assert_eq!(name.as_deref(), Some("nord"));
-        assert_eq!(theme, crate::config::try_preset("nord").unwrap());
+        let active = cfg.resolve_active_theme(Some(ColorScheme::Light));
+        assert_eq!(active.preset.as_deref(), Some("nord"));
+        assert_eq!(active.theme, crate::config::try_preset("nord").unwrap());
     }
 
     #[test]
@@ -2065,10 +2216,10 @@ mode = "light"
 light = "catppuccin-latte"
 "##;
         let cfg: Config = toml::from_str(toml).unwrap();
-        let (theme, name) = cfg.resolve_active_theme(Some(ColorScheme::Dark));
-        assert_eq!(name.as_deref(), Some("catppuccin-latte"));
+        let active = cfg.resolve_active_theme(Some(ColorScheme::Dark));
+        assert_eq!(active.preset.as_deref(), Some("catppuccin-latte"));
         assert_eq!(
-            theme,
+            active.theme,
             crate::config::try_preset("catppuccin-latte").unwrap()
         );
     }
@@ -2083,12 +2234,12 @@ background = "#ffffff"
 minimum_contrast = 3.0
 "##;
         let cfg: Config = toml::from_str(toml).unwrap();
-        let (theme, _) = cfg.resolve_active_theme(Some(ColorScheme::Light));
-        assert_eq!(theme.background, "#ffffff");
-        assert_eq!(theme.minimum_contrast, 3.0);
+        let active = cfg.resolve_active_theme(Some(ColorScheme::Light));
+        assert_eq!(active.theme.background, "#ffffff");
+        assert_eq!(active.theme.minimum_contrast, 3.0);
         // El resto de colores vienen del preset claro.
         assert_eq!(
-            theme.foreground,
+            active.theme.foreground,
             crate::config::try_preset("catppuccin-latte")
                 .unwrap()
                 .foreground
@@ -2103,13 +2254,17 @@ mode = "auto"
 dark = "claude-dark"
 "##;
         let cfg: Config = toml::from_str(toml).unwrap();
-        let (_, name) = cfg.resolve_active_theme(Some(ColorScheme::Light));
-        assert_eq!(name.as_deref(), Some("catppuccin-latte"));
+        let active = cfg.resolve_active_theme(Some(ColorScheme::Light));
+        assert_eq!(active.preset.as_deref(), Some("catppuccin-latte"));
     }
 
     #[test]
     fn theme_default_sin_seccion_es_dark_sin_preset() {
-        let cfg = Config::default();
+        // `import = false`: sin él, una máquina con Omarchy instalado
+        // autodetectaría su paleta también en la config totalmente vacía —
+        // que es justo el comportamiento buscado en uso real, pero no lo que
+        // este test verifica (los defaults propios de Baud).
+        let cfg: Config = toml::from_str("[theme]\nimport = false\n").unwrap();
         assert_eq!(cfg.theme_mode, ColorMode::Dark);
         assert!(cfg.theme_dark.is_none());
         assert!(cfg.theme_light.is_none());
@@ -2130,6 +2285,65 @@ dark = "dracula"
         assert_eq!(cfg.theme_light.as_deref(), Some("nord"));
         // Con `dark` presente, el modo implícito es `auto`.
         assert_eq!(cfg.theme_mode, ColorMode::Auto);
+    }
+
+    /// Ruta absoluta a un fixture de `tests/fixtures/themes/`, para declarar
+    /// `theme.import` sin depender del Omarchy real de la máquina.
+    fn fixture_path(name: &str) -> String {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/themes")
+            .join(name)
+            .display()
+            .to_string()
+    }
+
+    #[test]
+    fn theme_import_explicito_se_aplica_entre_preset_y_overrides() {
+        let toml = format!(
+            "[theme]\nname = \"nord\"\nimport = \"{}\"\nblack = \"#111111\"\n",
+            fixture_path("omarchy-foot.ini").replace('\\', "\\\\")
+        );
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        // El import trae el fondo de Omarchy, no el de nord.
+        assert_eq!(cfg.theme.background, "#0c0b0c");
+        // El override explícito (`black`) gana sobre lo que trajo el import.
+        assert_eq!(cfg.theme.black, "#111111");
+        // El nombre del preset base se conserva para el picker.
+        assert_eq!(cfg.theme_preset.as_deref(), Some("nord"));
+        assert!(cfg.active_import_label().is_some());
+        assert_eq!(cfg.theme_import_watch_paths.len(), 1);
+    }
+
+    #[test]
+    fn theme_import_invalido_no_es_fatal_y_cae_al_preset() {
+        let toml = r##"
+[theme]
+name = "nord"
+import = "/ruta/que/no/existe/foot.ini"
+"##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let nord = crate::config::themes::preset("nord").unwrap();
+        assert_eq!(cfg.theme, nord);
+        assert!(cfg.active_import_label().is_none());
+        assert!(cfg.theme_import_watch_paths.is_empty());
+    }
+
+    #[test]
+    fn theme_import_de_una_sola_polaridad_no_afecta_a_la_otra() {
+        // El fixture sólo trae `[colors-dark]`: en modo auto, la variante
+        // clara debe seguir siendo el preset, intacta.
+        let toml = format!(
+            "[theme]\nmode = \"auto\"\ndark = \"claude-dark\"\nlight = \"catppuccin-latte\"\nimport = \"{}\"\n",
+            fixture_path("omarchy-foot.ini").replace('\\', "\\\\")
+        );
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        let dark = cfg.resolve_active_theme(Some(ColorScheme::Dark));
+        assert_eq!(dark.theme.background, "#0c0b0c");
+        let light = cfg.resolve_active_theme(Some(ColorScheme::Light));
+        assert_eq!(
+            light.theme,
+            crate::config::try_preset("catppuccin-latte").unwrap()
+        );
     }
 
     #[test]
