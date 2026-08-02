@@ -191,6 +191,43 @@ use crate::theme_picker::ThemePickerState;
 use glyphon::cosmic_text::Hinting;
 use winit::window::Window;
 
+/// Fallo al adquirir la imagen del swapchain, con lo que se esperó antes de
+/// rendirse. `kind` es la variante de `wgpu::CurrentSurfaceTexture` que lo
+/// causó; `Timeout` significa que se agotó el timeout interno de wgpu (1000
+/// ms), es decir, que el compositor no liberó ninguna imagen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AcquireFailure {
+    pub kind: &'static str,
+    pub waited_ms: u64,
+}
+
+/// Contabilidad de fallos de adquisición. `pending` lo consume el llamador
+/// para decidir si reintenta; `total` sólo sirve para el log.
+#[derive(Debug, Default)]
+struct AcquireFailureState {
+    pending: Option<AcquireFailure>,
+    total: u64,
+}
+
+impl AcquireFailureState {
+    fn note(&mut self, kind: &'static str, waited_us: f64) {
+        let waited_ms = (waited_us / 1000.0) as u64;
+        self.total += 1;
+        self.pending = Some(AcquireFailure { kind, waited_ms });
+        tracing::warn!(
+            target: "baud::renderer",
+            kind,
+            waited_ms,
+            total = self.total,
+            "swapchain: no se pudo adquirir imagen, frame descartado"
+        );
+    }
+
+    fn take(&mut self) -> Option<AcquireFailure> {
+        self.pending.take()
+    }
+}
+
 /// Renderer GPU del terminal virtual.
 ///
 /// Mantiene los recursos wgpu y glyphon necesarios para pintar el grid dinamico.
@@ -245,6 +282,8 @@ pub struct Renderer {
     /// True si hace falta un frame para mostrar/ocultar el status (no continuamente).
     status_needs_present: bool,
     frame_count: u64,
+    /// Fallos de adquisición del swapchain desde el arranque.
+    acquire_failures: AcquireFailureState,
     /// Rango normalizado de seleccion del frame anterior (start_row, start_col,
     /// end_row, end_col). Cuando cambia, invalida damage en filas afectadas.
     prev_selection_bounds: Option<(usize, usize, usize, usize)>,
@@ -425,6 +464,13 @@ impl Renderer {
         self.frame_count
     }
 
+    /// Consume el último fallo de adquisición, si lo hubo. Devuelve `Some`
+    /// una sola vez por fallo: el llamador decide si conserva el dirty y
+    /// espera un evento externo en vez de reintentar en bucle.
+    pub fn take_acquire_failure(&mut self) -> Option<AcquireFailure> {
+        self.acquire_failures.take()
+    }
+
     /// Inicializa wgpu, glyphon y la surface configuration.
     ///
     /// `font_system` llega pre-construido: el caller lo arma en paralelo con la
@@ -575,6 +621,7 @@ impl Renderer {
             status_overlay_dirty: false,
             status_needs_present: false,
             frame_count: 0,
+            acquire_failures: AcquireFailureState::default(),
             prev_selection_bounds: None,
             prev_scrollback_offset: 0,
             prev_focused_session_id: None,
@@ -832,13 +879,24 @@ impl Renderer {
         }
 
         let t_frame_start = Instant::now();
-        let frame = match self.surface.get_current_texture() {
+        let acquired = self.surface.get_current_texture();
+        // El elapsed se calcula antes de ramificar: las ramas de fallo hacen
+        // `return` y antes de este cambio salian del frame sin dejar rastro,
+        // lo que hacia que el log [RENDER_PERF] solo viera frames sanos.
+        let get_frame_us = t_frame_start.elapsed().as_secs_f64() * 1_000_000.0;
+        let frame = match acquired {
             wgpu::CurrentSurfaceTexture::Success(tex)
             | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                self.acquire_failures.note("Timeout", get_frame_us);
+                return Ok(Vec::new());
+            }
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                self.acquire_failures.note("Occluded", get_frame_us);
                 return Ok(Vec::new());
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.acquire_failures.note("Outdated/Lost", get_frame_us);
                 self.surface.configure(&self.device, &self.config);
                 return Ok(Vec::new());
             }
@@ -846,7 +904,6 @@ impl Renderer {
                 return Err("error: validacion de surface fallo".to_string());
             }
         };
-        let get_frame_us = t_frame_start.elapsed().as_secs_f64() * 1_000_000.0;
 
         let view = frame
             .texture
@@ -3457,5 +3514,29 @@ mod tests {
         let s = truncate_to_display_width("✓ mensaje largo", 5);
         assert!(unicode_width::UnicodeWidthStr::width(s.as_str()) <= 5);
         assert!(s.ends_with('…'));
+    }
+
+    #[test]
+    fn acquire_failure_se_registra_y_se_consume_una_sola_vez() {
+        let mut state = AcquireFailureState::default();
+        assert!(
+            state.take().is_none(),
+            "sin fallos no hay nada que consumir"
+        );
+
+        state.note("Timeout", 1024.0 * 1000.0);
+        let failure = state.take().expect("un fallo registrado");
+        assert_eq!(failure.kind, "Timeout");
+        assert_eq!(failure.waited_ms, 1024);
+        assert_eq!(state.total, 1);
+
+        assert!(
+            state.take().is_none(),
+            "take() consume el fallo: un solo redraw de recuperacion por fallo"
+        );
+
+        state.note("Occluded", 3_500.0);
+        assert_eq!(state.total, 2, "el total acumula entre fallos consumidos");
+        assert_eq!(state.take().expect("segundo fallo").waited_ms, 3);
     }
 }

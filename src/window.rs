@@ -3838,13 +3838,26 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 let render_ms = t_render.elapsed().as_millis();
                 if render_ms > 250 {
-                    tracing::warn!(
-                        "render lento: {}ms ({} panes, status_present={}, search={})",
-                        render_ms,
-                        panes.len(),
-                        status_needs_present,
-                        search_active
-                    );
+                    let acquire = self
+                        .renderer
+                        .as_mut()
+                        .and_then(|r| r.take_acquire_failure());
+                    match acquire {
+                        Some(failure) => tracing::warn!(
+                            "render lento: {}ms — el compositor no libero imagen del swapchain \
+                             ({}, espera {}ms). El frame no se pinto.",
+                            render_ms,
+                            failure.kind,
+                            failure.waited_ms,
+                        ),
+                        None => tracing::warn!(
+                            "render lento: {}ms ({} panes, status_present={}, search={})",
+                            render_ms,
+                            panes.len(),
+                            status_needs_present,
+                            search_active
+                        ),
+                    }
                 }
 
                 // Sonda de latencia: medir tecla→present solo en frames
