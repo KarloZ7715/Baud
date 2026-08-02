@@ -103,11 +103,17 @@ impl GlyphCache {
         if self.metrics_key == Some(key) {
             return false;
         }
+        self.purge_glyph_slots();
+        self.metrics_key = Some(key);
+        true
+    }
+
+    /// Purga entradas y slots dejando intacta la curva de contraste; el
+    /// llamante decide si actualiza `metrics_key` o marca `needs_atlas_reset`.
+    fn purge_glyph_slots(&mut self) {
         self.clear_entries();
         self.glyphs.clear();
         self.next_id = Self::FIRST_TEXT_ID;
-        self.metrics_key = Some(key);
-        true
     }
 
     /// Reconstruye la LUT de la curva de contraste y purga el cache si la
@@ -132,9 +138,7 @@ impl GlyphCache {
         self.mask_curve_key = key;
         let k = if dark_theme { c } else { -c };
         self.mask_lut = build_mask_curve_lut(k);
-        self.clear_entries();
-        self.glyphs.clear();
-        self.next_id = Self::FIRST_TEXT_ID;
+        self.purge_glyph_slots();
         true
     }
 
@@ -171,9 +175,7 @@ impl GlyphCache {
                 "glyph cache: next_id saturado en {} entradas, purgando cache de glifos",
                 u16::MAX
             );
-            self.clear_entries();
-            self.glyphs.clear();
-            self.next_id = Self::FIRST_TEXT_ID;
+            self.purge_glyph_slots();
             self.needs_atlas_reset = true;
         }
         let id = self.next_id;
@@ -276,9 +278,7 @@ impl GlyphCache {
 
     /// Invalida entradas tras cambio de metricas de celda (resize).
     pub fn clear(&mut self) {
-        self.clear_entries();
-        self.glyphs.clear();
-        self.next_id = Self::FIRST_TEXT_ID;
+        self.purge_glyph_slots();
         self.metrics_key = None;
     }
 
