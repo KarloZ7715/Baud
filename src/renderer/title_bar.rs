@@ -4,7 +4,10 @@
 //! se renderizan como texto desde `renderer/mod.rs`.
 
 use crate::config::{parse_hex, ThemeConfig};
-use crate::renderer::decorations::SOLID_MASK_GLYPH_ID;
+use crate::renderer::decorations::{
+    SOLID_MASK_GLYPH_ID, WIN_BTN_CLOSE_MASK_GLYPH_ID, WIN_BTN_MAXIMIZE_MASK_GLYPH_ID,
+    WIN_BTN_MINIMIZE_MASK_GLYPH_ID, WIN_BTN_RESTORE_MASK_GLYPH_ID,
+};
 use glyphon::CustomGlyph;
 
 /// Altura mínima de la barra en píxeles lógicos.
@@ -190,11 +193,11 @@ pub fn build_button_hover(
 ) {
     out.clear();
     let color = if active {
-        let (r, g, b) = parse_hex(&theme.red);
-        glyphon::Color::rgba(r, g, b, 160)
+        // Rojo de Fluent: se lee como "cerrar" en cualquier tema, claro u oscuro.
+        glyphon::Color::rgb(0xc4, 0x2b, 0x1c)
     } else {
         let (fr, fg, fb) = parse_hex(&theme.foreground);
-        glyphon::Color::rgba(fr, fg, fb, 40)
+        glyphon::Color::rgba(fr, fg, fb, 26)
     };
     out.push(CustomGlyph {
         id: SOLID_MASK_GLYPH_ID,
@@ -208,13 +211,48 @@ pub fn build_button_hover(
     });
 }
 
-/// Carácter usado para cada botón.
-pub fn button_icon(kind: TitleButtonKind) -> &'static str {
-    match kind {
-        TitleButtonKind::Minimize => "−",
-        TitleButtonKind::Maximize => "□",
-        TitleButtonKind::Close => "×",
-    }
+/// Lado del icono de un boton de ventana en px logicos (cuadrado).
+pub const WIN_BUTTON_ICON_SIZE_LOGICAL: f32 = 10.0;
+
+/// Empuja la mascara vectorial del icono de un boton de ventana.
+///
+/// `maximized` alterna entre maximizar y restaurar para el boton `Maximize`.
+/// El icono se centra dentro del boton y se dimensiona en px fisicos para
+/// que el grosor del trazo sea entero a cualquier escala.
+pub fn push_button_icon(
+    btn: &TitleButton,
+    kind: TitleButtonKind,
+    maximized: bool,
+    scale_factor: f32,
+    color: glyphon::Color,
+    out: &mut Vec<CustomGlyph>,
+) {
+    let icon_px = (WIN_BUTTON_ICON_SIZE_LOGICAL * scale_factor)
+        .round()
+        .max(1.0);
+    let left = btn.left + (btn.width - icon_px) * 0.5;
+    let top = btn.top + (btn.height - icon_px) * 0.5;
+    let id = match kind {
+        TitleButtonKind::Minimize => WIN_BTN_MINIMIZE_MASK_GLYPH_ID,
+        TitleButtonKind::Maximize => {
+            if maximized {
+                WIN_BTN_RESTORE_MASK_GLYPH_ID
+            } else {
+                WIN_BTN_MAXIMIZE_MASK_GLYPH_ID
+            }
+        }
+        TitleButtonKind::Close => WIN_BTN_CLOSE_MASK_GLYPH_ID,
+    };
+    out.push(CustomGlyph {
+        id,
+        left,
+        top,
+        width: icon_px,
+        height: icon_px,
+        color: Some(color),
+        snap_to_physical_pixel: true,
+        metadata: 0,
+    });
 }
 
 #[cfg(test)]

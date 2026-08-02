@@ -3761,6 +3761,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let layout = self.tabs[self.focused].layout().clone();
                 let t_render = Instant::now();
                 let frame_count_before = renderer.frame_count();
+                let maximized = self.window.as_ref().is_some_and(|w| w.is_maximized());
                 match renderer.render(
                     &panes,
                     terminal_area,
@@ -3773,6 +3774,7 @@ impl ApplicationHandler<UserEvent> for App {
                     tab_layout.as_ref(),
                     title_bar_layout.as_ref(),
                     self.title_bar_hover,
+                    maximized,
                 ) {
                     Ok(updated) => {
                         // Ok(_) tambien lo devuelven los early-return de render()
@@ -4156,7 +4158,7 @@ impl ApplicationHandler<UserEvent> for App {
                                             window.set_minimized(true);
                                         }
                                         TitleButtonKind::Maximize => {
-                                            window.set_maximized(true);
+                                            window.set_maximized(!window.is_maximized());
                                         }
                                         TitleButtonKind::Close => {
                                             for host in &self.sessions {

@@ -30,10 +30,10 @@ pub use tab_bar::{
 };
 pub(crate) use terminal_fallback::create_font_system_with_fallback;
 pub use title_bar::{
-    build_button_hover, build_title_bar_track, button_icon, compute_title_bar_layout, hit_test,
-    title_bar_height_px, title_button_size_px, TitleBarHit, TitleBarLayout, TitleButton,
-    TitleButtonKind, TITLE_BAR_HEIGHT_LOGICAL, TITLE_BUTTON_HEIGHT_LOGICAL,
-    TITLE_BUTTON_WIDTH_LOGICAL,
+    build_button_hover, build_title_bar_track, compute_title_bar_layout, hit_test,
+    push_button_icon, title_bar_height_px, title_button_size_px, TitleBarHit, TitleBarLayout,
+    TitleButton, TitleButtonKind, TITLE_BAR_HEIGHT_LOGICAL, TITLE_BUTTON_HEIGHT_LOGICAL,
+    TITLE_BUTTON_WIDTH_LOGICAL, WIN_BUTTON_ICON_SIZE_LOGICAL,
 };
 
 /// Base de ids reservados para box/block glyphs programaticos (sobre ids de cache).
@@ -316,8 +316,6 @@ pub struct Renderer {
     tab_bar_track_glyphs: Vec<glyphon::CustomGlyph>,
     /// Chrome del boton × (scrub acorde a tab activa/inactiva).
     tab_close_glyphs: Vec<glyphon::CustomGlyph>,
-    /// Buffers para los iconos de los botones de la barra de título.
-    title_bar_button_buffers: [glyphon::Buffer; 3],
     /// Quads de hover para cada botón de la barra de título.
     title_bar_button_glyphs: [Vec<glyphon::CustomGlyph>; 3],
     /// Pista de fondo de la barra de título propia.
@@ -401,10 +399,6 @@ impl Renderer {
             &mut self.tab_close_buffer,
             self.cell_w,
         );
-        for buf in self.title_bar_button_buffers.iter_mut() {
-            *buf = glyphon::Buffer::new(&mut self.font_system, metrics);
-            Self::configure_tab_buffer(&mut self.font_system, buf, self.cell_w);
-        }
         self.title_bar_button_glyphs = [Vec::new(), Vec::new(), Vec::new()];
         if self.status_active {
             self.status_overlay_dirty = true;
@@ -529,16 +523,10 @@ impl Renderer {
         let mut consent_buffer = glyphon::Buffer::new(&mut font_system, metrics);
         Self::configure_buffer(&mut font_system, &mut consent_buffer, cell_w);
 
-        let mut title_bar_button_buffers = Vec::with_capacity(3);
         let mut title_bar_button_glyphs = Vec::with_capacity(3);
         for _ in 0..3 {
-            let mut buf = glyphon::Buffer::new(&mut font_system, metrics);
-            Self::configure_tab_buffer(&mut font_system, &mut buf, cell_w);
-            title_bar_button_buffers.push(buf);
             title_bar_button_glyphs.push(Vec::new());
         }
-        let title_bar_button_buffers: [glyphon::Buffer; 3] =
-            title_bar_button_buffers.try_into().expect("3 buffers");
         let title_bar_button_glyphs: [Vec<glyphon::CustomGlyph>; 3] =
             title_bar_button_glyphs.try_into().expect("3 glyph vecs");
 
@@ -607,7 +595,6 @@ impl Renderer {
             tab_bar_seg_glyphs: Vec::new(),
             tab_bar_track_glyphs: Vec::new(),
             tab_close_glyphs: Vec::new(),
-            title_bar_button_buffers,
             title_bar_button_glyphs,
             title_bar_track_glyphs: Vec::new(),
         }
@@ -814,6 +801,7 @@ impl Renderer {
         tabs: Option<&TabBarLayout>,
         tbar_layout: Option<&TitleBarLayout>,
         tbar_hover: Option<TitleButtonKind>,
+        maximized: bool,
     ) -> Result<Vec<SessionId>, String> {
         let t0 = Instant::now();
 
@@ -893,6 +881,7 @@ impl Renderer {
                 tabs,
                 tbar_layout,
                 tbar_hover,
+                maximized,
                 frame,
                 &view,
                 encoder,
@@ -925,6 +914,7 @@ impl Renderer {
         tabs: Option<&TabBarLayout>,
         tbar_layout: Option<&TitleBarLayout>,
         tbar_hover: Option<TitleButtonKind>,
+        maximized: bool,
         frame: wgpu::SurfaceTexture,
         view: &wgpu::TextureView,
         mut encoder: wgpu::CommandEncoder,
@@ -1051,17 +1041,14 @@ impl Renderer {
                 &self.cell_metrics,
                 self.config.width,
                 self.config.height,
-                cell_w,
-                cell_h,
-                &self.font_family,
-                &mut self.font_system,
                 &self.bg_buffer,
-                &mut self.title_bar_button_buffers,
                 &mut self.title_bar_button_glyphs,
                 &mut self.title_bar_track_glyphs,
                 &mut extra_areas,
                 tbar_hover,
                 &mut self.contrast_cache,
+                maximized,
+                self.scale_factor,
             );
             (tb.bar_height, false)
         } else {
@@ -2192,17 +2179,14 @@ fn push_title_bar<'a>(
     cell_metrics: &CellMetrics,
     surface_w: u32,
     surface_h: u32,
-    cell_w: f32,
-    cell_h: f32,
-    font_family: &str,
-    font_system: &mut glyphon::FontSystem,
     empty_buffer: &'a glyphon::Buffer,
-    button_buffers: &'a mut [glyphon::Buffer; 3],
     button_glyphs: &'a mut [Vec<glyphon::CustomGlyph>; 3],
     track_glyphs: &'a mut Vec<glyphon::CustomGlyph>,
     extra_areas: &mut Vec<glyphon::TextArea<'a>>,
     hovered_button: Option<crate::renderer::TitleButtonKind>,
     contrast_cache: &mut ContrastCache,
+    maximized: bool,
+    scale_factor: f32,
 ) {
     let bar_top = cell_metrics.padding_y;
     let full_bounds = glyphon::TextBounds {
@@ -2232,57 +2216,30 @@ fn push_title_bar<'a>(
     let bg_rgb = parse_hex(&theme.background);
     let (fr, fg, fb) = contrast_cache.adjust(fg_rgb, bg_rgb, MIN_LEGIBLE_CONTRAST);
     let icon_color = glyphon::Color::rgb(fr, fg, fb);
-    let family = resolve_family(font_family);
-    let default_attrs = glyphon::Attrs::new().family(family);
-    let text_top = bar_top + (layout.bar_height - cell_h).max(0.0) * 0.5;
 
+    // Iconos dibujados como mascaras vectoriales (no dependen de la fuente del terminal).
     let [ref mut glyphs0, ref mut glyphs1, ref mut glyphs2] = button_glyphs;
-    let [ref mut buf0, ref mut buf1, ref mut buf2] = button_buffers;
-    for (btn, (glyphs, buf)) in
-        layout
-            .buttons
-            .iter()
-            .zip([(glyphs0, buf0), (glyphs1, buf1), (glyphs2, buf2)])
-    {
+    for (btn, glyphs) in layout.buttons.iter().zip([glyphs0, glyphs1, glyphs2]) {
+        let is_close = btn.kind == crate::renderer::TitleButtonKind::Close;
         let is_hovered = hovered_button == Some(btn.kind);
+        let color = if is_hovered && is_close {
+            glyphon::Color::rgb(0xff, 0xff, 0xff)
+        } else {
+            icon_color
+        };
+        glyphs.clear();
         if is_hovered {
-            crate::renderer::build_button_hover(
-                btn,
-                btn.kind == crate::renderer::TitleButtonKind::Close,
-                theme,
-                glyphs,
-            );
-            extra_areas.push(glyphon::TextArea {
-                buffer: empty_buffer,
-                left: btn.left,
-                top: btn.top,
-                scale: 1.0,
-                bounds: full_bounds,
-                default_color: glyphon::Color::rgb(0xff, 0xff, 0xff),
-                custom_glyphs: glyphs,
-            });
+            crate::renderer::build_button_hover(btn, is_close, theme, glyphs);
         }
-
-        let icon_attrs = glyphon::Attrs::new().family(family).color(icon_color);
-        buf.set_rich_text(
-            font_system,
-            vec![(crate::renderer::button_icon(btn.kind), icon_attrs)],
-            &default_attrs,
-            glyphon::Shaping::Advanced,
-            None,
-        );
-        buf.set_size(font_system, Some(btn.width), Some(btn.height));
-        buf.set_monospace_width(font_system, Some(cell_w));
-        buf.set_hinting(font_system, Hinting::Enabled);
-        buf.shape_until_scroll(font_system, false);
+        crate::renderer::push_button_icon(btn, btn.kind, maximized, scale_factor, color, glyphs);
         extra_areas.push(glyphon::TextArea {
-            buffer: buf,
+            buffer: empty_buffer,
             left: btn.left,
-            top: text_top,
+            top: btn.top,
             scale: 1.0,
             bounds: full_bounds,
-            default_color: icon_color,
-            custom_glyphs: &[],
+            default_color: glyphon::Color::rgb(0xff, 0xff, 0xff),
+            custom_glyphs: glyphs,
         });
     }
 }
