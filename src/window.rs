@@ -3230,9 +3230,26 @@ impl ApplicationHandler<UserEvent> for App {
         let size = window.inner_size();
         let surface_w = size.width.clamp(1, 16_384);
         let surface_h = size.height.clamp(1, 16_384);
+        let caps = surface.get_capabilities(&adapter);
         let mut config = surface
             .get_default_config(&adapter, surface_w, surface_h)
             .expect("no se encontro formato de surface compatible");
+        // get_default_config toma el primer formato en el orden del driver,
+        // que varia entre backends y servidores graficos; se fija uno de la
+        // lista de preferencia para que el pipeline de color sea estable.
+        config.format = pick_surface_format(&caps.formats);
+        if !matches!(
+            config.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+        ) {
+            tracing::warn!(
+                "wgpu: surface sin formato no-sRGB de 8 bits; elegido {:?} \
+                 (soportados: {:?}). El pipeline de color queda en el camino \
+                 degradado",
+                config.format,
+                caps.formats,
+            );
+        }
         // Las variantes Auto* degradan solas si el backend no soporta
         // Mailbox/Immediate; las crudas pueden paniquear en configure.
         config.present_mode = if self.config.render.vsync {
@@ -3245,8 +3262,7 @@ impl ApplicationHandler<UserEvent> for App {
         config.desired_maximum_frame_latency = 1;
         // Si hay transparencia, asegurar que el alpha mode sea compatible
         if opacity < 1.0 {
-            let alpha_modes = surface.get_capabilities(&adapter).alpha_modes;
-            match select_alpha_mode(opacity, &alpha_modes) {
+            match select_alpha_mode(opacity, &caps.alpha_modes) {
                 Some(mode) => {
                     config.alpha_mode = mode;
                     config.view_formats = vec![config.format.add_srgb_suffix()];
@@ -3255,8 +3271,9 @@ impl ApplicationHandler<UserEvent> for App {
                 // opaca; mejor degradar que paniquear en configure.
                 None => tracing::warn!(
                     "window.opacity < 1.0 pero el backend GPU no soporta \
-                     swapchain translucida (alpha modes: {alpha_modes:?}); \
-                     la ventana sera opaca"
+                     swapchain translucida (alpha modes: {:?}); \
+                     la ventana sera opaca",
+                    caps.alpha_modes
                 ),
             }
         }
@@ -3277,7 +3294,7 @@ impl ApplicationHandler<UserEvent> for App {
             config.present_mode,
             adapter_info.backend,
             adapter_info.name,
-            surface.get_capabilities(&adapter).formats,
+            caps.formats,
         );
 
         // Pintar el fondo del tema y presentar ya: la ventana no queda vacia
@@ -4711,6 +4728,26 @@ fn select_windows_backdrop(opacity: f32) -> WindowsBackdropChoice {
     }
 }
 
+/// Formato de surface segun una lista de preferencia, limitado a lo que el
+/// backend soporta. El primer formato no-sRGB de 8 bits deja correctos a la
+/// vez el clear, el atlas de color y la mezcla del antialiasing en espacio
+/// codificado; sin el, cada consumidor tendria que linealizar por su cuenta.
+/// Si ninguno de la lista esta soportado se cae al primer formato del
+/// backend, asumiendo el camino degradado (avisa el llamante con `warn`).
+fn pick_surface_format(supported: &[wgpu::TextureFormat]) -> wgpu::TextureFormat {
+    const PREFERRED: &[wgpu::TextureFormat] = &[
+        wgpu::TextureFormat::Bgra8Unorm,
+        wgpu::TextureFormat::Rgba8Unorm,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+    ];
+    PREFERRED
+        .iter()
+        .copied()
+        .find(|f| supported.contains(f))
+        .unwrap_or(supported[0])
+}
+
 /// Alpha mode de la swapchain para una opacidad dada, limitado a lo que el
 /// backend soporta. `None` = dejar el default del surface config (ventana
 /// opaca): con opacidad plena es lo deseado, y con opacidad < 1.0 evita un
@@ -4745,6 +4782,26 @@ mod tests {
     use crate::pty::PtyCommandSender;
     use crate::renderer::limits::pixel_to_cell_coords;
     use std::sync::mpsc;
+
+    #[test]
+    fn formato_surface_prefiere_8bits_no_srgb() {
+        use wgpu::TextureFormat as F;
+        // Con ambos disponibles gana el no-sRGB: deja correctos a la vez el
+        // clear, el atlas de color y la mezcla del antialiasing.
+        assert_eq!(
+            pick_surface_format(&[F::Bgra8UnormSrgb, F::Bgra8Unorm]),
+            F::Bgra8Unorm
+        );
+        // Bgra tiene prioridad sobre Rgba dentro del mismo grupo.
+        assert_eq!(
+            pick_surface_format(&[F::Rgba8Unorm, F::Bgra8Unorm]),
+            F::Bgra8Unorm
+        );
+        // Sin opcion no-sRGB se acepta el sRGB de 8 bits (camino degradado).
+        assert_eq!(pick_surface_format(&[F::Bgra8UnormSrgb]), F::Bgra8UnormSrgb);
+        // Sin ninguno de la lista se cae al primer formato soportado.
+        assert_eq!(pick_surface_format(&[F::Rgba16Unorm]), F::Rgba16Unorm);
+    }
 
     #[test]
     fn alpha_mode_respeta_lo_soportado_por_el_backend() {
