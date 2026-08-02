@@ -653,12 +653,14 @@ impl App {
                 } else if self.is_session_in_active_tab(id) {
                     if let Some(idx) = self.session_by_id(id) {
                         self.sessions[idx].session.dirty = true;
+                        self.sessions[idx].session.has_activity = true;
                     }
                     if let Some(window) = &self.window {
                         window.request_redraw();
                     }
                 } else if let Some(idx) = self.session_by_id(id) {
                     self.sessions[idx].session.dirty = true;
+                    self.sessions[idx].session.has_activity = true;
                 }
             }
             UserEvent::PtyExited(id, code) => {
@@ -1153,26 +1155,35 @@ impl App {
         {
             return None;
         }
-        let titles: Vec<String> = if self.tabs.len() == 1 && has_custom_chrome {
-            let s = self.focused_session();
-            let cwd = s.term.try_lock().ok().and_then(|t| t.cwd.clone());
-            vec![crate::renderer::resolve_tab_title(
-                &s.title,
-                cwd.as_deref(),
-                None,
-            )]
-        } else {
-            self.tabs
-                .iter()
-                .filter_map(|tab| {
-                    self.session_by_id(tab.focused()).map(|idx| {
+        let (titles, activities): (Vec<String>, Vec<bool>) =
+            if self.tabs.len() == 1 && has_custom_chrome {
+                let s = self.focused_session();
+                let cwd = s.term.try_lock().ok().and_then(|t| t.cwd.clone());
+                (
+                    vec![crate::renderer::resolve_tab_title(
+                        &s.title,
+                        cwd.as_deref(),
+                        None,
+                    )],
+                    vec![false],
+                )
+            } else {
+                let mut titles = Vec::new();
+                let mut activities = Vec::new();
+                for tab in self.tabs.iter() {
+                    if let Some(idx) = self.session_by_id(tab.focused()) {
                         let s = &self.sessions[idx].session;
                         let cwd = s.term.try_lock().ok().and_then(|t| t.cwd.clone());
-                        crate::renderer::resolve_tab_title(&s.title, cwd.as_deref(), None)
-                    })
-                })
-                .collect()
-        };
+                        titles.push(crate::renderer::resolve_tab_title(
+                            &s.title,
+                            cwd.as_deref(),
+                            None,
+                        ));
+                        activities.push(s.has_activity);
+                    }
+                }
+                (titles, activities)
+            };
         let (pad_x, _) = renderer.content_padding();
         let (bar_x, bar_w) = if let Some(tb) = title_bar {
             (tb.tab_area_x, tb.tab_area_width)
@@ -1180,13 +1191,13 @@ impl App {
             let w = crate::renderer::tab_bar_inner_width(self.window_width, pad_x);
             (pad_x, w)
         };
-        Some(compute_layout(
-            &titles,
-            self.focused,
-            bar_x,
-            bar_w,
-            renderer.cell_w(),
-        ))
+        let mut layout = compute_layout(&titles, self.focused, bar_x, bar_w, renderer.cell_w());
+        for seg in &mut layout.segments {
+            if seg.index < activities.len() {
+                seg.activity = activities[seg.index];
+            }
+        }
+        Some(layout)
     }
 
     fn tab_bar_layout_with_mouse(
@@ -3681,6 +3692,10 @@ impl ApplicationHandler<UserEvent> for App {
                 );
                 let pane_rects = self.tabs[self.focused].layout().rects(terminal_area);
                 let focused_id = self.tabs[self.focused].focused();
+                // Al enfocar la sesion se apaga su indicador de actividad.
+                if let Some(idx) = self.session_by_id(focused_id) {
+                    self.sessions[idx].session.has_activity = false;
+                }
 
                 let any_pane_dirty = pane_rects.iter().any(|(id, _)| self.pane_is_dirty(*id));
                 let search_active = self
@@ -4961,6 +4976,7 @@ mod tests {
             dirty: false,
             hold: false,
             close_on_exit: false,
+            has_activity: false,
             input_reset_pending: Arc::new(AtomicBool::new(false)),
         }
     }

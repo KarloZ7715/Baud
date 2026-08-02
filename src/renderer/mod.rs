@@ -2352,6 +2352,21 @@ fn push_tab_bar<'a>(
         } else if hovered {
             crate::renderer::build_inactive_hover_chrome(seg.width_px, bar_h, 1.0, theme, chrome);
         }
+        if seg.activity {
+            // Punto de actividad: salida reciente mientras la sesion no estaba enfocada.
+            let dot = (5.0 * scale_factor).max(2.0);
+            let (yr, yg, yb) = parse_hex(&theme.yellow);
+            chrome.push(glyphon::CustomGlyph {
+                id: decorations::SOLID_MASK_GLYPH_ID,
+                left: 2.0,
+                top: (bar_h - dot) * 0.5,
+                width: dot,
+                height: dot,
+                color: Some(glyphon::Color::rgb(yr, yg, yb)),
+                snap_to_physical_pixel: true,
+                metadata: 0,
+            });
+        }
         if !chrome.is_empty() {
             extra_areas.push(glyphon::TextArea {
                 buffer: empty_buffer,

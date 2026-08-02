@@ -28,6 +28,8 @@ pub struct Session {
     pub hold: bool,
     /// Si es true, la sesion se lanzo desde `-e` y sin `--hold` debe cerrarse al salir.
     pub close_on_exit: bool,
+    /// Salida del PTY mientras la sesion no estaba enfocada (punto de actividad).
+    pub has_activity: bool,
     /// Reset de vista pendiente tras input del usuario (ver
     /// `Term::apply_input_reset`). Lo activa `send_input` y lo consumen el
     /// hilo de drain o la GUI, segun quien consiga el lock del term.

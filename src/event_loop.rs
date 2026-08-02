@@ -587,6 +587,7 @@ pub fn spawn_session(
         dirty: false,
         hold,
         close_on_exit,
+        has_activity: false,
         input_reset_pending,
     };
 

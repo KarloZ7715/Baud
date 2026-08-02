@@ -43,6 +43,8 @@ pub struct TabSegment {
     /// Titulo acortado para etiqueta.
     pub title_short: String,
     pub active: bool,
+    /// Salida reciente mientras la sesion no estaba enfocada (punto de actividad).
+    pub activity: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -231,6 +233,7 @@ fn build_segments(
             width_cells: w,
             title_short: shorten_tab_title(title),
             active: i == focused,
+            activity: false,
         });
         x += (w + gap) as f32 * cell_w;
     }
