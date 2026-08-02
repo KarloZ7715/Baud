@@ -34,6 +34,30 @@ pub use themes::{
     available_presets, preset, preset_entries, try_preset, PresetError, MIN_LEGIBLE_CONTRAST,
 };
 
+/// Modo de tema declarado en `[theme].mode`.
+///
+/// - `Auto`: sigue el esquema de color del sistema operativo (portal XDG en
+///   Linux, `winit` en Windows/macOS) y cae a oscuro si el SO no responde.
+/// - `Dark`/`Light`: fija la variante independientemente del SO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ColorMode {
+    #[default]
+    Auto,
+    Dark,
+    Light,
+}
+
+/// Esquema de color reportado por el sistema operativo (oscuro o claro).
+///
+/// Es la entrada que `ColorMode::Auto` resuelve contra el SO; no se declara
+/// en la config del usuario, la prove el runtime (portal/winit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorScheme {
+    Dark,
+    Light,
+}
+
 // ---------------------------------------------------------------------------
 // Estructuras principales
 // ---------------------------------------------------------------------------
@@ -47,6 +71,18 @@ pub struct Config {
     /// Preset embebido activo si la config lo declara por nombre.
     #[serde(skip)]
     pub theme_preset: Option<String>,
+    /// Modo de tema (`auto`/`dark`/`light`); recarga en caliente.
+    #[serde(skip)]
+    pub theme_mode: ColorMode,
+    /// Preset para la variante oscura (`None` = defaults oscuros de Baud).
+    #[serde(skip)]
+    pub theme_dark: Option<String>,
+    /// Preset para la variante clara (`None` = `DEFAULT_LIGHT_PRESET`).
+    #[serde(skip)]
+    pub theme_light: Option<String>,
+    /// Overrides sueltos de `[theme]`, re-aplicados al cambiar de variante.
+    #[serde(skip)]
+    theme_overrides: ThemeOverrides,
     #[serde(default)]
     pub font: FontConfig,
     #[serde(default)]
@@ -327,44 +363,54 @@ impl ThemeConfig {
     }
 }
 
-/// Tabla `[theme]` con campos opcionales para distinguir ausencia de override.
-macro_rules! define_theme_table {
+/// Overrides sueltos de `[theme]` (colores, selección, toggles, contraste):
+/// campos opcionales para distinguir ausencia de override. Se almacenan
+/// aparte del preset para re-aplicarlos sobre la variante resuelta cuando el
+/// modo del sistema cambia de polaridad.
+macro_rules! define_theme_overrides {
     ($( $field:ident ),+ $(,)?) => {
         #[derive(Debug, Clone, Default, Deserialize)]
-        struct ThemeTable {
-            name: Option<String>,
+        struct ThemeOverrides {
+            #[serde(default)]
             selection_bg: Option<String>,
+            #[serde(default)]
             selection_fg: Option<String>,
-            $( $field: Option<String>, )+
+            $(
+                #[serde(default)]
+                $field: Option<String>,
+            )+
+            #[serde(default)]
             bold_is_bright: Option<bool>,
+            #[serde(default)]
             dim_alpha: Option<bool>,
+            #[serde(default)]
             minimum_contrast: Option<f64>,
         }
 
-        fn apply_theme_overrides(base: &mut ThemeConfig, table: &ThemeTable) {
-            $( if let Some(v) = &table.$field {
+        fn apply_theme_overrides(base: &mut ThemeConfig, ov: &ThemeOverrides) {
+            $( if let Some(v) = &ov.$field {
                 base.$field.clone_from(v);
             } )+
-            if let Some(v) = &table.selection_bg {
+            if let Some(v) = &ov.selection_bg {
                 base.selection_bg = Some(v.clone());
             }
-            if let Some(v) = &table.selection_fg {
+            if let Some(v) = &ov.selection_fg {
                 base.selection_fg = Some(v.clone());
             }
-            if let Some(v) = table.bold_is_bright {
+            if let Some(v) = ov.bold_is_bright {
                 base.bold_is_bright = v;
             }
-            if let Some(v) = table.dim_alpha {
+            if let Some(v) = ov.dim_alpha {
                 base.dim_alpha = v;
             }
-            if let Some(v) = table.minimum_contrast {
+            if let Some(v) = ov.minimum_contrast {
                 base.minimum_contrast = clamp_minimum_contrast(v);
             }
         }
     };
 }
 
-define_theme_table!(
+define_theme_overrides!(
     foreground,
     background,
     cursor,
@@ -385,6 +431,26 @@ define_theme_table!(
     bright_cyan,
     bright_white,
 );
+
+/// Tabla `[theme]` cruda del TOML: modelo claro/oscuro + overrides sueltos.
+///
+/// `name` es la forma legada: equivale a fijar ambas variantes a ese preset
+/// con `mode = "dark"`. `mode`/`dark`/`light` son el modelo nuevo; los
+/// overrides (colores, toggles) se capturan vía `#[serde(flatten)]` y se
+/// aplican sobre la variante que quede activa.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ThemeTable {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    mode: Option<ColorMode>,
+    #[serde(default)]
+    dark: Option<String>,
+    #[serde(default)]
+    light: Option<String>,
+    #[serde(flatten)]
+    overrides: ThemeOverrides,
+}
 
 /// Representación cruda de `theme` en TOML: nombre o tabla inline.
 #[derive(Debug, Clone, Deserialize)]
@@ -453,28 +519,92 @@ fn theme_base_from_name(name: &str) -> ThemeConfig {
     }
 }
 
-fn resolve_theme(raw: RawTheme) -> (ThemeConfig, Option<String>) {
+/// Preset claro por defecto cuando el usuario declara `mode = "auto"` (o
+/// `light`) sin especificar `light`. Un par claro de cada familia oscura es
+/// objetivo del plan 009; este es el fallback cuando falta la mitad clara.
+const DEFAULT_LIGHT_PRESET: &str = "catppuccin-latte";
+
+/// Modelo claro/oscuro resuelto desde la tabla `[theme]` cruda, independiente
+/// del esquema del SO. Se guarda en `Config` para re-resolver en caliente
+/// cuando el SO cambia de modo sin releer disco.
+struct ThemeModel {
+    mode: ColorMode,
+    dark: Option<String>,
+    light: Option<String>,
+    overrides: ThemeOverrides,
+}
+
+fn resolve_theme_model(raw: RawTheme) -> ThemeModel {
     match raw {
-        RawTheme::Named(name) => (theme_base_from_name(&name), Some(name)),
+        RawTheme::Named(name) => ThemeModel {
+            mode: ColorMode::Dark,
+            dark: Some(name.clone()),
+            light: Some(name),
+            overrides: ThemeOverrides::default(),
+        },
         RawTheme::Table(table) => {
-            let preset_name = table.name.clone();
-            let mut base = table
-                .name
-                .as_deref()
-                .map(theme_base_from_name)
-                .unwrap_or_default();
-            apply_theme_overrides(&mut base, table.as_ref());
-            (base, preset_name)
+            // `mode` implícito: si hay `dark`/`light` es `auto`; si solo hay
+            // `name` (legado) es `dark`; sin nada, `dark` (defaults de Baud).
+            let mode = table.mode.unwrap_or_else(|| {
+                if table.dark.is_some() || table.light.is_some() {
+                    ColorMode::Auto
+                } else {
+                    ColorMode::Dark
+                }
+            });
+            let dark = table.dark.or_else(|| table.name.clone());
+            let light = table.light.or_else(|| table.name.clone());
+            ThemeModel {
+                mode,
+                dark,
+                light,
+                overrides: table.overrides,
+            }
         }
+    }
+}
+
+impl ThemeModel {
+    /// Resuelve el tema activo para un esquema de SO dado.
+    ///
+    /// `scheme = None` (desconocido, p. ej. al cargar antes de tener ventana)
+    /// cae a oscuro en modo `auto` — nunca bloquea el arranque.
+    fn resolve(&self, scheme: Option<ColorScheme>) -> (ThemeConfig, Option<String>) {
+        let active = match self.mode {
+            ColorMode::Dark => ColorScheme::Dark,
+            ColorMode::Light => ColorScheme::Light,
+            ColorMode::Auto => scheme.unwrap_or(ColorScheme::Dark),
+        };
+        let preset_name: Option<&str> = match active {
+            ColorScheme::Dark => self.dark.as_deref(),
+            ColorScheme::Light => self.light.as_deref(),
+        };
+        // Variante sin preset explícito: oscuro usa los defaults de Baud,
+        // claro usa el preset claro por defecto.
+        let preset_name = preset_name.or(match active {
+            ColorScheme::Dark => None,
+            ColorScheme::Light => Some(DEFAULT_LIGHT_PRESET),
+        });
+        let mut base = preset_name.map(theme_base_from_name).unwrap_or_default();
+        apply_theme_overrides(&mut base, &self.overrides);
+        (base, preset_name.map(str::to_string))
     }
 }
 
 impl From<RawConfig> for Config {
     fn from(raw: RawConfig) -> Self {
-        let (theme, theme_preset) = resolve_theme(raw.theme);
+        let model = resolve_theme_model(raw.theme);
+        // Al cargar, el esquema del SO aún se desconoce: resolver con `None`
+        // cae a la variante oscura. El runtime re-resuelve (`reconcile_theme`)
+        // cuando el portal/winit responde.
+        let (theme, theme_preset) = model.resolve(None);
         Self {
             theme,
             theme_preset,
+            theme_mode: model.mode,
+            theme_dark: model.dark,
+            theme_light: model.light,
+            theme_overrides: model.overrides,
             font: raw.font,
             window: raw.window,
             selection: raw.selection,
@@ -1136,6 +1266,24 @@ impl Config {
     /// Nombre del preset embebido si la config lo declara (`theme = "…"` o `[theme].name`).
     pub fn active_preset_name(&self) -> Option<&str> {
         self.theme_preset.as_deref()
+    }
+
+    /// Re-resuelve el tema activo para un esquema de SO dado, usando el modelo
+    /// (`mode`/`dark`/`light`/overrides) almacenado sin releer disco.
+    ///
+    /// Devuelve el `ThemeConfig` resuelto y el nombre del preset activo. Lo
+    /// usa el runtime (`reconcile_theme`) cuando el SO cambia de modo.
+    pub fn resolve_active_theme(
+        &self,
+        scheme: Option<ColorScheme>,
+    ) -> (ThemeConfig, Option<String>) {
+        ThemeModel {
+            mode: self.theme_mode,
+            dark: self.theme_dark.clone(),
+            light: self.theme_light.clone(),
+            overrides: self.theme_overrides.clone(),
+        }
+        .resolve(scheme)
     }
 
     /// Aplica al `Term` los campos de config que tienen efecto al arrancar.
@@ -1826,6 +1974,162 @@ dim_alpha = true
         assert_eq!(cfg.theme.background, nord.background);
         assert!(cfg.theme.bold_is_bright);
         assert!(cfg.theme.dim_alpha);
+    }
+
+    #[test]
+    fn theme_legacy_name_equivale_a_dark_ambas_variantes() {
+        let cfg: Config = toml::from_str("[theme]\nname = \"nord\"\n").unwrap();
+        assert_eq!(cfg.theme_mode, ColorMode::Dark);
+        assert_eq!(cfg.theme_dark.as_deref(), Some("nord"));
+        assert_eq!(cfg.theme_light.as_deref(), Some("nord"));
+        assert_eq!(cfg.theme_preset.as_deref(), Some("nord"));
+        let nord = crate::config::themes::preset("nord").unwrap();
+        assert_eq!(cfg.theme, nord);
+    }
+
+    #[test]
+    fn theme_mode_auto_dark_y_light_resuelve_a_oscura_al_cargar() {
+        let toml = r##"
+[theme]
+mode = "auto"
+dark = "claude-dark"
+light = "catppuccin-latte"
+"##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.theme_mode, ColorMode::Auto);
+        assert_eq!(cfg.theme_dark.as_deref(), Some("claude-dark"));
+        assert_eq!(cfg.theme_light.as_deref(), Some("catppuccin-latte"));
+        // Al cargar el esquema del SO se desconoce => cae a oscuro.
+        assert_eq!(cfg.theme_preset.as_deref(), Some("claude-dark"));
+    }
+
+    #[test]
+    fn resolve_active_theme_sigue_el_esquema_del_so_en_auto() {
+        let toml = r##"
+[theme]
+mode = "auto"
+dark = "claude-dark"
+light = "catppuccin-latte"
+"##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (dark_theme, dark_name) = cfg.resolve_active_theme(Some(ColorScheme::Dark));
+        assert_eq!(dark_name.as_deref(), Some("claude-dark"));
+        assert_eq!(
+            dark_theme.background,
+            crate::config::try_preset("claude-dark").unwrap().background
+        );
+
+        let (light_theme, light_name) = cfg.resolve_active_theme(Some(ColorScheme::Light));
+        assert_eq!(light_name.as_deref(), Some("catppuccin-latte"));
+        assert_eq!(
+            light_theme.background,
+            crate::config::try_preset("catppuccin-latte")
+                .unwrap()
+                .background
+        );
+    }
+
+    #[test]
+    fn resolve_active_theme_cae_a_dark_sin_esquema() {
+        let toml = r##"
+[theme]
+mode = "auto"
+dark = "nord"
+light = "catppuccin-latte"
+"##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (theme, name) = cfg.resolve_active_theme(None);
+        assert_eq!(name.as_deref(), Some("nord"));
+        assert_eq!(theme, crate::config::try_preset("nord").unwrap());
+    }
+
+    #[test]
+    fn theme_mode_dark_ignora_esquema_claro() {
+        let toml = r##"
+[theme]
+mode = "dark"
+dark = "nord"
+light = "catppuccin-latte"
+"##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (theme, name) = cfg.resolve_active_theme(Some(ColorScheme::Light));
+        assert_eq!(name.as_deref(), Some("nord"));
+        assert_eq!(theme, crate::config::try_preset("nord").unwrap());
+    }
+
+    #[test]
+    fn theme_mode_light_ignora_esquema_oscuro() {
+        let toml = r##"
+[theme]
+mode = "light"
+light = "catppuccin-latte"
+"##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (theme, name) = cfg.resolve_active_theme(Some(ColorScheme::Dark));
+        assert_eq!(name.as_deref(), Some("catppuccin-latte"));
+        assert_eq!(
+            theme,
+            crate::config::try_preset("catppuccin-latte").unwrap()
+        );
+    }
+
+    #[test]
+    fn theme_overrides_se_aplican_sobre_variante_resuelta() {
+        let toml = r##"
+[theme]
+mode = "light"
+light = "catppuccin-latte"
+background = "#ffffff"
+minimum_contrast = 3.0
+"##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (theme, _) = cfg.resolve_active_theme(Some(ColorScheme::Light));
+        assert_eq!(theme.background, "#ffffff");
+        assert_eq!(theme.minimum_contrast, 3.0);
+        // El resto de colores vienen del preset claro.
+        assert_eq!(
+            theme.foreground,
+            crate::config::try_preset("catppuccin-latte")
+                .unwrap()
+                .foreground
+        );
+    }
+
+    #[test]
+    fn theme_auto_sin_light_usa_preset_claro_por_defecto() {
+        let toml = r##"
+[theme]
+mode = "auto"
+dark = "claude-dark"
+"##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (_, name) = cfg.resolve_active_theme(Some(ColorScheme::Light));
+        assert_eq!(name.as_deref(), Some("catppuccin-latte"));
+    }
+
+    #[test]
+    fn theme_default_sin_seccion_es_dark_sin_preset() {
+        let cfg = Config::default();
+        assert_eq!(cfg.theme_mode, ColorMode::Dark);
+        assert!(cfg.theme_dark.is_none());
+        assert!(cfg.theme_light.is_none());
+        assert!(cfg.theme_preset.is_none());
+        assert_eq!(cfg.theme, ThemeConfig::default());
+    }
+
+    #[test]
+    fn theme_dark_y_light_toman_precedencia_sobre_name() {
+        let toml = r##"
+[theme]
+name = "nord"
+dark = "dracula"
+"##;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        // `dark` explícito gana sobre `name`; `light` cae a `name`.
+        assert_eq!(cfg.theme_dark.as_deref(), Some("dracula"));
+        assert_eq!(cfg.theme_light.as_deref(), Some("nord"));
+        // Con `dark` presente, el modo implícito es `auto`.
+        assert_eq!(cfg.theme_mode, ColorMode::Auto);
     }
 
     #[test]
