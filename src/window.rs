@@ -13,8 +13,11 @@ use std::time::{Duration, Instant};
 
 use crate::ansi::Term;
 use crate::clipboard::{self, CopyTarget};
+use crate::color_scheme::{self, SchemeSource};
 use crate::config::watch::WatchState;
-use crate::config::{persist, Config, ConfigSource, DecorationsKind, ProcessSection, StartupState};
+use crate::config::{
+    persist, ColorScheme, Config, ConfigSource, DecorationsKind, ProcessSection, StartupState,
+};
 use crate::copy_mode::CopyModeState;
 use crate::display_quirks::{self, DisplayQuirks};
 use crate::event_loop::{should_redraw, BlinkFocus};
@@ -75,6 +78,8 @@ pub enum UserEvent {
     ConfigReloaded(Box<Config>),
     /// Fallo al recargar config; se conserva la config en memoria.
     ConfigReloadFailed(String),
+    /// El sistema cambió de modo claro/oscuro (portal XDG o winit).
+    SystemColorScheme(ColorScheme),
 }
 
 fn winit_to_key(k: &Key) -> Option<KKey> {
@@ -279,6 +284,10 @@ pub struct App {
     copy_on_select_deadline: Option<Instant>,
     /// Selector interactivo de temas (exclusivo con copy mode).
     theme_picker: Option<ThemePickerState>,
+    /// Esquema de color del SO resuelto (None = sin señal, cae a oscuro).
+    system_color_scheme: Option<ColorScheme>,
+    /// Origen del esquema del SO (portal/winit/fallback) — info para el picker.
+    system_scheme_source: SchemeSource,
     /// Modal de consentimiento de primer arranque activo.
     consent_prompt_active: bool,
     /// Estado del watcher de config (sync mtime tras persistir tema).
@@ -493,6 +502,8 @@ impl App {
             selection_redraw_pending: false,
             copy_on_select_deadline: None,
             theme_picker: None,
+            system_color_scheme: None,
+            system_scheme_source: SchemeSource::default(),
             consent_prompt_active: false,
             config_watch,
             preedit: String::new(),
@@ -779,6 +790,11 @@ impl App {
                     window.request_redraw();
                 }
             }
+            UserEvent::SystemColorScheme(scheme) => {
+                self.system_color_scheme = Some(scheme);
+                self.system_scheme_source = SchemeSource::Portal;
+                self.reconcile_theme();
+            }
         }
     }
 
@@ -916,6 +932,10 @@ impl App {
         }
 
         self.config = new_cfg;
+        // Re-resolver el tema contra el esquema del SO conocido: una recarga
+        // de disco trae `theme` resuelto a dark-fallback (esquema desconocido
+        // al deserializar); aquí lo ajustamos al modo real del sistema.
+        self.reconcile_theme();
         self.redraw_interval_nanos.store(
             self.config
                 .render
@@ -948,6 +968,24 @@ impl App {
             );
             tracing::info!("{msg}");
             Some(msg)
+        }
+    }
+
+    /// Re-resuelve el tema activo contra el esquema del SO y redibuja.
+    ///
+    /// Usa el modelo (`theme_mode`/`theme_dark`/`theme_light`/overrides) de la
+    /// config en memoria sin releer disco. Lo invocan: el watcher del portal
+    /// (`UserEvent::SystemColorScheme`), el brazo `WindowEvent::ThemeChanged`
+    /// de winit, y `apply_config` tras una recarga desde disco.
+    fn reconcile_theme(&mut self) {
+        let (theme, preset) = self.config.resolve_active_theme(self.system_color_scheme);
+        self.config.theme = theme;
+        self.config.theme_preset = preset;
+        if let Ok(mut guard) = self.focused_term().try_lock() {
+            guard.mark_dirty();
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
         }
     }
 
@@ -3128,6 +3166,13 @@ impl ApplicationHandler<UserEvent> for App {
         );
         self.window = Some(window.clone());
         self.scale_factor = window.scale_factor();
+        // Esquema de color del SO vía winit (Win/Mac). En Linux winit devuelve
+        // None y el portal lo resuelve aparte; el `apply_config` final de
+        // `resumed` re-resuelve con lo que ya se conozca aquí.
+        if let Some(scheme) = color_scheme::system_color_scheme(&window) {
+            self.system_color_scheme = Some(scheme);
+            self.system_scheme_source = SchemeSource::Winit;
+        }
         // Resolver el refresco del monitor para `max_fps` automático.
         // current_monitor() devuelve None en algunos compositores Wayland y
         // en headless; refresh_rate_millihertz() puede devolver None igualmente.
@@ -4657,6 +4702,19 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
+            WindowEvent::ThemeChanged(theme) => {
+                // Windows/macOS: winit avisa cuando el escritorio cambia de
+                // modo. Re-resolvemos el tema por el mismo camino que el portal.
+                let scheme = match theme {
+                    winit::window::Theme::Dark => Some(ColorScheme::Dark),
+                    winit::window::Theme::Light => Some(ColorScheme::Light),
+                };
+                if let Some(scheme) = scheme {
+                    self.system_color_scheme = Some(scheme);
+                    self.system_scheme_source = SchemeSource::Winit;
+                    self.reconcile_theme();
+                }
+            }
             _ => {}
         }
     }
@@ -4673,6 +4731,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::PasteSearchReady(_) => "UserEvent::PasteSearchReady",
             UserEvent::ConfigReloaded(_) => "UserEvent::ConfigReloaded",
             UserEvent::ConfigReloadFailed(_) => "UserEvent::ConfigReloadFailed",
+            UserEvent::SystemColorScheme(_) => "UserEvent::SystemColorScheme",
         };
         let _guard = self.watchdog.enter(phase);
         self.dispatch_user_event(event);
@@ -4895,6 +4954,58 @@ mod tests {
             None,
             None,
         )
+    }
+    #[test]
+    fn system_color_scheme_conmuta_tema_en_modo_auto() {
+        use crate::config::ColorScheme;
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term);
+        let toml = r##"[theme]
+mode = "auto"
+dark = "claude-dark"
+light = "catppuccin-latte"
+"##;
+        app.config = toml::from_str(toml).unwrap();
+        let light_bg = crate::config::try_preset("catppuccin-latte")
+            .unwrap()
+            .background
+            .clone();
+        // El portal (o winit) reporta modo claro => el tema re-resuelve a la
+        // variante clara sin releer disco.
+        app.dispatch_user_event(UserEvent::SystemColorScheme(ColorScheme::Light));
+        assert_eq!(app.config.theme.background, light_bg);
+        assert_eq!(app.config.theme_preset.as_deref(), Some("catppuccin-latte"));
+        assert_eq!(app.system_scheme_source, SchemeSource::Portal);
+
+        // Vuelve a oscuro.
+        let dark_bg = crate::config::try_preset("claude-dark")
+            .unwrap()
+            .background
+            .clone();
+        app.dispatch_user_event(UserEvent::SystemColorScheme(ColorScheme::Dark));
+        assert_eq!(app.config.theme.background, dark_bg);
+        assert_eq!(app.config.theme_preset.as_deref(), Some("claude-dark"));
+    }
+
+    #[test]
+    fn reconcile_theme_respeta_modo_fijo_dark() {
+        use crate::config::ColorScheme;
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term);
+        let toml = r##"[theme]
+mode = "dark"
+dark = "nord"
+light = "catppuccin-latte"
+"##;
+        app.config = toml::from_str(toml).unwrap();
+        let nord_bg = crate::config::try_preset("nord")
+            .unwrap()
+            .background
+            .clone();
+        // mode=dark ignora el esquema del SO.
+        app.dispatch_user_event(UserEvent::SystemColorScheme(ColorScheme::Light));
+        assert_eq!(app.config.theme.background, nord_bg);
+        assert_eq!(app.config.theme_preset.as_deref(), Some("nord"));
     }
 
     #[test]

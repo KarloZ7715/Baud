@@ -781,6 +781,11 @@ pub fn run(opts: LaunchOptions) -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    // Observador del modo claro/oscuro del SO (portal XDG en Linux; no-op en
+    // Win/Mac donde winit provee theme()/ThemeChanged). Hilo propio: comunica
+    // por `UserEvent::SystemColorScheme` y nunca bloquea el arranque.
+    crate::color_scheme::spawn_portal_watcher(proxy.clone());
+
     let watchdog = EventLoopWatchdog::spawn_if(app_config.diagnostics.watchdog);
     if app_config.diagnostics.watchdog {
         tracing::info!(

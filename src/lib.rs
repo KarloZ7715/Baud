@@ -3,6 +3,7 @@ pub mod base64;
 pub mod cli;
 pub mod clipboard;
 pub mod color;
+pub mod color_scheme;
 pub mod config;
 #[cfg(windows)]
 pub mod console;

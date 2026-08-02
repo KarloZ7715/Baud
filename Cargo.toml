@@ -41,6 +41,10 @@ tempfile = "3"
 sys-locale = "0.3.2"
 tracing-appender = "0.2.5"
 notify-rust = { version = "~4.17.0", default-features = false, features = ["z"] }
+# Promovido a dependencia directa: ya venía en el árbol por notify-rust
+# (feature `z`), así que no añade tiempo de compilación. Lo usa el watcher
+# del portal XDG `org.freedesktop.appearance` para seguir el modo del SO.
+zbus = "5.18"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["term", "fs", "signal", "event", "poll", "user"] }
