@@ -287,7 +287,7 @@ fn value_default(value: &serde_json::Value) -> String {
 fn build_rows(
     descriptions: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, Vec<Row>>, Vec<String>> {
-    let cfg = baud::config::Config::default();
+    let cfg = baud::config::Config::default_without_theme_import();
     let value = serde_json::to_value(&cfg).expect("Config::default() serializa a JSON");
     let walked = walk_config(&value);
 
@@ -591,7 +591,7 @@ fn render_toml_table(
 }
 
 fn render_example_config_toml(descriptions: &BTreeMap<String, String>) -> String {
-    let cfg = baud::config::Config::default();
+    let cfg = baud::config::Config::default_without_theme_import();
     let value = serde_json::to_value(&cfg).expect("Config::default() serializa a JSON");
     let mut out = String::new();
     out.push_str("# Every option at its default, commented out. Uncomment and edit any\n");
@@ -825,7 +825,7 @@ mod tests {
 
         let parsed: baud::config::Config =
             toml::from_str(&uncommented).expect("el config descomentado debe parsear");
-        let expected = baud::config::Config::default();
+        let expected = baud::config::Config::default_without_theme_import();
         assert_eq!(parsed.theme, expected.theme);
         assert_eq!(parsed.font.family, expected.font.family);
         assert_eq!(parsed.font.size, expected.font.size);

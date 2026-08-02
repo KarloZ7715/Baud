@@ -769,6 +769,27 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// `Config::default()` con `theme.import = false` fijado antes de
+    /// resolver, para que no autodetecte el Omarchy de quien lo llama.
+    ///
+    /// Uso: generación de documentación (`docs-gen`), donde el resultado debe
+    /// ser el mismo sin importar el escritorio de la máquina que la genera.
+    /// Fijar `import` en la tabla cruda (no re-resolver después) es lo que
+    /// evita la autodetección; `disable_theme_import` en cambio sólo limpia
+    /// el estado ya resuelto, sin deshacer los colores que trajo el import.
+    pub fn default_without_theme_import() -> Self {
+        let raw = RawConfig {
+            theme: RawTheme::Table(Box::new(ThemeTable {
+                import: Some(RawImportSetting::Enabled(false)),
+                ..ThemeTable::default()
+            })),
+            ..RawConfig::default()
+        };
+        raw.into()
+    }
+}
+
 /// Configuración de la fuente (tipografía y tamaño).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FontConfig {
