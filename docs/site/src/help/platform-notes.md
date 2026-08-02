@@ -34,3 +34,7 @@ Baud detects your session's display backend at startup and adjusts a few behavio
 ## Clipboard backend by session
 
 Clipboard access depends on the same session detection — see [Selection and clipboard](../features/selection-and-clipboard.md#clipboard-backends) for what's available on Wayland, X11, and Windows.
+
+## Surface format and color emoji
+
+Baud negotiates a non-sRGB 8-bit surface format at startup, which keeps the background, text, and color emoji rendering identical across drivers and display servers. On the rare GPU/backend that offers no such format, Baud logs a warning and falls back to an sRGB surface; there, colors stay correct but color emoji can look slightly washed out, a known limitation of the text atlas library that Baud does not patch.
