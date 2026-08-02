@@ -21,6 +21,8 @@ pub const SCROLL_INDICATOR_CELLS: usize = 2;
 pub const TAB_CLOSE_WIDTH_CELLS: usize = 1;
 /// Padding horizontal interno del titulo (1 celda a cada lado).
 pub const TAB_LABEL_PAD_CELLS: usize = 1;
+/// Radio de las esquinas superiores de la tab activa (px logicos, variante C).
+pub const TAB_CORNER_RADIUS_LOGICAL: f32 = 7.0;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TabBarMouseState {
@@ -376,15 +378,16 @@ pub fn build_inactive_hover_chrome(
 
     use crate::renderer::decorations::SOLID_MASK_GLYPH_ID;
 
-    let (br, bg, bb) = crate::config::parse_hex(&theme.black);
-    let a = (112.0 * alpha.clamp(0.0, 1.0)) as u8;
+    let (fr, fg, fb) = crate::config::parse_hex(&theme.foreground);
+    // 5 % del foreground: realza la tab sin competir con la activa.
+    let a = (13.0 * alpha.clamp(0.0, 1.0)) as u8;
     out.push(CustomGlyph {
         id: SOLID_MASK_GLYPH_ID,
         left: 0.0,
         top: 0.0,
         width: width_px,
         height: bar_h,
-        color: Some(glyphon::Color::rgba(br, bg, bb, a)),
+        color: Some(glyphon::Color::rgba(fr, fg, fb, a)),
         snap_to_physical_pixel: true,
         metadata: 0,
     });
@@ -481,40 +484,87 @@ pub fn build_tab_track(
 }
 
 /// Chrome de un segmento (coordenadas relativas al TextArea del tab).
+///
+/// Variante C: la tab activa comparte fondo con el grid (se extiende hasta
+/// tocarlo), lleva esquinas superiores redondeadas y prescinde de la barra de
+/// acento: la fusion con el grid es el indicador de la tab activa.
 pub fn build_segment_chrome(
     width_px: f32,
     bar_h: f32,
+    gap_px: f32,
+    scale_factor: f32,
     active: bool,
     theme: &crate::config::ThemeConfig,
     out: &mut Vec<glyphon::CustomGlyph>,
 ) {
     use glyphon::CustomGlyph;
 
-    use crate::renderer::decorations::SOLID_MASK_GLYPH_ID;
+    use crate::renderer::decorations::{
+        CORNER_TL_MASK_GLYPH_ID, CORNER_TR_MASK_GLYPH_ID, SOLID_MASK_GLYPH_ID,
+    };
 
     out.clear();
     if !active {
         return;
     }
     let (br, bg, bb) = crate::config::parse_hex(&theme.background);
+    let fill = glyphon::Color::rgb(br, bg, bb);
+    let full_h = bar_h + gap_px;
+    let radius = (TAB_CORNER_RADIUS_LOGICAL * scale_factor).round();
+    // Radio demasiado pequeno o tab estrecha: rectangulo liso hasta el grid.
+    if radius < 1.0 || radius * 2.0 >= width_px.min(full_h) {
+        out.push(CustomGlyph {
+            id: SOLID_MASK_GLYPH_ID,
+            left: 0.0,
+            top: 0.0,
+            width: width_px,
+            height: full_h,
+            color: Some(fill),
+            snap_to_physical_pixel: true,
+            metadata: 0,
+        });
+        return;
+    }
+    let r = radius;
+    // Cuerpo (bajo las esquinas, hasta el grid) y franja superior central.
     out.push(CustomGlyph {
         id: SOLID_MASK_GLYPH_ID,
         left: 0.0,
-        top: 0.0,
+        top: r,
         width: width_px,
-        height: bar_h,
-        color: Some(glyphon::Color::rgb(br, bg, bb)),
+        height: full_h - r,
+        color: Some(fill),
         snap_to_physical_pixel: true,
         metadata: 0,
     });
-    let (cr, cg, cb) = crate::config::parse_hex(&theme.cursor);
     out.push(CustomGlyph {
         id: SOLID_MASK_GLYPH_ID,
+        left: r,
+        top: 0.0,
+        width: (width_px - 2.0 * r).max(0.0),
+        height: r,
+        color: Some(fill),
+        snap_to_physical_pixel: true,
+        metadata: 0,
+    });
+    // Esquinas: la mascara rellena el arco y deja el recorte transparente (asoma el track).
+    out.push(CustomGlyph {
+        id: CORNER_TL_MASK_GLYPH_ID,
         left: 0.0,
-        top: bar_h - 2.0,
-        width: width_px,
-        height: 2.0,
-        color: Some(glyphon::Color::rgb(cr, cg, cb)),
+        top: 0.0,
+        width: r,
+        height: r,
+        color: Some(fill),
+        snap_to_physical_pixel: true,
+        metadata: 0,
+    });
+    out.push(CustomGlyph {
+        id: CORNER_TR_MASK_GLYPH_ID,
+        left: width_px - r,
+        top: 0.0,
+        width: r,
+        height: r,
+        color: Some(fill),
         snap_to_physical_pixel: true,
         metadata: 0,
     });

@@ -1079,6 +1079,7 @@ impl Renderer {
                 &mut extra_areas,
                 draw_tab_track,
                 &mut self.contrast_cache,
+                self.scale_factor,
             );
         }
         if let Some(pre) = preedit.as_ref().filter(|p| !p.text.is_empty()) {
@@ -2272,6 +2273,7 @@ fn push_tab_bar<'a>(
     extra_areas: &mut Vec<glyphon::TextArea<'a>>,
     draw_track: bool,
     contrast_cache: &mut ContrastCache,
+    scale_factor: f32,
 ) {
     let pad_x = cell_metrics.padding_x;
     let inner_w = layout.bar_width_px;
@@ -2331,16 +2333,19 @@ fn push_tab_bar<'a>(
         }
 
         chrome.clear();
+        let hovered = layout.mouse.hover_index == Some(seg.index);
         if seg.active {
-            crate::renderer::build_segment_chrome(seg.width_px, bar_h, true, theme, chrome);
-        } else if show_close {
-            crate::renderer::build_inactive_hover_chrome(
+            crate::renderer::build_segment_chrome(
                 seg.width_px,
                 bar_h,
-                close_alpha,
+                tab_bar::TAB_CONTENT_GAP_PX,
+                scale_factor,
+                true,
                 theme,
                 chrome,
             );
+        } else if hovered {
+            crate::renderer::build_inactive_hover_chrome(seg.width_px, bar_h, 1.0, theme, chrome);
         }
         if !chrome.is_empty() {
             extra_areas.push(glyphon::TextArea {
