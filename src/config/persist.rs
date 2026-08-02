@@ -197,12 +197,16 @@ pub fn write_theme_preset(name: &str) -> Result<PersistOutcome, PersistError> {
 /// Escribe `theme.dark` o `theme.light` (según la polaridad del preset) y fija
 /// `theme.mode` a esa polaridad, preservando `name`, la otra variante y los
 /// overrides de color. Es el camino del theme picker (no el legado `name`).
+///
+/// `disable_import`: si había un import activo, el picker lo apaga
+/// (`theme.import = false`) para no dejar dos fuentes de tema peleando.
 pub fn write_theme_variant(
     name: &str,
     polarity: ColorScheme,
+    disable_import: bool,
 ) -> Result<PersistOutcome, PersistError> {
     let path = config_write_path();
-    write_theme_variant_at(&path, name, polarity)
+    write_theme_variant_at(&path, name, polarity, disable_import)
 }
 
 /// Versión de [`write_theme_variant`] sobre una ruta explícita (tests).
@@ -210,6 +214,7 @@ pub fn write_theme_variant_at(
     path: &Path,
     name: &str,
     polarity: ColorScheme,
+    disable_import: bool,
 ) -> Result<PersistOutcome, PersistError> {
     validate_preset(name)?;
     let (variant_key, mode_val): (&str, &str) = match polarity {
@@ -234,6 +239,9 @@ pub fn write_theme_variant_at(
             if let Item::Table(table) = item {
                 table.insert("mode", Item::Value(Value::from(mode_val)));
                 table.insert(variant_key, Item::Value(Value::from(name)));
+                if disable_import {
+                    table.insert("import", Item::Value(Value::from(false)));
+                }
             }
         }
         fs::write(path, doc.to_string()).map_err(|e| PersistError::Io(e.to_string()))?;
@@ -245,6 +253,9 @@ pub fn write_theme_variant_at(
         let mut table = toml_edit::Table::new();
         table.insert("mode", Item::Value(Value::from(mode_val)));
         table.insert(variant_key, Item::Value(Value::from(name)));
+        if disable_import {
+            table.insert("import", Item::Value(Value::from(false)));
+        }
         let mut doc = DocumentMut::new();
         doc.insert("theme", Item::Table(table));
         fs::write(path, doc.to_string()).map_err(|e| PersistError::Io(e.to_string()))?;
@@ -404,7 +415,7 @@ mod tests {
             "[theme]\nname = \"nord\"\nbackground = \"#000000\"\n",
         )
         .unwrap();
-        let outcome = write_theme_variant_at(&path, "dracula", ColorScheme::Dark).unwrap();
+        let outcome = write_theme_variant_at(&path, "dracula", ColorScheme::Dark, false).unwrap();
         let s = fs::read_to_string(&path).unwrap();
         assert!(s.contains("mode = \"dark\""));
         assert!(s.contains("dark = \"dracula\""));
@@ -420,7 +431,7 @@ mod tests {
         let path = temp_config_path("variant_light");
         cleanup(&path);
         fs::write(&path, "[theme]\ndark = \"claude-dark\"\n").unwrap();
-        write_theme_variant_at(&path, "catppuccin-latte", ColorScheme::Light).unwrap();
+        write_theme_variant_at(&path, "catppuccin-latte", ColorScheme::Light, false).unwrap();
         let s = fs::read_to_string(&path).unwrap();
         assert!(s.contains("mode = \"light\""));
         assert!(s.contains("light = \"catppuccin-latte\""));
@@ -434,7 +445,7 @@ mod tests {
         let path = temp_config_path("variant_root");
         cleanup(&path);
         fs::write(&path, "theme = \"claude-dark\"\nfont.size = 14\n").unwrap();
-        write_theme_variant_at(&path, "nord", ColorScheme::Dark).unwrap();
+        write_theme_variant_at(&path, "nord", ColorScheme::Dark, false).unwrap();
         let s = fs::read_to_string(&path).unwrap();
         // El string raíz se convierte en tabla con mode + dark (toml_edit puede
         // conservar decor de la key original, p. ej. `[theme ]` — TOML válido).
@@ -451,11 +462,37 @@ mod tests {
     fn write_theme_variant_crea_archivo_nuevo() {
         let path = temp_config_path("variant_new");
         cleanup(&path);
-        write_theme_variant_at(&path, "nord", ColorScheme::Dark).unwrap();
+        write_theme_variant_at(&path, "nord", ColorScheme::Dark, false).unwrap();
         let s = fs::read_to_string(&path).unwrap();
         assert!(s.contains("[theme]"));
         assert!(s.contains("mode = \"dark\""));
         assert!(s.contains("dark = \"nord\""));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn write_theme_variant_desactiva_import_activo() {
+        let path = temp_config_path("variant_disable_import");
+        cleanup(&path);
+        fs::write(
+            &path,
+            "[theme]\nimport = \"~/.config/omarchy/current/theme/foot.ini\"\n",
+        )
+        .unwrap();
+        write_theme_variant_at(&path, "nord", ColorScheme::Dark, true).unwrap();
+        let s = fs::read_to_string(&path).unwrap();
+        assert!(s.contains("import = false"));
+        assert!(s.contains("dark = \"nord\""));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn write_theme_variant_sin_import_activo_no_escribe_la_clave() {
+        let path = temp_config_path("variant_no_import_key");
+        cleanup(&path);
+        write_theme_variant_at(&path, "nord", ColorScheme::Dark, false).unwrap();
+        let s = fs::read_to_string(&path).unwrap();
+        assert!(!s.contains("import"));
         cleanup(&path);
     }
 }

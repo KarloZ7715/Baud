@@ -37,10 +37,18 @@ pub struct ThemePickerState {
     scheme_source: SchemeSource,
     /// Esquema del SO resuelto (`None` = sin señal, cae a oscuro).
     system_scheme: Option<ColorScheme>,
+    /// Etiqueta del import activo al abrir (`Some` => hay una fila "import").
+    import_label: Option<String>,
+    /// La selección actual es la fila de import (antes que cualquier preset).
+    on_import: bool,
 }
 
 impl ThemePickerState {
     /// Abre el picker guardando el tema actual para restaurar al cancelar.
+    ///
+    /// `import_label`: etiqueta del import activo (`Config::active_import_label`),
+    /// si hay uno. Antepone una fila seleccionable a la lista.
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         theme: &ThemeConfig,
         active_preset: Option<&str>,
@@ -48,6 +56,7 @@ impl ThemePickerState {
         mode: ColorMode,
         scheme_source: SchemeSource,
         system_scheme: Option<ColorScheme>,
+        import_label: Option<String>,
     ) -> Self {
         let presets = available_presets();
         let mut filtered_indices: Vec<usize> = (0..presets.len()).collect();
@@ -55,6 +64,9 @@ impl ThemePickerState {
         let index = active_preset
             .and_then(|name| filtered_indices.iter().position(|&i| presets[i] == name))
             .unwrap_or(0);
+        // El import, cuando está activo, es lo que realmente se ve en pantalla
+        // (gana sobre el preset base); arranca seleccionado por eso.
+        let on_import = import_label.is_some();
         Self {
             saved_theme: theme.clone(),
             saved_preset: active_preset.map(str::to_string),
@@ -66,7 +78,19 @@ impl ThemePickerState {
             mode,
             scheme_source,
             system_scheme,
+            import_label,
+            on_import,
         }
+    }
+
+    /// La fila de import está presente en la lista (etiqueta a mostrar).
+    pub fn import_label(&self) -> Option<&str> {
+        self.import_label.as_deref()
+    }
+
+    /// La selección actual es la fila de import, no un preset.
+    pub fn is_import_selected(&self) -> bool {
+        self.on_import
     }
 
     /// Modo de tema activo (para mostrar en el panel).
@@ -96,9 +120,9 @@ impl ThemePickerState {
         self.saved_copy_mode
     }
 
-    /// Hay un preset seleccionable (lista filtrada no vacía).
+    /// Hay algo seleccionable: un preset en la lista filtrada, o la fila de import.
     pub fn can_confirm(&self) -> bool {
-        !self.filtered_indices.is_empty()
+        self.on_import || !self.filtered_indices.is_empty()
     }
 
     pub fn filter(&self) -> &str {
@@ -116,7 +140,14 @@ impl ThemePickerState {
     }
 
     /// Nombre del preset seleccionado en la lista filtrada.
+    ///
+    /// `None` mientras la fila de import está seleccionada, además del caso
+    /// habitual de lista vacía — usar [`Self::is_import_selected`] para
+    /// distinguirlos.
     pub fn try_selected_name(&self) -> Option<&'static str> {
+        if self.on_import {
+            return None;
+        }
         let presets = available_presets();
         self.filtered_indices
             .get(self.index)
@@ -132,65 +163,120 @@ impl ThemePickerState {
             .count()
     }
 
-    /// Fila (0-based, contando cabeceras de grupo) del preset seleccionado en
-    /// la lista renderizada. `None` si la lista está vacía.
+    /// Fila (0-based, contando la fila de import y las cabeceras de grupo) del
+    /// elemento seleccionado en la lista renderizada. `None` si la lista está
+    /// vacía y no hay import.
     ///
-    /// El overlay usa este valor para posicionar el resaltado vertical, ya que
-    /// las cabeceras "Dark"/"Light" desplazan los presets.
+    /// El overlay usa este valor para posicionar el resaltado vertical: la
+    /// fila de import (si hay) y las cabeceras "Dark"/"Light" desplazan los
+    /// presets.
     pub fn selected_row(&self) -> Option<usize> {
+        let import_offset = self.import_label.is_some() as usize;
+        if self.on_import {
+            return Some(0);
+        }
         let presets = available_presets();
         let idx = *self.filtered_indices.get(self.index)?;
         let dark_count = self.dark_count();
         let has_dark = dark_count > 0;
         let has_light = self.filtered_indices.len() > dark_count;
         if preset_polarity(presets[idx]) == ColorScheme::Dark {
-            Some(has_dark as usize + self.index)
+            Some(import_offset + has_dark as usize + self.index)
         } else {
-            Some(has_dark as usize + dark_count + has_light as usize + (self.index - dark_count))
+            Some(
+                import_offset
+                    + has_dark as usize
+                    + dark_count
+                    + has_light as usize
+                    + (self.index - dark_count),
+            )
         }
     }
 
-    /// Tema del preset en preview.
+    /// Tema en preview: el import activo si esa fila está seleccionada
+    /// (idéntico a lo ya mostrado en pantalla), o el preset seleccionado.
     pub fn preview_theme(&self) -> ThemeConfig {
+        if self.on_import {
+            return self.saved_theme.clone();
+        }
         self.try_selected_name()
             .and_then(|name| try_preset(name).ok())
             .unwrap_or_else(|| self.saved_theme.clone())
     }
 
+    /// Trata la fila de import como una posición virtual antes del índice 0:
+    /// avanzar/retroceder entra y sale de ella igual que de cualquier otra fila.
     pub fn move_next(&mut self) {
+        if self.on_import {
+            if !self.filtered_indices.is_empty() {
+                self.on_import = false;
+                self.index = 0;
+            }
+            return;
+        }
         if self.filtered_indices.is_empty() {
             return;
         }
-        self.index = (self.index + 1) % self.filtered_indices.len();
+        if self.index + 1 >= self.filtered_indices.len() {
+            if self.import_label.is_some() {
+                self.on_import = true;
+            } else {
+                self.index = 0;
+            }
+        } else {
+            self.index += 1;
+        }
     }
 
     pub fn move_prev(&mut self) {
+        if self.on_import {
+            if !self.filtered_indices.is_empty() {
+                self.on_import = false;
+                self.index = self.filtered_indices.len() - 1;
+            }
+            return;
+        }
         if self.filtered_indices.is_empty() {
             return;
         }
-        self.index = self
-            .index
-            .checked_sub(1)
-            .unwrap_or(self.filtered_indices.len() - 1);
+        if self.index == 0 {
+            if self.import_label.is_some() {
+                self.on_import = true;
+            } else {
+                self.index = self.filtered_indices.len() - 1;
+            }
+        } else {
+            self.index -= 1;
+        }
     }
 
     pub fn page_down(&mut self) {
         if self.filtered_indices.is_empty() {
             return;
         }
+        self.on_import = false;
         let len = self.filtered_indices.len();
         self.index = (self.index + PAGE_STEP.min(len)).min(len - 1);
     }
 
     pub fn page_up(&mut self) {
+        if self.on_import {
+            return;
+        }
+        if self.index < PAGE_STEP && self.import_label.is_some() {
+            self.on_import = true;
+            return;
+        }
         self.index = self.index.saturating_sub(PAGE_STEP);
     }
 
     pub fn move_home(&mut self) {
         self.index = 0;
+        self.on_import = self.import_label.is_some();
     }
 
     pub fn move_end(&mut self) {
+        self.on_import = false;
         if !self.filtered_indices.is_empty() {
             self.index = self.filtered_indices.len() - 1;
         }
@@ -287,6 +373,7 @@ mod tests {
             ColorMode::Dark,
             SchemeSource::Fallback,
             None,
+            None,
         );
         p.set_filter("drac");
         assert_eq!(p.filtered_presets(), vec!["dracula"]);
@@ -300,6 +387,7 @@ mod tests {
             None,
             ColorMode::Dark,
             SchemeSource::Fallback,
+            None,
             None,
         );
         p.set_filter("zzz_sin_match");
@@ -319,6 +407,7 @@ mod tests {
             ColorMode::Dark,
             SchemeSource::Fallback,
             None,
+            None,
         );
         p.set_filter("dracula");
         assert_eq!(p.try_selected_name(), Some("dracula"));
@@ -334,6 +423,7 @@ mod tests {
             None,
             ColorMode::Dark,
             SchemeSource::Fallback,
+            None,
             None,
         );
         let first = p.try_selected_name().unwrap();
@@ -353,6 +443,7 @@ mod tests {
             ColorMode::Dark,
             SchemeSource::Fallback,
             None,
+            None,
         );
         assert_eq!(p.filtered_presets().len(), available_presets().len());
     }
@@ -365,6 +456,7 @@ mod tests {
             None,
             ColorMode::Dark,
             SchemeSource::Fallback,
+            None,
             None,
         );
         let t = p.preview_theme();
@@ -382,6 +474,7 @@ mod tests {
             ColorMode::Dark,
             SchemeSource::Fallback,
             None,
+            None,
         );
         assert_eq!(p.saved_copy_mode(), Some(cm));
     }
@@ -394,6 +487,7 @@ mod tests {
             None,
             ColorMode::Dark,
             SchemeSource::Fallback,
+            None,
             None,
         );
         p.start_search();
@@ -418,6 +512,7 @@ mod tests {
             ColorMode::Dark,
             SchemeSource::Fallback,
             None,
+            None,
         );
         p.set_filter("dark");
         let names = p.filtered_presets();
@@ -434,6 +529,7 @@ mod tests {
             None,
             ColorMode::Dark,
             SchemeSource::Fallback,
+            None,
             None,
         );
         let names = p.filtered_presets();
@@ -458,6 +554,7 @@ mod tests {
             ColorMode::Dark,
             SchemeSource::Fallback,
             None,
+            None,
         );
         // Cabecera "dark" en fila 0 => primer preset oscuro en fila 1.
         p.move_home();
@@ -476,6 +573,7 @@ mod tests {
             ColorMode::Dark,
             SchemeSource::Fallback,
             None,
+            None,
         );
         p.set_filter("light");
         assert_eq!(p.dark_count(), 0);
@@ -486,5 +584,79 @@ mod tests {
             preset_polarity(p.try_selected_name().unwrap()),
             ColorScheme::Light
         );
+    }
+
+    fn picker_con_import(theme: &ThemeConfig, label: &str) -> ThemePickerState {
+        ThemePickerState::open(
+            theme,
+            None,
+            None,
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+            Some(label.to_string()),
+        )
+    }
+
+    #[test]
+    fn con_import_activo_arranca_seleccionado_en_la_fila_de_import() {
+        let theme = ThemeConfig::default();
+        let p = picker_con_import(&theme, "Omarchy — waves");
+        assert!(p.is_import_selected());
+        assert_eq!(p.try_selected_name(), None);
+        assert_eq!(p.import_label(), Some("Omarchy — waves"));
+        assert_eq!(p.selected_row(), Some(0));
+        assert!(p.can_confirm());
+        // El preview de la fila de import es el tema ya activo (el import).
+        assert_eq!(p.preview_theme(), theme);
+    }
+
+    #[test]
+    fn mover_desde_import_entra_a_la_lista_y_viceversa() {
+        let theme = ThemeConfig::default();
+        let mut p = picker_con_import(&theme, "Omarchy — waves");
+        p.move_next();
+        assert!(!p.is_import_selected());
+        assert!(p.try_selected_name().is_some());
+        // Cabecera "dark" desplaza la fila de import + la lista una posición.
+        assert_eq!(p.selected_row(), Some(1 + 1));
+
+        p.move_prev();
+        assert!(p.is_import_selected());
+        assert_eq!(p.selected_row(), Some(0));
+
+        // Retroceder desde el import da la vuelta al final de la lista.
+        p.move_prev();
+        assert!(!p.is_import_selected());
+        assert_eq!(p.try_selected_name(), p.filtered_presets().last().copied());
+    }
+
+    #[test]
+    fn home_y_end_respetan_la_fila_de_import() {
+        let theme = ThemeConfig::default();
+        let mut p = picker_con_import(&theme, "Omarchy — waves");
+        p.move_next();
+        p.move_home();
+        assert!(p.is_import_selected());
+
+        p.move_end();
+        assert!(!p.is_import_selected());
+        assert_eq!(p.try_selected_name(), p.filtered_presets().last().copied());
+    }
+
+    #[test]
+    fn sin_import_activo_no_hay_fila_que_seleccionar() {
+        let p = ThemePickerState::open(
+            &ThemeConfig::default(),
+            None,
+            None,
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+            None,
+        );
+        assert!(!p.is_import_selected());
+        assert!(p.import_label().is_none());
+        assert!(p.try_selected_name().is_some());
     }
 }

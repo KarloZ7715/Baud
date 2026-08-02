@@ -259,6 +259,15 @@ pub fn fill_buffers(
     let selected = picker.try_selected_name();
     let mut list_spans: Vec<(String, Attrs<'_>)> = Vec::new();
 
+    if let Some(label) = picker.import_label() {
+        let marker = if picker.is_import_selected() {
+            "▸ "
+        } else {
+            "  "
+        };
+        list_spans.push((format!("{marker}{label}\n"), list_attrs.clone()));
+    }
+
     if presets.is_empty() {
         list_spans.push((String::from("(sin coincidencias)\n"), list_attrs.clone()));
         if picker.is_search_mode() || !picker.filter().is_empty() {
@@ -322,6 +331,19 @@ pub fn fill_buffers(
             }
         };
         detail_spans.push((mode_label, label_attrs));
+    } else if let Some(label) = picker
+        .import_label()
+        .filter(|_| picker.is_import_selected())
+    {
+        detail_spans.push((format!("{label}\n\n"), header_attrs));
+        detail_spans.push((
+            String::from("Paleta ANSI 0-7 / 8-15\n"),
+            label_attrs.clone(),
+        ));
+        detail_spans.push((
+            String::from("Elegir un preset desactiva este import\n"),
+            label_attrs,
+        ));
     } else {
         detail_spans.push((
             String::from("(sin coincidencias)\n\nEnter deshabilitado\n\n"),
@@ -495,6 +517,7 @@ mod tests {
             None,
             ColorMode::Dark,
             SchemeSource::Fallback,
+            None,
             None,
         );
         let glyphs = build_custom_glyphs(&picker, &ThemeConfig::default(), 10.0, 20.0, 800, 600);

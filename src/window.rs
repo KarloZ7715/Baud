@@ -2342,6 +2342,7 @@ impl App {
             self.config.theme_mode,
             self.system_scheme_source,
             self.system_color_scheme,
+            self.config.active_import_label().map(str::to_string),
         ));
         if let Ok(mut guard) = self.focused_term().lock() {
             guard.mark_dirty();
@@ -2363,6 +2364,12 @@ impl App {
     }
 
     fn confirm_theme_picker(&mut self, picker: ThemePickerState) {
+        // La fila de import no es un preset que persistir: confirmar sobre
+        // ella deja el import (ya activo) tal cual, igual que cancelar.
+        if picker.is_import_selected() {
+            self.cancel_theme_picker(picker);
+            return;
+        }
         let Some(name) = picker.try_selected_name() else {
             self.theme_picker = Some(picker);
             if let Some(renderer) = &mut self.renderer {
@@ -2372,10 +2379,14 @@ impl App {
         };
         let name = name.to_string();
         let polarity = preset_polarity(&name);
-        match persist::write_theme_variant(&name, polarity) {
+        let had_import = self.config.theme_import_label.is_some();
+        match persist::write_theme_variant(&name, polarity, had_import) {
             Ok(outcome) => {
                 if let Ok(mut watch) = self.config_watch.lock() {
                     watch.sync(persist::file_mtime(&outcome.path));
+                    if had_import {
+                        watch.set_import_targets(Vec::new());
+                    }
                 }
                 // Aplicar el preset elegido y actualizar el modelo en memoria:
                 // la variante correspondiente + el modo fijado a su polaridad
@@ -2389,6 +2400,9 @@ impl App {
                 match polarity {
                     ColorScheme::Dark => self.config.theme_dark = Some(name.clone()),
                     ColorScheme::Light => self.config.theme_light = Some(name.clone()),
+                }
+                if had_import {
+                    self.config.disable_theme_import();
                 }
                 self.theme_picker = None;
                 if let Ok(mut guard) = self.focused_term().lock() {
@@ -5434,6 +5448,7 @@ import = false
             None,
             crate::config::ColorMode::Dark,
             SchemeSource::Fallback,
+            None,
             None,
         ));
         let preview = app.effective_theme();

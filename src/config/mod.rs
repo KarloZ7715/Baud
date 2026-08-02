@@ -1411,6 +1411,15 @@ impl Config {
         self.theme_import_label.as_deref()
     }
 
+    /// Apaga el import en memoria (el picker, al elegir un preset explícito).
+    /// No toca disco; `persist::write_theme_variant` es quien escribe
+    /// `import = false` en `config.toml`.
+    pub fn disable_theme_import(&mut self) {
+        self.theme_import_setting = ImportSetting::Disabled;
+        self.theme_import_label = None;
+        self.theme_import_watch_paths.clear();
+    }
+
     /// Re-resuelve el tema activo para un esquema de SO dado, usando el modelo
     /// (`mode`/`dark`/`light`/import/overrides) almacenado sin releer disco de
     /// config (el archivo importado, si hay uno, sí se relee: es pequeño y
