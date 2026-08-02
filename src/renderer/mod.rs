@@ -285,6 +285,10 @@ pub struct Renderer {
     frame_count: u64,
     /// Fallos de adquisición del swapchain desde el arranque.
     acquire_failures: AcquireFailureState,
+    /// Panes que este frame se pintaron desde la caché porque el `Term`
+    /// estaba tomado por el hilo drain. Su contenido nuevo NO se pinto, así
+    /// que el llamador debe conservar el dirty y pedir otro redraw.
+    stale_panes: Vec<SessionId>,
     /// Rango normalizado de seleccion del frame anterior (start_row, start_col,
     /// end_row, end_col). Cuando cambia, invalida damage en filas afectadas.
     prev_selection_bounds: Option<(usize, usize, usize, usize)>,
@@ -471,6 +475,11 @@ impl Renderer {
         self.acquire_failures.take()
     }
 
+    /// Consume la lista de panes servidos desde caché en el último frame.
+    pub fn take_stale_panes(&mut self) -> Vec<SessionId> {
+        std::mem::take(&mut self.stale_panes)
+    }
+
     /// Inicializa wgpu, glyphon y la surface configuration.
     ///
     /// `font_system` llega pre-construido: el caller lo arma en paralelo con la
@@ -616,6 +625,7 @@ impl Renderer {
             status_needs_present: false,
             frame_count: 0,
             acquire_failures: AcquireFailureState::default(),
+            stale_panes: Vec::new(),
             prev_selection_bounds: None,
             prev_scrollback_offset: 0,
             prev_focused_session_id: None,
@@ -1050,6 +1060,7 @@ impl Renderer {
             self.prev_overrides = overrides.clone();
         }
 
+        self.stale_panes.clear();
         let t_build = Instant::now();
         let mut all_custom_glyphs = Vec::new();
         let mut updated_panes = Vec::with_capacity(panes.len());
@@ -1089,15 +1100,21 @@ impl Renderer {
                     updated_panes.push(pane.session_id);
                 }
                 Err(_) => {
-                    if self.emit_cached_pane_glyphs(
+                    // El drain tiene el Term. Se pinta la cache para no dejar
+                    // el pane en negro, pero el contenido nuevo no ha entrado
+                    // en el frame: el pane NO se anota como actualizado y se
+                    // registra como obsoleto para que el llamador conserve el
+                    // dirty y pida otro redraw. Anotarlo como actualizado era
+                    // el origen del "lag de un caracter": el eco se perdia
+                    // hasta el evento siguiente.
+                    self.stale_panes.push(pane.session_id);
+                    self.emit_cached_pane_glyphs(
                         pane.session_id,
                         &pane_metrics,
                         &palette,
                         theme,
                         &mut all_custom_glyphs,
-                    )? {
-                        updated_panes.push(pane.session_id);
-                    }
+                    )?;
                 }
             }
         }
@@ -2837,6 +2854,25 @@ pub fn resolve_family(name: &str) -> glyphon::Family<'_> {
 mod tests {
     use super::*;
     use crate::ansi::{Color, Term};
+
+    #[test]
+    fn panes_servidos_desde_cache_no_cuentan_como_actualizados() {
+        let mut stale: Vec<SessionId> = Vec::new();
+        let a = SessionId::next();
+        let b = SessionId::next();
+
+        // Simula el resultado de un frame: `a` se repinto, `b` se sirvio desde
+        // cache porque el drain tenia el Term.
+        let updated = [a];
+        stale.push(b);
+
+        assert!(
+            !updated.contains(&b),
+            "un pane servido desde cache no esta actualizado: su contenido nuevo \
+             sigue sin pintarse"
+        );
+        assert_eq!(stale, vec![b]);
+    }
 
     fn feed(term: &mut Term, data: &[u8]) {
         let mut parser = vte::Parser::new();

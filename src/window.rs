@@ -392,6 +392,9 @@ pub struct App {
     /// cuesta hasta 1000 ms de event loop bloqueado, y el timer de parpadeo
     /// pide redraws cada 500 ms, así que sin backoff el fallo se realimenta.
     last_acquire_failure: Option<Instant>,
+    /// True cuando el último frame dejó algún pane sin repintar (el `Term`
+    /// estaba tomado). Obliga a un redraw de seguimiento.
+    followup_redraw: bool,
 }
 
 /// Recopila muestras de latencia (µs) y registra p50/p95/p99 cada N.
@@ -580,6 +583,7 @@ impl App {
             latency_probe: LatencyProbeStats::new(),
             occluded: false,
             last_acquire_failure: None,
+            followup_redraw: false,
         }
     }
 
@@ -3045,6 +3049,34 @@ impl App {
             .unwrap_or(true)
     }
 
+    /// Aplica el resultado de un frame: limpia el dirty de los panes que sí
+    /// se repintaron (`updated`) y lo conserva en los que se sirvieron desde
+    /// caché porque el `Term` estaba ocupado (`stale`). Los panes con frame
+    /// sincronizado en curso no llegan aquí: el llamador los filtra antes.
+    pub(crate) fn settle_frame_result(&mut self, updated: Vec<SessionId>, stale: Vec<SessionId>) {
+        for id in updated {
+            let Some(idx) = self.session_by_id(id) else {
+                continue;
+            };
+            self.sessions[idx].session.dirty = false;
+            if let Ok(mut guard) = self.sessions[idx].session.term.try_lock() {
+                guard.take_dirty();
+            }
+        }
+        for id in stale {
+            if let Some(idx) = self.session_by_id(id) {
+                self.sessions[idx].session.dirty = true;
+            }
+            self.followup_redraw = true;
+        }
+    }
+
+    /// True si el último frame dejó trabajo sin pintar.
+    #[cfg(test)]
+    pub(crate) fn needs_followup_redraw(&self) -> bool {
+        self.followup_redraw
+    }
+
     /// Coordenadas de celda (row, col) dentro del pane enfocado para smart_split.
     fn mouse_cell_coords_in_focused_pane(
         &self,
@@ -4048,17 +4080,16 @@ impl ApplicationHandler<UserEvent> for App {
                                 );
                             }
                         }
-                        for id in updated {
+                        let stale = renderer.take_stale_panes();
+                        let (kept, settled): (Vec<_>, Vec<_>) = updated
+                            .into_iter()
+                            .partition(|id| deferred_at_schedule.contains(id));
+                        // Frames diferidos por sync: no limpiar dirty, se
+                        // reintenta al cerrar el sync.
+                        self.settle_frame_result(settled, stale);
+                        for id in kept {
                             if let Some(idx) = self.session_by_id(id) {
-                                if deferred_at_schedule.contains(&id) {
-                                    // Frame diferido: no limpiar dirty; reintentar al cerrar sync.
-                                    self.sessions[idx].session.dirty = true;
-                                    continue;
-                                }
-                                self.sessions[idx].session.dirty = false;
-                                if let Ok(mut guard) = self.sessions[idx].session.term.try_lock() {
-                                    guard.take_dirty();
-                                }
+                                self.sessions[idx].session.dirty = true;
                             }
                         }
                     }
@@ -4126,6 +4157,11 @@ impl ApplicationHandler<UserEvent> for App {
                             // próxima presentación que sí contenga el eco.
                             self.pending_echo = Some(t_echo);
                         }
+                    }
+                }
+                if std::mem::take(&mut self.followup_redraw) {
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
                     }
                 }
                 self.drain_triggered_redraw = false;
@@ -5608,6 +5644,28 @@ import = false
         app.sessions[0].session.dirty = true;
         app.dispatch_user_event(UserEvent::RedrawNeeded(id));
         assert!(!app.sessions[0].session.dirty);
+    }
+
+    #[test]
+    fn pane_obsoleto_conserva_dirty_para_repintarse() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(Arc::clone(&term));
+        let id = app.sessions[0].session.id;
+
+        // El drain tiene el Term: la GUI no podra leerlo en el frame.
+        let _held = term.lock().expect("term mutex");
+
+        app.sessions[0].session.dirty = true;
+        app.settle_frame_result(vec![], vec![id]);
+
+        assert!(
+            app.sessions[0].session.dirty,
+            "el pane no se repinto: su dirty debe sobrevivir al frame"
+        );
+        assert!(
+            app.needs_followup_redraw(),
+            "hay que pedir otro redraw o el eco no aparece hasta el evento siguiente"
+        );
     }
 
     #[test]
