@@ -10,7 +10,10 @@ pub use overlay::{
 };
 pub use samples::{build_sample_term, code_sample, prompt_sample, text_sample, SAMPLE_COLS};
 
-use crate::config::{available_presets, try_preset, ThemeConfig};
+use crate::color_scheme::SchemeSource;
+use crate::config::{
+    available_presets, preset_polarity, try_preset, ColorMode, ColorScheme, ThemeConfig,
+};
 use crate::copy_mode::CopyModeState;
 
 const PAGE_STEP: usize = 10;
@@ -28,6 +31,12 @@ pub struct ThemePickerState {
     /// Modo búsqueda activo (`/`).
     pub search_mode: bool,
     filtered_indices: Vec<usize>,
+    /// Modo de tema activo al abrir el picker (para mostrarlo en el panel).
+    mode: ColorMode,
+    /// Origen del esquema del SO (portal/winit/fallback) — info del panel.
+    scheme_source: SchemeSource,
+    /// Esquema del SO resuelto (`None` = sin señal, cae a oscuro).
+    system_scheme: Option<ColorScheme>,
 }
 
 impl ThemePickerState {
@@ -36,11 +45,15 @@ impl ThemePickerState {
         theme: &ThemeConfig,
         active_preset: Option<&str>,
         saved_copy_mode: Option<CopyModeState>,
+        mode: ColorMode,
+        scheme_source: SchemeSource,
+        system_scheme: Option<ColorScheme>,
     ) -> Self {
         let presets = available_presets();
-        let filtered_indices: Vec<usize> = (0..presets.len()).collect();
+        let mut filtered_indices: Vec<usize> = (0..presets.len()).collect();
+        sort_by_polarity(&mut filtered_indices);
         let index = active_preset
-            .and_then(|name| presets.iter().position(|p| *p == name))
+            .and_then(|name| filtered_indices.iter().position(|&i| presets[i] == name))
             .unwrap_or(0);
         Self {
             saved_theme: theme.clone(),
@@ -50,7 +63,25 @@ impl ThemePickerState {
             filter: String::new(),
             search_mode: false,
             filtered_indices,
+            mode,
+            scheme_source,
+            system_scheme,
         }
+    }
+
+    /// Modo de tema activo (para mostrar en el panel).
+    pub fn mode(&self) -> ColorMode {
+        self.mode
+    }
+
+    /// Origen del esquema del SO (para mostrar en el panel cuando modo=auto).
+    pub fn scheme_source(&self) -> SchemeSource {
+        self.scheme_source
+    }
+
+    /// Esquema del SO resuelto al abrir el picker.
+    pub fn system_scheme(&self) -> Option<ColorScheme> {
+        self.system_scheme
     }
 
     pub fn saved_theme(&self) -> &ThemeConfig {
@@ -90,6 +121,33 @@ impl ThemePickerState {
         self.filtered_indices
             .get(self.index)
             .map(|&idx| presets[idx])
+    }
+
+    /// Número de presets oscuros en la lista filtrada (los claros van después).
+    pub fn dark_count(&self) -> usize {
+        let presets = available_presets();
+        self.filtered_indices
+            .iter()
+            .filter(|&&i| preset_polarity(presets[i]) == ColorScheme::Dark)
+            .count()
+    }
+
+    /// Fila (0-based, contando cabeceras de grupo) del preset seleccionado en
+    /// la lista renderizada. `None` si la lista está vacía.
+    ///
+    /// El overlay usa este valor para posicionar el resaltado vertical, ya que
+    /// las cabeceras "Dark"/"Light" desplazan los presets.
+    pub fn selected_row(&self) -> Option<usize> {
+        let presets = available_presets();
+        let idx = *self.filtered_indices.get(self.index)?;
+        let dark_count = self.dark_count();
+        let has_dark = dark_count > 0;
+        let has_light = self.filtered_indices.len() > dark_count;
+        if preset_polarity(presets[idx]) == ColorScheme::Dark {
+            Some(has_dark as usize + self.index)
+        } else {
+            Some(has_dark as usize + dark_count + has_light as usize + (self.index - dark_count))
+        }
     }
 
     /// Tema del preset en preview.
@@ -189,6 +247,9 @@ impl ThemePickerState {
                 .map(|(i, _)| i)
                 .collect();
         }
+        // Agrupar por polaridad (oscuros primero, luego claros) preservando el
+        // orden de registro dentro de cada grupo.
+        sort_by_polarity(&mut self.filtered_indices);
         if self.filtered_indices.is_empty() {
             self.index = 0;
             return;
@@ -204,6 +265,13 @@ impl ThemePickerState {
     }
 }
 
+/// Ordena índices de presets con los oscuros primero y los claros después,
+/// preservando el orden relativo dentro de cada grupo (sort estable).
+fn sort_by_polarity(indices: &mut [usize]) {
+    let presets = available_presets();
+    indices.sort_by_key(|&i| preset_polarity(presets[i]) == ColorScheme::Light);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,14 +280,28 @@ mod tests {
 
     #[test]
     fn filtro_por_substring() {
-        let mut p = ThemePickerState::open(&ThemeConfig::default(), None, None);
+        let mut p = ThemePickerState::open(
+            &ThemeConfig::default(),
+            None,
+            None,
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+        );
         p.set_filter("drac");
         assert_eq!(p.filtered_presets(), vec!["dracula"]);
     }
 
     #[test]
     fn filtro_vacio_no_permite_confirmar() {
-        let mut p = ThemePickerState::open(&ThemeConfig::default(), None, None);
+        let mut p = ThemePickerState::open(
+            &ThemeConfig::default(),
+            None,
+            None,
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+        );
         p.set_filter("zzz_sin_match");
         assert!(!p.can_confirm());
         assert!(p.try_selected_name().is_none());
@@ -230,7 +312,14 @@ mod tests {
     fn enter_restaura_tema_guardado() {
         let theme = ThemeConfig::default();
         let saved_bg = theme.background.clone();
-        let mut p = ThemePickerState::open(&theme, Some("nord"), None);
+        let mut p = ThemePickerState::open(
+            &theme,
+            Some("nord"),
+            None,
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+        );
         p.set_filter("dracula");
         assert_eq!(p.try_selected_name(), Some("dracula"));
         assert_ne!(p.preview_theme().background, saved_bg);
@@ -239,7 +328,14 @@ mod tests {
 
     #[test]
     fn navegacion_circular() {
-        let mut p = ThemePickerState::open(&ThemeConfig::default(), None, None);
+        let mut p = ThemePickerState::open(
+            &ThemeConfig::default(),
+            None,
+            None,
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+        );
         let first = p.try_selected_name().unwrap();
         let count = p.filtered_presets().len();
         for _ in 0..count {
@@ -250,13 +346,27 @@ mod tests {
 
     #[test]
     fn filtro_vacio_muestra_todos() {
-        let p = ThemePickerState::open(&ThemeConfig::default(), None, None);
+        let p = ThemePickerState::open(
+            &ThemeConfig::default(),
+            None,
+            None,
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+        );
         assert_eq!(p.filtered_presets().len(), available_presets().len());
     }
 
     #[test]
     fn preview_usa_preset_seleccionado() {
-        let p = ThemePickerState::open(&ThemeConfig::default(), Some("dracula"), None);
+        let p = ThemePickerState::open(
+            &ThemeConfig::default(),
+            Some("dracula"),
+            None,
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+        );
         let t = p.preview_theme();
         assert_eq!(t.background, try_preset("dracula").unwrap().background);
     }
@@ -265,13 +375,27 @@ mod tests {
     fn restaura_copy_mode_guardado() {
         let term = Term::new();
         let cm = CopyModeState::enter(&term);
-        let p = ThemePickerState::open(&ThemeConfig::default(), None, Some(cm));
+        let p = ThemePickerState::open(
+            &ThemeConfig::default(),
+            None,
+            Some(cm),
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+        );
         assert_eq!(p.saved_copy_mode(), Some(cm));
     }
 
     #[test]
     fn commit_search_conserva_filtro() {
-        let mut p = ThemePickerState::open(&ThemeConfig::default(), None, None);
+        let mut p = ThemePickerState::open(
+            &ThemeConfig::default(),
+            None,
+            None,
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+        );
         p.start_search();
         p.push_filter_char('d');
         p.push_filter_char('r');
@@ -287,11 +411,80 @@ mod tests {
 
     #[test]
     fn filtro_dark_muestra_varios() {
-        let mut p = ThemePickerState::open(&ThemeConfig::default(), None, None);
+        let mut p = ThemePickerState::open(
+            &ThemeConfig::default(),
+            None,
+            None,
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+        );
         p.set_filter("dark");
         let names = p.filtered_presets();
         assert!(names.len() > 1, "debe haber varios presets con 'dark'");
         p.move_next();
         assert_ne!(p.try_selected_name(), Some(names[0]));
+    }
+
+    #[test]
+    fn presets_agrupados_por_polaridad_oscuros_primero() {
+        let p = ThemePickerState::open(
+            &ThemeConfig::default(),
+            None,
+            None,
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+        );
+        let names = p.filtered_presets();
+        // 16 oscuros + 6 claros = 22.
+        assert_eq!(names.len(), available_presets().len());
+        assert_eq!(p.dark_count(), 16);
+        // Los primeros 16 son oscuros, los últimos 6 claros.
+        for name in &names[..16] {
+            assert_eq!(preset_polarity(name), ColorScheme::Dark);
+        }
+        for name in &names[16..] {
+            assert_eq!(preset_polarity(name), ColorScheme::Light);
+        }
+    }
+
+    #[test]
+    fn selected_row_cuenta_cabeceras_de_grupo() {
+        let mut p = ThemePickerState::open(
+            &ThemeConfig::default(),
+            None,
+            None,
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+        );
+        // Cabecera "dark" en fila 0 => primer preset oscuro en fila 1.
+        p.move_home();
+        assert_eq!(p.selected_row(), Some(1));
+        // Último preset (claro, índice 21): dark(16) + 2 cabeceras + 5 = 23.
+        p.move_end();
+        assert_eq!(p.selected_row(), Some(1 + 16 + 1 + 5));
+    }
+
+    #[test]
+    fn filtro_solo_light_sin_cabecera_dark() {
+        let mut p = ThemePickerState::open(
+            &ThemeConfig::default(),
+            None,
+            None,
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+        );
+        p.set_filter("light");
+        assert_eq!(p.dark_count(), 0);
+        // Sin oscuros: solo cabecera "light" (fila 0) => primer claro en fila 1.
+        p.move_home();
+        assert_eq!(p.selected_row(), Some(1));
+        assert_eq!(
+            preset_polarity(p.try_selected_name().unwrap()),
+            ColorScheme::Light
+        );
     }
 }

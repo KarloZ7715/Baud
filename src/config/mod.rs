@@ -31,7 +31,8 @@ use serde::{Deserialize, Serialize};
 pub use crate::color::contrast_ratio_hex as contrast_ratio;
 pub use themes::MIN_COMMENT_CONTRAST;
 pub use themes::{
-    available_presets, preset, preset_entries, try_preset, PresetError, MIN_LEGIBLE_CONTRAST,
+    available_presets, preset, preset_entries, preset_polarity, try_preset, PresetError,
+    MIN_LEGIBLE_CONTRAST,
 };
 
 /// Modo de tema declarado en `[theme].mode`.
@@ -520,8 +521,7 @@ fn theme_base_from_name(name: &str) -> ThemeConfig {
 }
 
 /// Preset claro por defecto cuando el usuario declara `mode = "auto"` (o
-/// `light`) sin especificar `light`. Un par claro de cada familia oscura es
-/// objetivo del plan 009; este es el fallback cuando falta la mitad clara.
+/// `light`) sin especificar `light`.
 const DEFAULT_LIGHT_PRESET: &str = "catppuccin-latte";
 
 /// Modelo claro/oscuro resuelto desde la tabla `[theme]` cruda, independiente

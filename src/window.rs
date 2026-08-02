@@ -16,7 +16,8 @@ use crate::clipboard::{self, CopyTarget};
 use crate::color_scheme::{self, SchemeSource};
 use crate::config::watch::WatchState;
 use crate::config::{
-    persist, ColorScheme, Config, ConfigSource, DecorationsKind, ProcessSection, StartupState,
+    persist, preset_polarity, ColorMode, ColorScheme, Config, ConfigSource, DecorationsKind,
+    ProcessSection, StartupState,
 };
 use crate::copy_mode::CopyModeState;
 use crate::display_quirks::{self, DisplayQuirks};
@@ -2333,6 +2334,9 @@ impl App {
             &self.config.theme,
             preset,
             saved_copy_mode,
+            self.config.theme_mode,
+            self.system_scheme_source,
+            self.system_color_scheme,
         ));
         if let Ok(mut guard) = self.focused_term().lock() {
             guard.mark_dirty();
@@ -2362,13 +2366,25 @@ impl App {
             return;
         };
         let name = name.to_string();
-        match persist::write_theme_preset(&name) {
+        let polarity = preset_polarity(&name);
+        match persist::write_theme_variant(&name, polarity) {
             Ok(outcome) => {
                 if let Ok(mut watch) = self.config_watch.lock() {
                     watch.sync(persist::file_mtime(&outcome.path));
                 }
+                // Aplicar el preset elegido y actualizar el modelo en memoria:
+                // la variante correspondiente + el modo fijado a su polaridad
+                // (coincide con lo escrito a disco por `write_theme_variant`).
                 self.config.theme = picker.preview_theme();
                 self.config.theme_preset = Some(name.clone());
+                self.config.theme_mode = match polarity {
+                    ColorScheme::Dark => ColorMode::Dark,
+                    ColorScheme::Light => ColorMode::Light,
+                };
+                match polarity {
+                    ColorScheme::Dark => self.config.theme_dark = Some(name.clone()),
+                    ColorScheme::Light => self.config.theme_light = Some(name.clone()),
+                }
                 self.theme_picker = None;
                 if let Ok(mut guard) = self.focused_term().lock() {
                     if let Some(cm) = picker.saved_copy_mode() {
@@ -2385,7 +2401,8 @@ impl App {
                     renderer.set_status(&status);
                 }
                 tracing::info!(
-                    "theme picker: preset '{name}' persistido en {}",
+                    "theme picker: preset '{name}' ({:?}) persistido en {}",
+                    polarity,
                     outcome.path.display()
                 );
             }
@@ -5407,6 +5424,9 @@ light = "catppuccin-latte"
         app.theme_picker = Some(ThemePickerState::open(
             &app.config.theme,
             Some("dracula"),
+            None,
+            crate::config::ColorMode::Dark,
+            SchemeSource::Fallback,
             None,
         ));
         let preview = app.effective_theme();

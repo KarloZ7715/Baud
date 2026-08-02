@@ -4,7 +4,8 @@ use glyphon::{Attrs, Buffer, Color, Family, FontSystem, Shaping, TextArea, TextB
 
 use super::style::{picker_dim, picker_footer, picker_foreground, picker_list_fg};
 use super::ThemePickerState;
-use crate::config::{parse_hex, GlyphOffset, ThemeConfig};
+use crate::color_scheme::SchemeSource;
+use crate::config::{parse_hex, ColorMode, GlyphOffset, ThemeConfig};
 use crate::renderer::{resolve_family, CellMetrics, ContrastCache, SOLID_MASK_GLYPH_ID};
 
 const LAYER_OVERLAY: usize = 3;
@@ -128,7 +129,7 @@ pub fn build_custom_glyphs(
         ));
     }
 
-    let highlight_y = layout.text_top + picker.index as f32 * cell_h;
+    let highlight_y = layout.text_top + picker.selected_row().unwrap_or(0) as f32 * cell_h;
     if picker.can_confirm() {
         let sel_hex = theme.selection_bg.as_deref().unwrap_or(&theme.bright_black);
         let (sel_r, sel_g, sel_b) = parse_hex(sel_hex);
@@ -248,39 +249,48 @@ pub fn fill_buffers(
     let panel_h = surface_h as f32;
 
     let presets = picker.filtered_presets();
-    let mut list_lines = String::new();
+    let dark_count = picker.dark_count();
+    let preview_theme = picker.preview_theme();
+    let list_fg = picker_list_fg(&preview_theme, contrast_cache);
+    let dim_fg = picker_dim(&preview_theme, contrast_cache);
+
+    let list_attrs = Attrs::new().family(family).color(list_fg);
+    let group_attrs = Attrs::new().family(family).color(dim_fg);
+    let selected = picker.try_selected_name();
+    let mut list_spans: Vec<(String, Attrs<'_>)> = Vec::new();
+
     if presets.is_empty() {
-        list_lines.push_str("(sin coincidencias)\n");
+        list_spans.push((String::from("(sin coincidencias)\n"), list_attrs.clone()));
         if picker.is_search_mode() || !picker.filter().is_empty() {
-            list_lines.push_str(&format!("/{}", picker.filter()));
+            list_spans.push((format!("/{}\n", picker.filter()), list_attrs.clone()));
         }
     } else {
-        let selected = picker.try_selected_name();
-        for name in &presets {
-            if Some(*name) == selected {
-                list_lines.push_str("▸ ");
-            } else {
-                list_lines.push_str("  ");
+        for (i, name) in presets.iter().enumerate() {
+            // Cabecera de polaridad al primer preset de cada grupo.
+            if i == 0 && dark_count > 0 {
+                list_spans.push((String::from("── dark ──\n"), group_attrs.clone()));
+            } else if i == dark_count {
+                list_spans.push((String::from("── light ──\n"), group_attrs.clone()));
             }
-            list_lines.push_str(name);
-            list_lines.push('\n');
+            let marker = if Some(*name) == selected {
+                "▸ "
+            } else {
+                "  "
+            };
+            list_spans.push((format!("{marker}{name}\n"), list_attrs.clone()));
         }
         if picker.is_search_mode() {
-            list_lines.push_str(&format!("\n/{}", picker.filter()));
+            list_spans.push((format!("\n/{}", picker.filter()), list_attrs.clone()));
         } else if picker.has_active_filter() {
-            list_lines.push_str(&format!("\nfiltro: {}", picker.filter()));
+            list_spans.push((format!("\nfiltro: {}", picker.filter()), list_attrs));
         }
     }
 
-    let preview_theme = picker.preview_theme();
-    let list_fg = picker_list_fg(&preview_theme, contrast_cache);
-
-    fill_buffer(
+    fill_buffer_spans(
         font_system,
         list_buffer,
-        &list_lines,
+        &list_spans,
         family,
-        list_fg,
         list_w,
         panel_h,
     );
@@ -295,7 +305,23 @@ pub fn fill_buffers(
     let mut detail_spans: Vec<(String, Attrs<'_>)> = Vec::new();
     if let Some(name) = picker.try_selected_name() {
         detail_spans.push((format!("{name}\n\n"), header_attrs));
-        detail_spans.push((String::from("Paleta ANSI 0-7 / 8-15\n"), label_attrs));
+        detail_spans.push((
+            String::from("Paleta ANSI 0-7 / 8-15\n"),
+            label_attrs.clone(),
+        ));
+        let mode_label = match picker.mode() {
+            ColorMode::Dark => String::from("Modo: dark\n"),
+            ColorMode::Light => String::from("Modo: light\n"),
+            ColorMode::Auto => {
+                let src = match picker.scheme_source() {
+                    SchemeSource::Portal => "portal",
+                    SchemeSource::Winit => "winit",
+                    SchemeSource::Fallback => "fallback",
+                };
+                format!("Modo: auto ({src})\n")
+            }
+        };
+        detail_spans.push((mode_label, label_attrs));
     } else {
         detail_spans.push((
             String::from("(sin coincidencias)\n\nEnter deshabilitado\n\n"),
@@ -458,11 +484,19 @@ fn solid_quad(left: f32, top: f32, width: f32, height: f32, color: Color) -> gly
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ThemeConfig;
+    use crate::color_scheme::SchemeSource;
+    use crate::config::{ColorMode, ThemeConfig};
 
     #[test]
     fn swatches_cubren_16_colores() {
-        let picker = ThemePickerState::open(&ThemeConfig::default(), None, None);
+        let picker = ThemePickerState::open(
+            &ThemeConfig::default(),
+            None,
+            None,
+            ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+        );
         let glyphs = build_custom_glyphs(&picker, &ThemeConfig::default(), 10.0, 20.0, 800, 600);
         assert_eq!(glyphs.len(), 20);
     }

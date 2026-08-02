@@ -1,6 +1,6 @@
 //! Catálogo de temas embebidos.
 
-use super::ThemeConfig;
+use super::{ColorScheme, ThemeConfig};
 
 macro_rules! presets {
     ($( ($name:literal, $body:expr) ),+ $(,)?) => {
@@ -82,8 +82,8 @@ pub fn available_presets() -> &'static [&'static str] {
     PRESET_NAMES
 }
 
-/// Catalogo de presets resueltos: nombre y su `ThemeConfig` parseado. Fuente
-/// unica para el generador de referencia (R3): itera esto, no duplica la
+/// Catálogo de presets resueltos: nombre y su `ThemeConfig` parseado. Fuente
+/// única para el generador de referencia (R3): itera esto, no duplica la
 /// lista de nombres ni transcribe paletas a mano.
 pub fn preset_entries() -> Vec<(&'static str, ThemeConfig)> {
     PRESET_NAMES
@@ -94,6 +94,22 @@ pub fn preset_entries() -> Vec<(&'static str, ThemeConfig)> {
             (name, theme)
         })
         .collect()
+}
+
+/// Polaridad de un preset (oscura/clara) según la luminancia de su fondo.
+///
+/// Usa el mismo criterio que el motor de contraste: un fondo claro
+/// (`relative_luminance > 0.5`) clasifica el preset como [`ColorScheme::Light`].
+/// El theme picker agrupa los presets por este valor y decide a qué variante
+/// (`theme.dark`/`theme.light`) escribir al confirmar.
+pub fn preset_polarity(name: &str) -> ColorScheme {
+    let theme = preset(name).unwrap_or_default();
+    let (r, g, b) = super::parse_hex(&theme.background);
+    if crate::color::relative_luminance((r, g, b)) > 0.5 {
+        ColorScheme::Light
+    } else {
+        ColorScheme::Dark
+    }
 }
 
 /// Piso de contraste del chrome de Baud (theme picker, barra de estado, tabs,
@@ -109,6 +125,26 @@ pub const MIN_COMMENT_CONTRAST: f64 = 4.5;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preset_polarity_clasifica_los_22_presets() {
+        let light: &[&str] = &[
+            "catppuccin-latte",
+            "gruvbox-light",
+            "solarized-light",
+            "rose-pine-dawn",
+            "github-light",
+            "everforest-light",
+        ];
+        for name in available_presets() {
+            let got = preset_polarity(name);
+            if light.contains(name) {
+                assert_eq!(got, ColorScheme::Light, "{name} debería ser Light");
+            } else {
+                assert_eq!(got, ColorScheme::Dark, "{name} debería ser Dark");
+            }
+        }
+    }
 
     const ANSI_COLOR_FIELDS: &[&str] = &[
         "red",

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use toml_edit::{DocumentMut, Item, Value};
 
 use super::themes::available_presets;
+use super::ColorScheme;
 
 /// Forma en que el tema está declarado en el archivo de config.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +194,68 @@ pub fn write_theme_preset(name: &str) -> Result<PersistOutcome, PersistError> {
     write_theme_preset_at(&path, name)
 }
 
+/// Escribe `theme.dark` o `theme.light` (según la polaridad del preset) y fija
+/// `theme.mode` a esa polaridad, preservando `name`, la otra variante y los
+/// overrides de color. Es el camino del theme picker (no el legado `name`).
+pub fn write_theme_variant(
+    name: &str,
+    polarity: ColorScheme,
+) -> Result<PersistOutcome, PersistError> {
+    let path = config_write_path();
+    write_theme_variant_at(&path, name, polarity)
+}
+
+/// Versión de [`write_theme_variant`] sobre una ruta explícita (tests).
+pub fn write_theme_variant_at(
+    path: &Path,
+    name: &str,
+    polarity: ColorScheme,
+) -> Result<PersistOutcome, PersistError> {
+    validate_preset(name)?;
+    let (variant_key, mode_val): (&str, &str) = match polarity {
+        ColorScheme::Dark => ("dark", "dark"),
+        ColorScheme::Light => ("light", "light"),
+    };
+
+    let preserved = if path.exists() {
+        let content = fs::read_to_string(path).map_err(|e| PersistError::Io(e.to_string()))?;
+        let mut doc = content
+            .parse::<DocumentMut>()
+            .map_err(|e| PersistError::Parse(e.to_string()))?;
+        let had_overrides = theme_table_has_color_overrides(&doc);
+        // Asegurar que `theme` sea una tabla (convertir `theme = "x"` si hace falta).
+        if !doc.contains_key("theme") {
+            doc.insert("theme", Item::Table(toml_edit::Table::new()));
+        }
+        if let Some(item) = doc.get_mut("theme") {
+            if !matches!(item, Item::Table(_)) {
+                *item = Item::Table(toml_edit::Table::new());
+            }
+            if let Item::Table(table) = item {
+                table.insert("mode", Item::Value(Value::from(mode_val)));
+                table.insert(variant_key, Item::Value(Value::from(name)));
+            }
+        }
+        fs::write(path, doc.to_string()).map_err(|e| PersistError::Io(e.to_string()))?;
+        had_overrides
+    } else {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|e| PersistError::Io(e.to_string()))?;
+        }
+        let mut table = toml_edit::Table::new();
+        table.insert("mode", Item::Value(Value::from(mode_val)));
+        table.insert(variant_key, Item::Value(Value::from(name)));
+        let mut doc = DocumentMut::new();
+        doc.insert("theme", Item::Table(table));
+        fs::write(path, doc.to_string()).map_err(|e| PersistError::Io(e.to_string()))?;
+        false
+    };
+    Ok(PersistOutcome {
+        path: path.to_path_buf(),
+        preserved_theme_overrides: preserved,
+    })
+}
+
 /// mtime del archivo tras escribir (para sincronizar el watcher).
 pub fn file_mtime(path: &Path) -> Option<std::time::SystemTime> {
     fs::metadata(path).ok()?.modified().ok()
@@ -329,6 +392,70 @@ mod tests {
         let s = fs::read_to_string(&path).unwrap();
         assert_eq!(s, original);
         assert_eq!(file_mtime(&path), mtime_before);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn write_theme_variant_dark_sobre_tabla_con_overrides() {
+        let path = temp_config_path("variant_dark");
+        cleanup(&path);
+        fs::write(
+            &path,
+            "[theme]\nname = \"nord\"\nbackground = \"#000000\"\n",
+        )
+        .unwrap();
+        let outcome = write_theme_variant_at(&path, "dracula", ColorScheme::Dark).unwrap();
+        let s = fs::read_to_string(&path).unwrap();
+        assert!(s.contains("mode = \"dark\""));
+        assert!(s.contains("dark = \"dracula\""));
+        // El override de color y el name legado se conservan.
+        assert!(s.contains("background = \"#000000\""));
+        assert!(s.contains("name = \"nord\""));
+        assert!(outcome.preserved_theme_overrides);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn write_theme_variant_light_escribe_variante_clara() {
+        let path = temp_config_path("variant_light");
+        cleanup(&path);
+        fs::write(&path, "[theme]\ndark = \"claude-dark\"\n").unwrap();
+        write_theme_variant_at(&path, "catppuccin-latte", ColorScheme::Light).unwrap();
+        let s = fs::read_to_string(&path).unwrap();
+        assert!(s.contains("mode = \"light\""));
+        assert!(s.contains("light = \"catppuccin-latte\""));
+        // La variante oscura existente se conserva.
+        assert!(s.contains("dark = \"claude-dark\""));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn write_theme_variant_convierte_root_string_a_tabla() {
+        let path = temp_config_path("variant_root");
+        cleanup(&path);
+        fs::write(&path, "theme = \"claude-dark\"\nfont.size = 14\n").unwrap();
+        write_theme_variant_at(&path, "nord", ColorScheme::Dark).unwrap();
+        let s = fs::read_to_string(&path).unwrap();
+        // El string raíz se convierte en tabla con mode + dark (toml_edit puede
+        // conservar decor de la key original, p. ej. `[theme ]` — TOML válido).
+        assert!(s.contains("[theme"));
+        assert!(s.contains("mode = \"dark\""));
+        assert!(s.contains("dark = \"nord\""));
+        assert!(!s.contains("theme = \"claude-dark\""));
+        // Otras claves se conservan.
+        assert!(s.contains("font.size = 14"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn write_theme_variant_crea_archivo_nuevo() {
+        let path = temp_config_path("variant_new");
+        cleanup(&path);
+        write_theme_variant_at(&path, "nord", ColorScheme::Dark).unwrap();
+        let s = fs::read_to_string(&path).unwrap();
+        assert!(s.contains("[theme]"));
+        assert!(s.contains("mode = \"dark\""));
+        assert!(s.contains("dark = \"nord\""));
         cleanup(&path);
     }
 }
