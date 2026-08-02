@@ -127,4 +127,35 @@ mod tests {
         assert!(!state.changed(None));
         let _ = std::fs::remove_file(&path);
     }
+
+    /// `omarchy-theme-set` recrea el enlace `current`; el archivo de destino
+    /// puede ser el mismo nombre en cada tema con un mtime que no cambia, así
+    /// que sólo el `lstat` del propio enlace nota el cambio de identidad.
+    #[cfg(unix)]
+    #[test]
+    fn recrear_el_enlace_current_cambia_su_propio_mtime() {
+        let base = std::env::temp_dir().join(format!("baud_watch_link_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let target_a = base.join("theme-a");
+        let target_b = base.join("theme-b");
+        std::fs::create_dir_all(&target_a).unwrap();
+        std::fs::create_dir_all(&target_b).unwrap();
+        let link = base.join("current");
+        std::os::unix::fs::symlink(&target_a, &link).unwrap();
+
+        let mut state = WatchState::new(None);
+        state.set_import_targets(vec![WatchTarget::Link(link.clone())]);
+        state.sync(None);
+        assert!(!state.changed(None));
+
+        std::thread::sleep(Duration::from_millis(1100));
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&target_b, &link).unwrap();
+        assert!(
+            state.changed(None),
+            "recrear el enlace debe notarse aunque nadie edite los archivos de tema"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }
