@@ -43,3 +43,4 @@ skills-lock.json
 tools/packaging/.cache/
 dist/*
 !dist/.gitkeep
+.worktrees/
