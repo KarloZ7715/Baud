@@ -182,7 +182,9 @@ pub struct PaneRender {
 }
 
 use crate::ansi::{Color, Term};
-use crate::config::{parse_hex, FontConfig, GlyphOffset, StatusConfig, ThemeConfig};
+use crate::config::{
+    parse_hex, FontConfig, GlyphOffset, StatusConfig, ThemeConfig, MIN_LEGIBLE_CONTRAST,
+};
 use crate::grid::{Cell, DamageSnapshot, GridDamage};
 use crate::session::SessionId;
 use crate::theme_picker::ThemePickerState;
@@ -1059,6 +1061,7 @@ impl Renderer {
                 &mut self.title_bar_track_glyphs,
                 &mut extra_areas,
                 tbar_hover,
+                &mut self.contrast_cache,
             );
             (tb.bar_height, false)
         } else {
@@ -1088,6 +1091,7 @@ impl Renderer {
                 &mut self.tab_bar_track_glyphs,
                 &mut extra_areas,
                 draw_tab_track,
+                &mut self.contrast_cache,
             );
         }
         if let Some(pre) = preedit.as_ref().filter(|p| !p.text.is_empty()) {
@@ -2013,11 +2017,7 @@ fn resolve_status_colors(
             .as_deref()
             .map(parse_hex)
             .unwrap_or_else(|| parse_hex(&theme.foreground));
-        let (fr, fg, fb) = contrast_cache.adjust(
-            fg_rgb,
-            (br, bg, bb),
-            theme.minimum_contrast.max(MIN_TOAST_CONTRAST),
-        );
+        let (fr, fg, fb) = contrast_cache.adjust(fg_rgb, (br, bg, bb), MIN_TOAST_CONTRAST);
         return (bg_color, glyphon::Color::rgb(fr, fg, fb));
     }
 
@@ -2028,11 +2028,7 @@ fn resolve_status_colors(
         .as_deref()
         .map(parse_hex)
         .unwrap_or_else(|| parse_hex(&theme.foreground));
-    let (fr, fg, fb) = contrast_cache.adjust(
-        fg_rgb,
-        (br, bg, bb),
-        theme.minimum_contrast.max(MIN_TOAST_CONTRAST),
-    );
+    let (fr, fg, fb) = contrast_cache.adjust(fg_rgb, (br, bg, bb), MIN_TOAST_CONTRAST);
     (bg_color, glyphon::Color::rgb(fr, fg, fb))
 }
 
@@ -2206,6 +2202,7 @@ fn push_title_bar<'a>(
     track_glyphs: &'a mut Vec<glyphon::CustomGlyph>,
     extra_areas: &mut Vec<glyphon::TextArea<'a>>,
     hovered_button: Option<crate::renderer::TitleButtonKind>,
+    contrast_cache: &mut ContrastCache,
 ) {
     let bar_top = cell_metrics.padding_y;
     let full_bounds = glyphon::TextBounds {
@@ -2231,7 +2228,9 @@ fn push_title_bar<'a>(
         custom_glyphs: track_glyphs,
     });
 
-    let (fr, fg, fb) = parse_hex(&theme.foreground);
+    let fg_rgb = parse_hex(&theme.foreground);
+    let bg_rgb = parse_hex(&theme.background);
+    let (fr, fg, fb) = contrast_cache.adjust(fg_rgb, bg_rgb, MIN_LEGIBLE_CONTRAST);
     let icon_color = glyphon::Color::rgb(fr, fg, fb);
     let family = resolve_family(font_family);
     let default_attrs = glyphon::Attrs::new().family(family);
@@ -2315,6 +2314,7 @@ fn push_tab_bar<'a>(
     track_glyphs: &'a mut Vec<glyphon::CustomGlyph>,
     extra_areas: &mut Vec<glyphon::TextArea<'a>>,
     draw_track: bool,
+    contrast_cache: &mut ContrastCache,
 ) {
     let pad_x = cell_metrics.padding_x;
     let inner_w = layout.bar_width_px;
@@ -2339,7 +2339,9 @@ fn push_tab_bar<'a>(
         });
     }
 
-    let (fr, fg, fb) = parse_hex(&theme.foreground);
+    let fg_rgb = parse_hex(&theme.foreground);
+    let bg_rgb = parse_hex(&theme.background);
+    let (fr, fg, fb) = contrast_cache.adjust(fg_rgb, bg_rgb, MIN_LEGIBLE_CONTRAST);
     let inactive_fg = glyphon::Color::rgba(fr, fg, fb, 120);
     let active_fg = glyphon::Color::rgb(fr, fg, fb);
     let family = resolve_family(font_family);

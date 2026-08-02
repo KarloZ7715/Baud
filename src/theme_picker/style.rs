@@ -2,10 +2,8 @@
 
 use glyphon::Color;
 
-use crate::config::{parse_hex, ThemeConfig, MIN_LEGIBLE_CONTRAST};
+use crate::config::{parse_hex, ThemeConfig, MIN_COMMENT_CONTRAST, MIN_LEGIBLE_CONTRAST};
 use crate::renderer::ContrastCache;
-
-const MIN_DIM_CONTRAST: f64 = 4.5;
 
 fn fg_on_bg(fg_hex: &str, bg_hex: &str, min: f64, cache: &mut ContrastCache) -> Color {
     let fg = parse_hex(fg_hex);
@@ -14,24 +12,22 @@ fn fg_on_bg(fg_hex: &str, bg_hex: &str, min: f64, cache: &mut ContrastCache) -> 
     Color::rgb(r, g, b)
 }
 
-/// Texto principal legible sobre el fondo del tema (header del panel).
+/// Texto principal legible sobre el fondo del tema (header del panel). Usa el
+/// piso del chrome, no `theme.minimum_contrast`: ese ajuste es del usuario
+/// para el texto de sus aplicaciones, no para la interfaz de Baud.
 pub fn picker_foreground(theme: &ThemeConfig, cache: &mut ContrastCache) -> Color {
     fg_on_bg(
         &theme.foreground,
         &theme.background,
-        theme.minimum_contrast,
+        MIN_LEGIBLE_CONTRAST,
         cache,
     )
 }
 
-/// Texto de la lista de presets sobre el panel `black`.
+/// Texto de la lista de presets sobre el panel `black`. Mismo piso fijo que
+/// `picker_foreground`, por el mismo motivo.
 pub fn picker_list_fg(theme: &ThemeConfig, cache: &mut ContrastCache) -> Color {
-    fg_on_bg(
-        &theme.foreground,
-        &theme.black,
-        theme.minimum_contrast,
-        cache,
-    )
+    fg_on_bg(&theme.foreground, &theme.black, MIN_LEGIBLE_CONTRAST, cache)
 }
 
 /// Texto secundario legible (etiquetas de sección).
@@ -39,7 +35,7 @@ pub fn picker_dim(theme: &ThemeConfig, cache: &mut ContrastCache) -> Color {
     fg_on_bg(
         &theme.bright_black,
         &theme.background,
-        MIN_DIM_CONTRAST,
+        MIN_COMMENT_CONTRAST,
         cache,
     )
 }
