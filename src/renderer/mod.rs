@@ -12,6 +12,7 @@ mod glyph_cache;
 pub mod limits;
 mod metrics;
 mod palette;
+mod process_icons;
 mod runs;
 mod tab_bar;
 mod terminal_fallback;
@@ -263,6 +264,11 @@ pub struct Renderer {
     font_family: String,
     /// Fallbacks de fuente configurados por el usuario.
     font_fallback: Vec<String>,
+    /// Disponibilidad de iconos de proceso (Nerd Font) para la familia
+    /// activa: comprobada una vez por caracter y cacheada hasta que cambie
+    /// la fuente. Evita pintar `.notdef` cuando el fallback del usuario no
+    /// trae una Nerd Font.
+    icon_availability: std::collections::HashMap<char, bool>,
     /// Tamaño de fuente desde la configuracion (en puntos logicos).
     font_size: f32,
     /// Factor de escala DPI de la ventana (1.0 = 96 DPI).
@@ -569,6 +575,7 @@ impl Renderer {
             prev_cursor_pos: None,
             font_family,
             font_fallback: font_config.fallback.clone(),
+            icon_availability: std::collections::HashMap::new(),
             font_size,
             scale_factor,
             padding_x: 0,
@@ -693,6 +700,7 @@ impl Renderer {
             self.line_height = font.line_height;
             self.glyph_offset = font.glyph_offset;
             self.builtin_box_drawing = font.builtin_box_drawing;
+            self.icon_availability.clear();
         }
 
         self.text_contrast = font.text_contrast;
@@ -700,6 +708,39 @@ impl Renderer {
         self.refresh_cell_metrics();
         self.reset_glyph_pipeline();
         self.reset_aux_buffers();
+    }
+
+    /// Comprueba, una vez por familia de fuente activa, si cada icono de
+    /// proceso posible rasteriza (no cae en `.notdef`). Barato si ya se
+    /// comprobo: `apply_font_config` limpia el cache solo cuando cambia la
+    /// fuente. Debe llamarse antes de construir el layout de la barra de
+    /// tabs (`icon_available` solo lee lo ya comprobado).
+    fn ensure_icon_availability(&mut self) {
+        if self.icon_availability.len() >= process_icons::ALL_ICONS.len() {
+            return;
+        }
+        let family = self.font_family.clone();
+        let size = self.effective_font_size();
+        for &ch in process_icons::ALL_ICONS {
+            if self.icon_availability.contains_key(&ch) {
+                continue;
+            }
+            let available = process_icons::glyph_rasterizes(
+                &mut self.font_system,
+                &mut self.swash_cache,
+                &family,
+                size,
+                ch,
+            );
+            self.icon_availability.insert(ch, available);
+        }
+    }
+
+    /// `true` si `ch` rasteriza con la fuente activa (ver
+    /// `ensure_icon_availability`). `false` para cualquier caracter no
+    /// comprobado todavia: mejor sin icono que un `.notdef` roto.
+    fn icon_available(&self, ch: char) -> bool {
+        self.icon_availability.get(&ch).copied().unwrap_or(false)
     }
 
     /// Invalida caches GPU tras cambio de metricas (resize).
@@ -1031,6 +1072,20 @@ impl Renderer {
             self.refill_status_overlay_buffer();
             self.status_overlay_dirty = false;
         }
+        // Debe resolverse antes de que `extra_areas` empiece a acumular
+        // referencias a buffers de `self` (push_title_bar/push_tab_bar mas
+        // abajo): con esas referencias vivas, `self` ya no se puede volver a
+        // pedir prestado ni mutable ni inmutable.
+        self.ensure_icon_availability();
+        let resolved_icons: Vec<Option<char>> = tabs
+            .map(|l| {
+                l.segments
+                    .iter()
+                    .map(|seg| seg.icon_candidate.filter(|&ch| self.icon_available(ch)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let mut extra_areas: Vec<glyphon::TextArea<'_>> = Vec::with_capacity(8);
         let bar_top = self.cell_metrics.padding_y;
         let font_size = self.effective_font_size();
@@ -1081,6 +1136,7 @@ impl Renderer {
                 &mut self.contrast_cache,
                 self.scale_factor,
                 window_opacity,
+                &resolved_icons,
             );
         }
         if let Some(pre) = preedit.as_ref().filter(|p| !p.text.is_empty()) {
@@ -2276,6 +2332,7 @@ fn push_tab_bar<'a>(
     contrast_cache: &mut ContrastCache,
     scale_factor: f32,
     window_opacity: f32,
+    resolved_icons: &[Option<char>],
 ) {
     let pad_x = cell_metrics.padding_x;
     let inner_w = layout.bar_width_px;
@@ -2324,11 +2381,12 @@ fn push_tab_bar<'a>(
     let mut close_target: Option<&TabSegment> = None;
     let close_alpha = layout.mouse.close_alpha;
 
-    for (seg, (buf, chrome)) in layout
-        .segments
-        .iter()
-        .zip(segment_buffers.iter_mut().zip(seg_glyphs.iter_mut()))
-    {
+    for (seg, ((buf, chrome), icon)) in layout.segments.iter().zip(
+        segment_buffers
+            .iter_mut()
+            .zip(seg_glyphs.iter_mut())
+            .zip(resolved_icons.iter()),
+    ) {
         let show_close = layout.mouse.close_tab == Some(seg.index)
             && close_alpha > 0.02
             && seg.width_cells > TAB_CLOSE_WIDTH_CELLS;
@@ -2379,12 +2437,25 @@ fn push_tab_bar<'a>(
             });
         }
 
+        // El icono ocupa una celda + un hueco de una celda; se resta del
+        // presupuesto de truncado para que icono+hueco+texto quepan siempre
+        // en el ancho ya reservado por `compute_layout` (sin agrandar la tab).
+        const ICON_RESERVE_CELLS: usize = 2;
+        let icon_reserve = if icon.is_some() {
+            ICON_RESERVE_CELLS
+        } else {
+            0
+        };
         let label = crate::renderer::segment_title_label(
             seg.index + 1,
             &seg.title_short,
-            seg.width_cells,
+            seg.width_cells.saturating_sub(icon_reserve),
             show_close,
         );
+        let text = match icon {
+            Some(ch) => format!("{ch} {label}"),
+            None => label,
+        };
         let label_pad_px = cell_w * TAB_LABEL_PAD_CELLS as f32;
         let text_w_px = if show_close {
             seg.width_px - label_pad_px * 2.0 - close_cell_w
@@ -2398,7 +2469,7 @@ fn push_tab_bar<'a>(
         };
         buf.set_rich_text(
             font_system,
-            vec![(label.as_str(), body_attrs)],
+            vec![(text.as_str(), body_attrs)],
             &default_attrs,
             glyphon::Shaping::Advanced,
             None,

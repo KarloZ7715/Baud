@@ -45,6 +45,9 @@ pub struct TabSegment {
     pub active: bool,
     /// Salida reciente mientras la sesion no estaba enfocada (punto de actividad).
     pub activity: bool,
+    /// Icono candidato para el proceso en primer plano (sin comprobar si la
+    /// fuente activa lo puede dibujar; ver `resolve_tab_title`).
+    pub icon_candidate: Option<char>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,25 +140,32 @@ fn is_shell(name: &str) -> bool {
 /// * basename del cwd (OSC 7) con `~` para `$HOME`
 /// * titulo OSC 0/2 acortado
 ///
-/// Devuelve vacio si ninguna fuente aporta; el layout cae al indice.
-pub fn resolve_tab_title(title: &str, cwd: Option<&str>, process: Option<&str>) -> String {
+/// Devuelve el titulo (vacio si ninguna fuente aporta; el layout cae al
+/// indice) y, cuando el titulo viene del proceso en primer plano, el icono
+/// candidato para ese proceso. El candidato es el glifo Nerd Font sin
+/// comprobar disponibilidad: el llamante decide si la fuente activa lo
+/// puede dibujar (ver `Renderer::icon_available`, plan 011 "Sin tofu").
+pub fn resolve_tab_title(
+    title: &str,
+    cwd: Option<&str>,
+    process: Option<&str>,
+) -> (String, Option<char>) {
     if let Some(proc_name) = process {
         let base = proc_name.rsplit('/').next().unwrap_or(proc_name);
         if !base.is_empty() && !is_shell(base) {
-            return base.to_string();
+            return (
+                base.to_string(),
+                Some(super::process_icons::icon_for_process(base)),
+            );
         }
     }
     if let Some(cwd) = cwd {
         if let Some(name) = cwd_basename(cwd) {
-            return name;
+            return (name, None);
         }
     }
     let short = shorten_tab_title(title);
-    if !short.is_empty() {
-        short
-    } else {
-        String::new()
-    }
+    (short, None)
 }
 
 /// Trunca por el final.
@@ -234,6 +244,7 @@ fn build_segments(
             title_short: shorten_tab_title(title),
             active: i == focused,
             activity: false,
+            icon_candidate: None,
         });
         x += (w + gap) as f32 * cell_w;
     }
@@ -647,7 +658,7 @@ mod tests {
     fn resolve_tab_title_prefiere_cwd_sobre_osc() {
         assert_eq!(
             resolve_tab_title("user@host ~/x", Some("/home/u/Dev/baud"), None),
-            "baud"
+            ("baud".to_string(), None)
         );
     }
 
@@ -655,15 +666,17 @@ mod tests {
     fn resolve_tab_title_cae_a_osc_sin_cwd() {
         assert_eq!(
             resolve_tab_title("carloscc@cachy ~/Documentos/Dev/baud", None, None),
-            "baud"
+            ("baud".to_string(), None)
         );
     }
 
     #[test]
     fn resolve_tab_title_proceso_no_shell_gana() {
+        let (title, icon) = resolve_tab_title("x", Some("/home/u/Dev/baud"), Some("/usr/bin/nvim"));
+        assert_eq!(title, "nvim");
         assert_eq!(
-            resolve_tab_title("x", Some("/home/u/Dev/baud"), Some("/usr/bin/nvim")),
-            "nvim"
+            icon,
+            Some(super::super::process_icons::icon_for_process("nvim"))
         );
     }
 
@@ -671,7 +684,7 @@ mod tests {
     fn resolve_tab_title_proceso_shell_cae_a_cwd() {
         assert_eq!(
             resolve_tab_title("x", Some("/home/u/Dev/baud"), Some("/bin/bash")),
-            "baud"
+            ("baud".to_string(), None)
         );
     }
 

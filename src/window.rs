@@ -1159,36 +1159,31 @@ impl App {
             return None;
         }
         let has_custom_chrome = self.config.window.decorations.kind() == DecorationsKind::Custom;
-        let (titles, activities): (Vec<String>, Vec<bool>) =
+        let (titles, activities, icons): (Vec<String>, Vec<bool>, Vec<Option<char>>) =
             if self.tabs.len() == 1 && has_custom_chrome {
                 let s = self.focused_session();
                 let cwd = s.term.try_lock().ok().and_then(|t| t.cwd.clone());
                 let process = s.foreground_cache.as_ref().map(|(_, n)| n.as_str());
-                (
-                    vec![crate::renderer::resolve_tab_title(
-                        &s.title,
-                        cwd.as_deref(),
-                        process,
-                    )],
-                    vec![false],
-                )
+                let (title, icon) =
+                    crate::renderer::resolve_tab_title(&s.title, cwd.as_deref(), process);
+                (vec![title], vec![false], vec![icon])
             } else {
                 let mut titles = Vec::new();
                 let mut activities = Vec::new();
+                let mut icons = Vec::new();
                 for tab in self.tabs.iter() {
                     if let Some(idx) = self.session_by_id(tab.focused()) {
                         let s = &self.sessions[idx].session;
                         let cwd = s.term.try_lock().ok().and_then(|t| t.cwd.clone());
                         let process = s.foreground_cache.as_ref().map(|(_, n)| n.as_str());
-                        titles.push(crate::renderer::resolve_tab_title(
-                            &s.title,
-                            cwd.as_deref(),
-                            process,
-                        ));
+                        let (title, icon) =
+                            crate::renderer::resolve_tab_title(&s.title, cwd.as_deref(), process);
+                        titles.push(title);
                         activities.push(s.has_activity);
+                        icons.push(icon);
                     }
                 }
-                (titles, activities)
+                (titles, activities, icons)
             };
         let (pad_x, _) = renderer.content_padding();
         let (bar_x, bar_w) = if let Some(tb) = title_bar {
@@ -1201,6 +1196,9 @@ impl App {
         for seg in &mut layout.segments {
             if seg.index < activities.len() {
                 seg.activity = activities[seg.index];
+            }
+            if seg.index < icons.len() {
+                seg.icon_candidate = icons[seg.index];
             }
         }
         Some(layout)
