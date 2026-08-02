@@ -148,6 +148,11 @@ fn clamp_font_size(current: u16, dir: i8) -> u16 {
 const GUI_METRICS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 /// Ventana para doble/triple clic y retardo de copy-on-select.
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(200);
+/// Cuánto esperar antes de volver a pedir imagen del swapchain tras un fallo.
+/// Más corto que el timeout de wgpu (1000 ms) para que la recuperación sea
+/// perceptiblemente inmediata, y más largo que un frame a 60 Hz para no
+/// reintentar dentro del mismo vblank.
+const ACQUIRE_BACKOFF: Duration = Duration::from_millis(200);
 
 struct GuiRedrawMetrics {
     redraws: u64,
@@ -360,6 +365,11 @@ pub struct App {
     /// bloquea el event loop hasta el timeout de wgpu sin que nadie vea el
     /// resultado.
     occluded: bool,
+    /// Instante del último fallo de adquisición del swapchain. Durante
+    /// `ACQUIRE_BACKOFF` no se vuelve a pedir imagen: cada intento fallido
+    /// cuesta hasta 1000 ms de event loop bloqueado, y el timer de parpadeo
+    /// pide redraws cada 500 ms, así que sin backoff el fallo se realimenta.
+    last_acquire_failure: Option<Instant>,
 }
 
 /// Recopila muestras de latencia (µs) y registra p50/p95/p99 cada N.
@@ -540,6 +550,7 @@ impl App {
             drain_triggered_redraw: false,
             latency_probe: LatencyProbeStats::new(),
             occluded: false,
+            last_acquire_failure: None,
         }
     }
 
@@ -2845,7 +2856,23 @@ impl App {
 
     /// True si este frame no debe intentar adquirir imagen del swapchain.
     pub(crate) fn should_skip_frame(&self) -> bool {
-        self.occluded
+        self.occluded || self.acquire_backoff_active()
+    }
+
+    /// Anota un fallo de adquisición para abrir la ventana de backoff.
+    pub(crate) fn note_acquire_failure(&mut self) {
+        self.last_acquire_failure = Some(Instant::now());
+    }
+
+    /// True mientras el backoff siga vigente.
+    pub(crate) fn acquire_backoff_active(&self) -> bool {
+        self.last_acquire_failure
+            .is_some_and(|t| t.elapsed() < ACQUIRE_BACKOFF)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn expire_acquire_backoff_for_test(&mut self) {
+        self.last_acquire_failure = Some(Instant::now() - ACQUIRE_BACKOFF);
     }
 
     fn pane_is_dirty(&self, id: SessionId) -> bool {
@@ -3878,13 +3905,16 @@ impl ApplicationHandler<UserEvent> for App {
                         );
                     }
                 }
+                let acquire_failure = self
+                    .renderer
+                    .as_mut()
+                    .and_then(|r| r.take_acquire_failure());
+                if acquire_failure.is_some() {
+                    self.note_acquire_failure();
+                }
                 let render_ms = t_render.elapsed().as_millis();
                 if render_ms > 250 {
-                    let acquire = self
-                        .renderer
-                        .as_mut()
-                        .and_then(|r| r.take_acquire_failure());
-                    match acquire {
+                    match acquire_failure {
                         Some(failure) => tracing::warn!(
                             "render lento: {}ms — el compositor no libero imagen del swapchain \
                              ({}, espera {}ms). El frame no se pinto.",
@@ -5155,6 +5185,28 @@ import = false
         assert!(
             app.sessions[0].session.dirty,
             "el dirty acumulado sigue pendiente"
+        );
+    }
+
+    #[test]
+    fn backoff_tras_fallo_de_swapchain_ignora_redraws_de_parpadeo() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(term);
+
+        assert!(!app.acquire_backoff_active(), "sin fallos no hay backoff");
+
+        app.note_acquire_failure();
+        assert!(
+            app.should_skip_frame(),
+            "justo tras el fallo no se reintenta: el timer de parpadeo pediria \
+             un frame cada 500ms y cada intento cuesta 1000ms de event loop"
+        );
+
+        // El backoff es temporal, no permanente: expira solo.
+        app.expire_acquire_backoff_for_test();
+        assert!(
+            !app.should_skip_frame(),
+            "pasado el backoff se vuelve a intentar"
         );
     }
 
