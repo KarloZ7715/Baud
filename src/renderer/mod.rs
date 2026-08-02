@@ -94,6 +94,20 @@ pub fn frame_clear_alpha(window_opacity: f32) -> f64 {
     window_opacity.clamp(0.0, 1.0) as f64
 }
 
+/// Modo de color del atlas de glyphon segun el formato de la surface.
+///
+/// Con `Accurate` glyphon linealiza el color del texto en el shader, pensado
+/// para targets `*Srgb` donde la GPU re-codifica a sRGB al escribir. En un
+/// target no-sRGB ese valor lineal se escribe crudo y el texto se ve oscuro
+/// y saturado; `Web` escribe el color codificado tal cual.
+fn glyph_atlas_color_mode(format: wgpu::TextureFormat) -> glyphon::ColorMode {
+    if format.is_srgb() {
+        glyphon::ColorMode::Accurate
+    } else {
+        glyphon::ColorMode::Web
+    }
+}
+
 /// Color de clear premultiplicado: fondo del tema con opacidad uniforme en toda la ventana.
 ///
 /// El clear se escribe en el espacio de shader de la textura: en un target
@@ -431,7 +445,13 @@ impl Renderer {
         // Cache necesario para glyphon 0.11
         let t_glyphon_cache = Instant::now();
         let wgpu_cache = glyphon::Cache::new(&device);
-        let mut atlas = glyphon::TextAtlas::new(&device, &queue, &wgpu_cache, config.format);
+        let mut atlas = glyphon::TextAtlas::with_color_mode(
+            &device,
+            &queue,
+            &wgpu_cache,
+            config.format,
+            glyph_atlas_color_mode(config.format),
+        );
         tracing::info!(
             "startup: glyphon cache + atlas listos en {}ms",
             t_glyphon_cache.elapsed().as_millis()
@@ -706,11 +726,12 @@ impl Renderer {
 
     /// Recrea atlas y text renderer (p. ej. al alternar métricas terminal/picker).
     fn reset_text_atlas(&mut self) {
-        self.atlas = glyphon::TextAtlas::new(
+        self.atlas = glyphon::TextAtlas::with_color_mode(
             &self.device,
             &self.queue,
             &self.wgpu_cache,
             self.config.format,
+            glyph_atlas_color_mode(self.config.format),
         );
         self.text_renderer = glyphon::TextRenderer::new(
             &mut self.atlas,
@@ -2810,6 +2831,20 @@ mod tests {
         assert!((c.a - 0.8).abs() < 1e-6);
         assert!((c.r - 0.8 * 0.01300).abs() < 1e-4);
         assert!((c.b - 0.8 * 0.02732).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_glyph_atlas_color_mode_segun_formato() {
+        // En target no-sRGB glyphon no debe linealizar el color del texto;
+        // en target sRGB si, porque la GPU re-codifica al escribir.
+        assert!(matches!(
+            glyph_atlas_color_mode(wgpu::TextureFormat::Bgra8Unorm),
+            glyphon::ColorMode::Web
+        ));
+        assert!(matches!(
+            glyph_atlas_color_mode(wgpu::TextureFormat::Bgra8UnormSrgb),
+            glyphon::ColorMode::Accurate
+        ));
     }
 
     // -----------------------------------------------------------------------
