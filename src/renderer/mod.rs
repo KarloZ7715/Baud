@@ -2462,7 +2462,6 @@ fn push_tab_bar<'a>(
             crate::renderer::build_segment_chrome(
                 seg.width_px,
                 bar_h,
-                tab_bar::TAB_CONTENT_GAP_PX,
                 scale_factor,
                 bg_alpha,
                 true,
@@ -2563,15 +2562,29 @@ fn push_tab_bar<'a>(
         let close_attrs = glyphon::Attrs::new()
             .family(family)
             .color(glyphon::Color::rgba(fr, fg, fb, close_a.max(140)));
+        let close_left = crate::renderer::segment_close_left_px(seg, cell_w);
         close_glyphs.clear();
+        // Scrub anclado a bar_top (altura bar_h): anclarlo a text_top desborda la barra.
         crate::renderer::push_close_scrub(
             bar_h,
             cell_w,
             close_alpha,
             seg.active,
+            bg_alpha,
             theme,
             close_glyphs,
         );
+        if !close_glyphs.is_empty() {
+            extra_areas.push(glyphon::TextArea {
+                buffer: empty_buffer,
+                left: close_left,
+                top: bar_top,
+                scale: 1.0,
+                bounds: full_bounds,
+                default_color: glyphon::Color::rgb(0xff, 0xff, 0xff),
+                custom_glyphs: close_glyphs,
+            });
+        }
         close_buffer.set_rich_text(
             font_system,
             vec![("×", close_attrs)],
@@ -2585,12 +2598,12 @@ fn push_tab_bar<'a>(
         close_buffer.shape_until_scroll(font_system, false);
         extra_areas.push(glyphon::TextArea {
             buffer: close_buffer,
-            left: crate::renderer::segment_close_left_px(seg, cell_w),
+            left: close_left,
             top: text_top,
             scale: 1.0,
             bounds: full_bounds,
             default_color: glyphon::Color::rgba(fr, fg, fb, close_a.max(140)),
-            custom_glyphs: close_glyphs,
+            custom_glyphs: &[],
         });
     }
 

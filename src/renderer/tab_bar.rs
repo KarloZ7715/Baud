@@ -400,12 +400,21 @@ pub fn segment_close_left_px(seg: &TabSegment, cell_w: f32) -> f32 {
     seg.x_px + seg.width_px - cell_w * TAB_CLOSE_WIDTH_CELLS as f32
 }
 
-/// Fondo solido detras del × (coordenadas relativas a la celda del boton).
+/// Fondo solido detras del × (coordenadas relativas al origen de la barra).
+///
+/// El llamante debe colocar este glifo en un `TextArea` anclado a `bar_top`,
+/// no al baseline del texto: si se ancla a `text_top` con altura `bar_h`, el
+/// rectangulo sobresale `(bar_h - cell_h) / 2` por debajo de la barra.
+///
+/// Solo en la tab activa: el titulo ya reserva la columna del ×, y un scrub en
+/// inactivas se leia como un chip de otro color. En la activa, `fill_alpha`
+/// iguala el fondo del tab (p. ej. `window.opacity`) para no inventar opacidad.
 pub fn push_close_scrub(
     bar_h: f32,
     cell_w: f32,
     alpha: f32,
     active: bool,
+    fill_alpha: u8,
     theme: &crate::config::ThemeConfig,
     out: &mut Vec<glyphon::CustomGlyph>,
 ) {
@@ -413,16 +422,11 @@ pub fn push_close_scrub(
 
     use crate::renderer::decorations::SOLID_MASK_GLYPH_ID;
 
-    if alpha <= 0.02 {
+    if !active || alpha <= 0.02 {
         return;
     }
-    let (br, bg, bb) = if active {
-        crate::config::parse_hex(&theme.background)
-    } else {
-        crate::config::parse_hex(&theme.black)
-    };
-    let base_a = if active { 255.0 } else { 200.0 };
-    let a = (base_a * alpha.clamp(0.0, 1.0)) as u8;
+    let (br, bg, bb) = crate::config::parse_hex(&theme.background);
+    let a = (f32::from(fill_alpha) * alpha.clamp(0.0, 1.0)) as u8;
     let scrub_w = cell_w * TAB_CLOSE_WIDTH_CELLS as f32;
     out.push(CustomGlyph {
         id: SOLID_MASK_GLYPH_ID,
@@ -555,17 +559,14 @@ pub fn build_tab_track(
 
 /// Chrome de un segmento (coordenadas relativas al TextArea del tab).
 ///
-/// Variante C: la tab activa comparte fondo con el grid (se extiende hasta
-/// tocarlo), lleva esquinas superiores redondeadas y prescinde de la barra de
-/// acento: la fusion con el grid es el indicador de la tab activa.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "chrome de tab activa: geometria + tema + alpha"
-)]
+/// Variante C: la tab activa llena la altura de la barra con el fondo del
+/// terminal y esquinas superiores redondeadas; el indicador es ese contraste
+/// con la pista, sin barra de acento. La altura queda en `bar_h` (no invade el
+/// hueco ni la primera fila del grid): extenderse bajo la regla se leia como
+/// overflow del box padre, sobre todo con prompts de color en la fila 0.
 pub fn build_segment_chrome(
     width_px: f32,
     bar_h: f32,
-    gap_px: f32,
     scale_factor: f32,
     bg_alpha: u8,
     active: bool,
@@ -585,16 +586,15 @@ pub fn build_segment_chrome(
     let (br, bg, bb) = crate::config::parse_hex(&theme.background);
     // Mismo alfa que el clear del grid: a opacity < 1 la tab activa es igual de translucida.
     let fill = glyphon::Color::rgba(br, bg, bb, bg_alpha);
-    let full_h = bar_h + gap_px;
     let radius = (TAB_CORNER_RADIUS_LOGICAL * scale_factor).round();
-    // Radio demasiado pequeno o tab estrecha: rectangulo liso hasta el grid.
-    if radius < 1.0 || radius * 2.0 >= width_px.min(full_h) {
+    // Radio demasiado pequeno o tab estrecha: rectangulo liso.
+    if radius < 1.0 || radius * 2.0 >= width_px.min(bar_h) {
         out.push(CustomGlyph {
             id: SOLID_MASK_GLYPH_ID,
             left: 0.0,
             top: 0.0,
             width: width_px,
-            height: full_h,
+            height: bar_h,
             color: Some(fill),
             snap_to_physical_pixel: true,
             metadata: 0,
@@ -602,13 +602,13 @@ pub fn build_segment_chrome(
         return;
     }
     let r = radius;
-    // Cuerpo (bajo las esquinas, hasta el grid) y franja superior central.
+    // Cuerpo (bajo las esquinas) y franja superior central.
     out.push(CustomGlyph {
         id: SOLID_MASK_GLYPH_ID,
         left: 0.0,
         top: r,
         width: width_px,
-        height: full_h - r,
+        height: bar_h - r,
         color: Some(fill),
         snap_to_physical_pixel: true,
         metadata: 0,
@@ -834,5 +834,44 @@ mod tests {
     fn etiqueta_estrecha_usa_indice() {
         let label = format_tab_label(3, "baud", 3);
         assert_eq!(label, "3");
+    }
+
+    #[test]
+    fn segment_chrome_activo_no_excede_altura_barra() {
+        let theme = crate::config::ThemeConfig::default();
+        let mut out = Vec::new();
+        let bar_h = 34.0;
+        build_segment_chrome(120.0, bar_h, 1.0, 204, true, &theme, &mut out);
+        assert!(!out.is_empty());
+        let bottom = out
+            .iter()
+            .map(|g| g.top + g.height)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            (bottom - bar_h).abs() < 0.01,
+            "chrome activo llega a {bottom}, barra es {bar_h}"
+        );
+    }
+
+    #[test]
+    fn close_scrub_cabe_en_altura_barra_y_usa_alfa_del_tab() {
+        let theme = crate::config::ThemeConfig::default();
+        let mut out = Vec::new();
+        let bar_h = 34.0;
+        let fill_alpha = 204u8;
+        push_close_scrub(bar_h, 10.0, 1.0, true, fill_alpha, &theme, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!((out[0].top - 0.0).abs() < f32::EPSILON);
+        assert!((out[0].height - bar_h).abs() < f32::EPSILON);
+        let color = out[0].color.expect("scrub con color");
+        assert_eq!(color.a(), fill_alpha);
+    }
+
+    #[test]
+    fn close_scrub_inactivo_no_pinta_chip() {
+        let theme = crate::config::ThemeConfig::default();
+        let mut out = Vec::new();
+        push_close_scrub(34.0, 10.0, 1.0, false, 255, &theme, &mut out);
+        assert!(out.is_empty());
     }
 }
