@@ -1080,6 +1080,7 @@ impl Renderer {
                 draw_tab_track,
                 &mut self.contrast_cache,
                 self.scale_factor,
+                window_opacity,
             );
         }
         if let Some(pre) = preedit.as_ref().filter(|p| !p.text.is_empty()) {
@@ -2274,6 +2275,7 @@ fn push_tab_bar<'a>(
     draw_track: bool,
     contrast_cache: &mut ContrastCache,
     scale_factor: f32,
+    window_opacity: f32,
 ) {
     let pad_x = cell_metrics.padding_x;
     let inner_w = layout.bar_width_px;
@@ -2303,6 +2305,8 @@ fn push_tab_bar<'a>(
     let (fr, fg, fb) = contrast_cache.adjust(fg_rgb, bg_rgb, MIN_LEGIBLE_CONTRAST);
     let inactive_fg = glyphon::Color::rgba(fr, fg, fb, 120);
     let active_fg = glyphon::Color::rgb(fr, fg, fb);
+    // Alfa del fondo de la tab activa = alfa del clear del grid (coherencia con window.opacity).
+    let bg_alpha = (window_opacity.clamp(0.0, 1.0) * 255.0) as u8;
     let family = resolve_family(font_family);
     let default_attrs = glyphon::Attrs::new().family(family);
     let metrics = glyphon::Metrics::new(font_size, cell_h);
@@ -2340,6 +2344,7 @@ fn push_tab_bar<'a>(
                 bar_h,
                 tab_bar::TAB_CONTENT_GAP_PX,
                 scale_factor,
+                bg_alpha,
                 true,
                 theme,
                 chrome,

@@ -488,11 +488,16 @@ pub fn build_tab_track(
 /// Variante C: la tab activa comparte fondo con el grid (se extiende hasta
 /// tocarlo), lleva esquinas superiores redondeadas y prescinde de la barra de
 /// acento: la fusion con el grid es el indicador de la tab activa.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "chrome de tab activa: geometria + tema + alpha"
+)]
 pub fn build_segment_chrome(
     width_px: f32,
     bar_h: f32,
     gap_px: f32,
     scale_factor: f32,
+    bg_alpha: u8,
     active: bool,
     theme: &crate::config::ThemeConfig,
     out: &mut Vec<glyphon::CustomGlyph>,
@@ -508,7 +513,8 @@ pub fn build_segment_chrome(
         return;
     }
     let (br, bg, bb) = crate::config::parse_hex(&theme.background);
-    let fill = glyphon::Color::rgb(br, bg, bb);
+    // Mismo alfa que el clear del grid: a opacity < 1 la tab activa es igual de translucida.
+    let fill = glyphon::Color::rgba(br, bg, bb, bg_alpha);
     let full_h = bar_h + gap_px;
     let radius = (TAB_CORNER_RADIUS_LOGICAL * scale_factor).round();
     // Radio demasiado pequeno o tab estrecha: rectangulo liso hasta el grid.
