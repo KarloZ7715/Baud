@@ -3301,7 +3301,11 @@ impl ApplicationHandler<UserEvent> for App {
         // mientras el hilo de fuentes sigue escaneando en segundo plano.
         let t_early_present = Instant::now();
         let (bg_r, bg_g, bg_b) = crate::config::parse_hex(&self.config.theme.background);
-        let clear_color = crate::renderer::frame_clear_color((bg_r, bg_g, bg_b), opacity);
+        let clear_color = crate::renderer::frame_clear_color(
+            (bg_r, bg_g, bg_b),
+            opacity,
+            config.format.is_srgb(),
+        );
         if let wgpu::CurrentSurfaceTexture::Success(frame)
         | wgpu::CurrentSurfaceTexture::Suboptimal(frame) = surface.get_current_texture()
         {

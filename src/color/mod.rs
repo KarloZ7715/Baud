@@ -15,18 +15,19 @@ pub fn contrast_ratio_rgb(fg: (u8, u8, u8), bg: (u8, u8, u8)) -> f64 {
 
 /// Luminancia relativa WCAG 2.1 de un color sRGB.
 pub fn relative_luminance(rgb: (u8, u8, u8)) -> f64 {
-    fn channel(c: u8) -> f64 {
-        let c = f64::from(c) / 255.0;
-        if c <= 0.03928 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    }
-    let r = channel(rgb.0);
-    let g = channel(rgb.1);
-    let b = channel(rgb.2);
+    let r = srgb_to_linear(f64::from(rgb.0) / 255.0);
+    let g = srgb_to_linear(f64::from(rgb.1) / 255.0);
+    let b = srgb_to_linear(f64::from(rgb.2) / 255.0);
     0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+/// Convierte un canal sRGB codificado (0..=1) a su valor lineal (IEC 61966-2-1).
+pub fn srgb_to_linear(c: f64) -> f64 {
+    if c <= 0.03928 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn parse_hex_color(hex: &str) -> (u8, u8, u8) {

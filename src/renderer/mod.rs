@@ -95,11 +95,25 @@ pub fn frame_clear_alpha(window_opacity: f32) -> f64 {
 }
 
 /// Color de clear premultiplicado: fondo del tema con opacidad uniforme en toda la ventana.
-pub fn frame_clear_color(bg: (u8, u8, u8), window_opacity: f32) -> wgpu::Color {
+///
+/// El clear se escribe en el espacio de shader de la textura: en un target
+/// `*Srgb` ese espacio es lineal, asi que `bg` (sRGB codificado) se convierte
+/// a lineal antes de premultiplicar por alpha; en un target no-sRGB el valor
+/// codificado se escribe tal cual.
+pub fn frame_clear_color(
+    bg: (u8, u8, u8),
+    window_opacity: f32,
+    target_is_srgb: bool,
+) -> wgpu::Color {
     let a = frame_clear_alpha(window_opacity);
-    let r = bg.0 as f64 / 255.0;
-    let g = bg.1 as f64 / 255.0;
-    let b = bg.2 as f64 / 255.0;
+    let mut r = bg.0 as f64 / 255.0;
+    let mut g = bg.1 as f64 / 255.0;
+    let mut b = bg.2 as f64 / 255.0;
+    if target_is_srgb {
+        r = crate::color::srgb_to_linear(r);
+        g = crate::color::srgb_to_linear(g);
+        b = crate::color::srgb_to_linear(b);
+    }
     wgpu::Color {
         r: r * a,
         g: g * a,
@@ -1144,7 +1158,11 @@ impl Renderer {
 
         let t_gpu = Instant::now();
         let (bg_r, bg_g, bg_b) = palette.bg_rgb(Color::Default);
-        let clear_color = frame_clear_color((bg_r, bg_g, bg_b), window_opacity);
+        let clear_color = frame_clear_color(
+            (bg_r, bg_g, bg_b),
+            window_opacity,
+            self.config.format.is_srgb(),
+        );
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cell renderer pass"),
@@ -1603,7 +1621,7 @@ impl Renderer {
 
         let t_gpu = Instant::now();
         let (bg_r, bg_g, bg_b) = crate::config::parse_hex(&theme.background);
-        let clear_color = frame_clear_color((bg_r, bg_g, bg_b), 1.0);
+        let clear_color = frame_clear_color((bg_r, bg_g, bg_b), 1.0, self.config.format.is_srgb());
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("theme picker pass"),
@@ -1713,7 +1731,7 @@ impl Renderer {
 
         let t_gpu = Instant::now();
         let (bg_r, bg_g, bg_b) = crate::config::parse_hex(&theme.background);
-        let clear_color = frame_clear_color((bg_r, bg_g, bg_b), 1.0);
+        let clear_color = frame_clear_color((bg_r, bg_g, bg_b), 1.0, self.config.format.is_srgb());
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("consent pass"),
@@ -2739,13 +2757,41 @@ mod tests {
 
     #[test]
     fn test_frame_clear_color_escala_linealmente() {
-        let opaque = frame_clear_color((100, 50, 25), 1.0);
+        let opaque = frame_clear_color((100, 50, 25), 1.0, false);
         assert!((opaque.a - 1.0).abs() < 1e-6);
         assert!((opaque.r - 100.0 / 255.0).abs() < 1e-6);
 
-        let half = frame_clear_color((200, 0, 0), 0.5);
+        let half = frame_clear_color((200, 0, 0), 0.5, false);
         assert!((half.a - 0.5).abs() < 1e-6);
         assert!((half.r - 0.5 * 200.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_frame_clear_color_target_no_srgb_pasa_el_byte_crudo() {
+        // #1e1e2e sin conversion: el target no-sRGB espera el valor codificado.
+        let c = frame_clear_color((0x1e, 0x1e, 0x2e), 1.0, false);
+        assert!((c.r - 0.11765).abs() < 1e-4);
+        assert!((c.g - 0.11765).abs() < 1e-4);
+        assert!((c.b - 0.18039).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_frame_clear_color_target_srgb_linealiza() {
+        // #1e1e2e en un target sRGB: el clear se escribe en espacio lineal.
+        let c = frame_clear_color((0x1e, 0x1e, 0x2e), 1.0, true);
+        assert!((c.r - 0.01300).abs() < 1e-4);
+        assert!((c.g - 0.01300).abs() < 1e-4);
+        assert!((c.b - 0.02732).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_frame_clear_color_translucido_premultiplica_sobre_lineal() {
+        // Con target sRGB la premultiplicacion por alpha se aplica sobre el
+        // valor lineal, no sobre el codificado.
+        let c = frame_clear_color((0x1e, 0x1e, 0x2e), 0.8, true);
+        assert!((c.a - 0.8).abs() < 1e-6);
+        assert!((c.r - 0.8 * 0.01300).abs() < 1e-4);
+        assert!((c.b - 0.8 * 0.02732).abs() < 1e-4);
     }
 
     // -----------------------------------------------------------------------
