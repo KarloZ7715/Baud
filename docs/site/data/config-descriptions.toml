@@ -64,6 +64,7 @@ keys = "User-defined keybinding overrides, mapping a chord string to an action n
 "font.line_height" = "Line height multiplier applied to the cell grid."
 "font.builtin_box_drawing" = "Draws box-drawing (U+2500-U+259F) and Powerline separator (U+E0B0-U+E0B3) glyphs procedurally instead of relying on the font to include them."
 "font.ligatures" = "Enables multi-character ligature shaping. Off by default, since ligatures can visually merge adjacent operators in code."
+"font.text_contrast" = "Strength of the contrast curve baked into the glyph mask at rasterization time (0.0 to 1.0, default 0.0 = no curve). On dark themes it thickens strokes and on light themes it thins them, following the theme's polarity. The mask is shared across all cell colors, so the curve cannot adapt to each cell's specific fg/bg pair."
 "font.fallback" = "Fallback font families tried in order when the primary family is missing a glyph, such as emoji, CJK, or symbol fonts."
 
 "window.opacity" = "Window opacity from 0 to 1. Values below 1 let the desktop show through the background wherever the GPU backend supports transparency."

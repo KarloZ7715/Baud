@@ -44,6 +44,8 @@
 # line_height = 1.0
 # Font size in points.
 # size = 12
+# Strength of the contrast curve baked into the glyph mask at rasterization time (0.0 to 1.0, default 0.0 = no curve). On dark themes it thickens strokes and on light themes it thins them, following the theme's polarity. The mask is shared across all cell colors, so the curve cannot adapt to each cell's specific fg/bg pair.
+# text_contrast = 0.0
 
 [font.glyph_offset]
 # Fine horizontal pixel offset applied to every glyph within its cell, for fonts whose glyphs need nudging.

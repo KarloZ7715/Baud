@@ -51,6 +51,12 @@ pub struct GlyphCache {
     /// `take_needs_atlas_reset`): el llamante debe resetear el atlas de la
     /// GPU, igual que hace tras `metrics_changed`.
     needs_atlas_reset: bool,
+    /// LUT de la curva de contraste aplicada a las mascaras al rasterizar.
+    mask_lut: [u8; 256],
+    /// Clave (bits de `text_contrast`, polaridad oscuro/claro) con la que se
+    /// construyo `mask_lut`. Con contraste 0.0 la polaridad no aplica y la
+    /// clave es fija, porque la LUT es identidad.
+    mask_curve_key: (u32, bool),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +92,8 @@ impl GlyphCache {
             metrics_key: None,
             line_y_cache: LineYCache::new(),
             needs_atlas_reset: false,
+            mask_lut: build_mask_curve_lut(0.0),
+            mask_curve_key: (0.0f32.to_bits(), true),
         }
     }
 
@@ -100,6 +108,39 @@ impl GlyphCache {
         self.next_id = Self::FIRST_TEXT_ID;
         self.metrics_key = Some(key);
         true
+    }
+
+    /// Reconstruye la LUT de la curva de contraste y purga el cache si la
+    /// curva cambio. Devuelve `true` si hay que resetear el atlas GPU, igual
+    /// que [`GlyphCache::metrics_changed`]: las mascaras ya subidas al atlas
+    /// llevan la curva anterior.
+    ///
+    /// `dark_theme` es la polaridad del tema (fondo mas oscuro que el texto):
+    /// en temas oscuros la curva engorda el trazo y en claros lo adelgaza.
+    /// Con `text_contrast == 0.0` la LUT es identidad y la polaridad no
+    /// invalida, para no repoblar el atlas en cada cambio de tema.
+    pub fn mask_curve_changed(&mut self, text_contrast: f32, dark_theme: bool) -> bool {
+        let c = text_contrast.clamp(0.0, 1.0);
+        let key = if c == 0.0 {
+            (0.0f32.to_bits(), true)
+        } else {
+            (c.to_bits(), dark_theme)
+        };
+        if self.mask_curve_key == key {
+            return false;
+        }
+        self.mask_curve_key = key;
+        let k = if dark_theme { c } else { -c };
+        self.mask_lut = build_mask_curve_lut(k);
+        self.clear_entries();
+        self.glyphs.clear();
+        self.next_id = Self::FIRST_TEXT_ID;
+        true
+    }
+
+    /// La LUT actual si la curva esta activa (contraste distinto de 0.0).
+    fn active_mask_lut(&self) -> Option<&[u8; 256]> {
+        (self.mask_curve_key.0 != 0.0f32.to_bits()).then_some(&self.mask_lut)
     }
 
     fn ensure_metrics(&mut self, metrics: &CellMetrics) {
@@ -185,7 +226,7 @@ impl GlyphCache {
             strings.extra(key.extra),
             &mut self.line_y_cache,
         );
-        let raster = rasterize_shaped(font_system, swash_cache, &shaped);
+        let raster = rasterize_shaped(font_system, swash_cache, &shaped, self.active_mask_lut());
         let custom_glyph_id = self.take_next_id();
         self.insert_glyph(
             key,
@@ -213,7 +254,7 @@ impl GlyphCache {
             return id;
         }
 
-        let raster = rasterize_shaped(font_system, swash_cache, shaped);
+        let raster = rasterize_shaped(font_system, swash_cache, shaped, self.active_mask_lut());
         let custom_glyph_id = self.take_next_id();
         self.insert_glyph(
             key,
@@ -275,10 +316,26 @@ pub(crate) fn cache_key_rasterizes(
         .is_some_and(|image| !image.data.is_empty())
 }
 
+/// LUT de 256 entradas con la curva de contraste de la mascara:
+/// `a' = round(255 * (a/255)^(1/(1+k)))`. `k > 0` sube los medios (trazo mas
+/// grueso, para temas oscuros), `k < 0` los baja (temas claros) y `k = 0` es
+/// la identidad. Se aplica una vez por glifo al rasterizar, nunca por frame.
+fn build_mask_curve_lut(k: f32) -> [u8; 256] {
+    // El divisor acotado evita el polo de k = -1 (contraste maximo en tema
+    // claro): el resultado es una curva muy pronunciada, no un NaN.
+    let exponent = 1.0 / (1.0 + k).max(0.01);
+    let mut lut = [0u8; 256];
+    for (i, entry) in lut.iter_mut().enumerate() {
+        *entry = (255.0 * (i as f32 / 255.0).powf(exponent)).round() as u8;
+    }
+    lut
+}
+
 fn rasterize_shaped(
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     shaped: &ShapedGlyph,
+    mask_curve: Option<&[u8; 256]>,
 ) -> CachedRaster {
     let Some(image) = swash_cache.get_image_uncached(font_system, shaped.cache_key) else {
         tracing::debug!("swash sin imagen para cache_key {:?}", shaped.cache_key);
@@ -302,12 +359,20 @@ fn rasterize_shaped(
         SwashContent::Mask | SwashContent::SubpixelMask => ContentType::Mask,
     };
 
-    let (data, width, height) = normalize_raster_bytes(
+    let (mut data, width, height) = normalize_raster_bytes(
         &image.data,
         image.placement.width,
         image.placement.height,
         content_type,
     );
+
+    // La curva de contraste solo toca mascaras de un canal; los bitmaps de
+    // color (emoji) se dejan tal cual.
+    if let (Some(lut), ContentType::Mask) = (mask_curve, content_type) {
+        for byte in data.iter_mut() {
+            *byte = lut[*byte as usize];
+        }
+    }
 
     if width == 0 || height == 0 {
         return missing_raster();
@@ -611,6 +676,91 @@ mod tests {
             1,
             "solo debe quedar la entrada del nuevo tamaño"
         );
+    }
+
+    #[test]
+    fn lut_curva_identidad_sin_contraste() {
+        let lut = build_mask_curve_lut(0.0);
+        for (i, &v) in lut.iter().enumerate() {
+            assert_eq!(v, i as u8);
+        }
+    }
+
+    #[test]
+    fn lut_curva_tema_oscuro_engorda_y_claro_adelgaza() {
+        let oscura = build_mask_curve_lut(0.5);
+        assert_eq!(oscura[0], 0);
+        assert_eq!(oscura[255], 255);
+        assert!(
+            oscura[128] > 128,
+            "tema oscuro: la curva debe subir los medios (engordar)"
+        );
+
+        let clara = build_mask_curve_lut(-0.5);
+        assert_eq!(clara[0], 0);
+        assert_eq!(clara[255], 255);
+        assert!(
+            clara[128] < 128,
+            "tema claro: la curva debe bajar los medios (adelgazar)"
+        );
+    }
+
+    #[test]
+    fn mask_curve_changed_purga_solo_si_la_curva_cambia() {
+        let mut cache = GlyphCache::new();
+        // Curva por defecto (0.0): cualquier polaridad es la misma identidad.
+        assert!(!cache.mask_curve_changed(0.0, true));
+        assert!(!cache.mask_curve_changed(0.0, false));
+        // Cambio de contraste: purga y pide reset de atlas.
+        assert!(cache.mask_curve_changed(0.5, true));
+        assert!(!cache.mask_curve_changed(0.5, true));
+        // Con contraste activo la polaridad si forma parte de la curva.
+        assert!(cache.mask_curve_changed(0.5, false));
+        assert!(!cache.mask_curve_changed(0.5, false));
+        // Volver a 0.0 tambien invalida.
+        assert!(cache.mask_curve_changed(0.0, true));
+    }
+
+    #[test]
+    fn curva_se_aplica_solo_a_mascaras_al_rasterizar() {
+        let mut font_system = create_font_system();
+        let mut swash_cache = SwashCache::new();
+        let family = FontConfig::default().family;
+        let metrics = CellMetrics::measure(
+            &mut font_system,
+            &family,
+            12.0,
+            1.0,
+            crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+        );
+        let mut strings = GlyphStrings::new();
+        let key = test_key(&mut strings, 'M', &family);
+
+        let mut cache = GlyphCache::new();
+        let id_plano =
+            cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &strings, key);
+        let plano = cache
+            .get_by_custom_id(id_plano)
+            .expect("glifo")
+            .raster
+            .clone();
+        assert_eq!(plano.content_type, ContentType::Mask);
+
+        assert!(cache.mask_curve_changed(0.8, true));
+        let id_curvo =
+            cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &strings, key);
+        let curvo = &cache.get_by_custom_id(id_curvo).expect("glifo").raster;
+
+        assert_eq!(plano.data.len(), curvo.data.len());
+        assert_ne!(
+            plano.data, curvo.data,
+            "la curva debe cambiar los bytes de la mascara"
+        );
+        // Cada byte curvo es el byte plano pasado por la LUT del tema oscuro.
+        let lut = build_mask_curve_lut(0.8);
+        for (&a, &b) in plano.data.iter().zip(curvo.data.iter()) {
+            assert_eq!(b, lut[a as usize]);
+        }
     }
 
     #[test]

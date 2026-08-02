@@ -280,6 +280,8 @@ pub struct Renderer {
     glyph_offset: GlyphOffset,
     builtin_box_drawing: bool,
     ligatures: bool,
+    /// Intensidad de la curva de contraste de la mascara (`font.text_contrast`).
+    text_contrast: f32,
     /// Cache de ajuste de contraste por frame.
     contrast_cache: ContrastCache,
     /// Desplazamiento vertical extra del grid (p. ej. fila de tabs).
@@ -573,6 +575,7 @@ impl Renderer {
             glyph_offset,
             builtin_box_drawing,
             ligatures,
+            text_contrast: font_config.text_contrast,
             contrast_cache: ContrastCache::default(),
             grid_top_offset: 0.0,
             tab_bar_buffer,
@@ -683,6 +686,7 @@ impl Renderer {
             self.builtin_box_drawing = font.builtin_box_drawing;
         }
 
+        self.text_contrast = font.text_contrast;
         self.font_size = effective_size as f32;
         self.refresh_cell_metrics();
         self.reset_glyph_pipeline();
@@ -789,6 +793,20 @@ impl Renderer {
         tbar_hover: Option<TitleButtonKind>,
     ) -> Result<Vec<SessionId>, String> {
         let t0 = Instant::now();
+
+        // Curva de contraste de la mascara: con text_contrast = 0.0 la LUT es
+        // identidad y la polaridad ni se calcula (coste por frame nulo). Si la
+        // curva cambia (config recargada o polaridad del tema distinta) el
+        // cache se purga y el atlas se resetea, igual que tras cambiar metricas.
+        let dark_theme = self.text_contrast == 0.0 || theme.is_dark();
+        if self
+            .glyph_cache
+            .mask_curve_changed(self.text_contrast, dark_theme)
+        {
+            self.run_shape_cache.clear();
+            self.reset_text_atlas();
+            self.pane_custom_glyphs.clear();
+        }
 
         let t_frame_start = Instant::now();
         let frame = match self.surface.get_current_texture() {

@@ -314,6 +314,17 @@ pub struct ThemeConfig {
     pub minimum_contrast: f64,
 }
 
+impl ThemeConfig {
+    /// True si el tema es oscuro (fondo menos luminoso que el texto).
+    /// La polaridad decide el signo de la curva de `font.text_contrast`:
+    /// un tema claro con la curva de uno oscuro sale con el texto reventado.
+    pub fn is_dark(&self) -> bool {
+        let bg = crate::color::relative_luminance(parse_hex(&self.background));
+        let fg = crate::color::relative_luminance(parse_hex(&self.foreground));
+        bg < fg
+    }
+}
+
 /// Tabla `[theme]` con campos opcionales para distinguir ausencia de override.
 macro_rules! define_theme_table {
     ($( $field:ident ),+ $(,)?) => {
@@ -506,6 +517,13 @@ pub struct FontConfig {
     /// Shaping multi-caracter con ligaduras tipograficas (off por defecto).
     #[serde(default)]
     pub ligatures: bool,
+    /// Intensidad de la curva de contraste horneada en la mascara del glifo
+    /// al rasterizar (0.0..=1.0, 0.0 = sin curva). En temas oscuros engorda
+    /// el trazo y en claros lo adelgaza, segun la polaridad del tema. La
+    /// mascara es compartida por todos los colores de celda, asi que la
+    /// curva no puede depender del par fg/bg concreto de cada celda.
+    #[serde(default)]
+    pub text_contrast: f32,
     /// Familias de fallback en orden de preferencia (emoji, CJK, símbolos).
     #[serde(default)]
     pub fallback: Vec<String>,
@@ -782,6 +800,7 @@ impl Default for FontConfig {
             line_height: default_line_height(),
             builtin_box_drawing: true,
             ligatures: false,
+            text_contrast: 0.0,
             fallback: Vec::new(),
         }
     }
@@ -1245,6 +1264,19 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_theme_is_dark_segun_luminancia() {
+        let oscuro = ThemeConfig::default();
+        assert!(oscuro.is_dark());
+
+        let claro = ThemeConfig {
+            foreground: "#1a1a1a".to_string(),
+            background: "#fafafa".to_string(),
+            ..ThemeConfig::default()
+        };
+        assert!(!claro.is_dark());
+    }
 
     #[test]
     fn test_config_process_config_usa_defaults() {
