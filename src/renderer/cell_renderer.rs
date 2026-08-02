@@ -10,8 +10,11 @@ use crate::grid::DamageSnapshot;
 use super::builtin;
 use super::contrast::ContrastCache;
 use super::decorations::{
-    cursor_anchor_offset, line_quad, rasterize_line_mask, LINE_CURLY_GLYPH_ID,
+    cursor_anchor_offset, line_quad, rasterize_button_mask, rasterize_corner_mask,
+    rasterize_line_mask, CORNER_TL_MASK_GLYPH_ID, CORNER_TR_MASK_GLYPH_ID, LINE_CURLY_GLYPH_ID,
     LINE_DASHED_GLYPH_ID, LINE_DOTTED_GLYPH_ID, LINE_DOUBLE_GLYPH_ID, SOLID_MASK_GLYPH_ID,
+    WIN_BTN_CLOSE_MASK_GLYPH_ID, WIN_BTN_MAXIMIZE_MASK_GLYPH_ID, WIN_BTN_MINIMIZE_MASK_GLYPH_ID,
+    WIN_BTN_RESTORE_MASK_GLYPH_ID,
 };
 use super::display_list::{resolve_fg_glyphon, CursorGlyph, DisplayList, LineQuad, TextGlyph};
 use super::geometry::cell_origin;
@@ -621,6 +624,29 @@ fn rasterize_custom_glyph(
         LINE_DOUBLE_GLYPH_ID | LINE_DOTTED_GLYPH_ID | LINE_DASHED_GLYPH_ID | LINE_CURLY_GLYPH_ID
     ) {
         let data = rasterize_line_mask(request.width, request.height, request.id)?;
+        return Some(RasterizedCustomGlyph {
+            data,
+            content_type: ContentType::Mask,
+        });
+    }
+
+    if matches!(
+        request.id,
+        CORNER_TL_MASK_GLYPH_ID
+            | CORNER_TR_MASK_GLYPH_ID
+            | WIN_BTN_MINIMIZE_MASK_GLYPH_ID
+            | WIN_BTN_MAXIMIZE_MASK_GLYPH_ID
+            | WIN_BTN_RESTORE_MASK_GLYPH_ID
+            | WIN_BTN_CLOSE_MASK_GLYPH_ID
+    ) {
+        let data = if matches!(
+            request.id,
+            CORNER_TL_MASK_GLYPH_ID | CORNER_TR_MASK_GLYPH_ID
+        ) {
+            rasterize_corner_mask(request.width, request.height, request.id)?
+        } else {
+            rasterize_button_mask(request.width, request.height, request.id)?
+        };
         return Some(RasterizedCustomGlyph {
             data,
             content_type: ContentType::Mask,

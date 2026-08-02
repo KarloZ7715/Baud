@@ -14,6 +14,18 @@ pub const LINE_DOUBLE_GLYPH_ID: u16 = 1;
 pub const LINE_DOTTED_GLYPH_ID: u16 = 2;
 pub const LINE_DASHED_GLYPH_ID: u16 = 3;
 pub const LINE_CURLY_GLYPH_ID: u16 = 4;
+/// Mascara de esquina superior izquierda para la tab activa (variante C).
+pub const CORNER_TL_MASK_GLYPH_ID: u16 = 5;
+/// Mascara de esquina superior derecha para la tab activa (variante C).
+pub const CORNER_TR_MASK_GLYPH_ID: u16 = 6;
+/// Mascara del boton minimizar (linea horizontal).
+pub const WIN_BTN_MINIMIZE_MASK_GLYPH_ID: u16 = 7;
+/// Mascara del boton maximizar (cuadrado con borde).
+pub const WIN_BTN_MAXIMIZE_MASK_GLYPH_ID: u16 = 8;
+/// Mascara del boton restaurar (dos cuadrados desplazados).
+pub const WIN_BTN_RESTORE_MASK_GLYPH_ID: u16 = 9;
+/// Mascara del boton cerrar (dos diagonales).
+pub const WIN_BTN_CLOSE_MASK_GLYPH_ID: u16 = 10;
 
 pub fn underline_style_glyph_id(style: UnderlineStyle) -> u16 {
     match style {
@@ -219,6 +231,225 @@ pub fn rasterize_line_mask(width: u16, height: u16, id: u16) -> Option<Vec<u8>> 
     Some(data)
 }
 
+fn set_px(data: &mut [u8], w: usize, h: usize, x: usize, y: usize) {
+    if x < w && y < h {
+        data[y * w + x] = 255;
+    }
+}
+
+/// Borde de un rectangulo [x0..=x1] x [y0..=y1] con grosor `s`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mascara de boton: coordenadas del borde"
+)]
+fn stroke_rect(
+    data: &mut [u8],
+    w: usize,
+    h: usize,
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    s: usize,
+) {
+    let x1 = x1.min(w.saturating_sub(1));
+    let y1 = y1.min(h.saturating_sub(1));
+    if x1 < x0 || y1 < y0 {
+        return;
+    }
+    for d in 0..s {
+        if y0 + d <= y1 {
+            for x in x0..=x1 {
+                data[(y0 + d) * w + x] = 255;
+            }
+        }
+        if y1 >= d && y1 - d >= y0 {
+            for x in x0..=x1 {
+                data[(y1 - d) * w + x] = 255;
+            }
+        }
+        if x0 + d <= x1 {
+            for y in y0..=y1 {
+                data[y * w + (x0 + d)] = 255;
+            }
+        }
+        if x1 >= d && x1 - d >= x0 {
+            for y in y0..=y1 {
+                data[y * w + (x1 - d)] = 255;
+            }
+        }
+    }
+}
+
+/// Como `stroke_rect` pero oculta los pixels dentro del frente [fx0..=fx1] x [fy0..=fy1].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mascara de boton: borde recortado por el frente"
+)]
+fn stroke_rect_behind(
+    data: &mut [u8],
+    w: usize,
+    h: usize,
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    s: usize,
+    fx0: usize,
+    fy0: usize,
+    fx1: usize,
+    fy1: usize,
+) {
+    let x1 = x1.min(w.saturating_sub(1));
+    let y1 = y1.min(h.saturating_sub(1));
+    if x1 < x0 || y1 < y0 {
+        return;
+    }
+    let hidden = |x: usize, y: usize| x >= fx0 && x <= fx1 && y >= fy0 && y <= fy1;
+    for d in 0..s {
+        if y0 + d <= y1 {
+            for x in x0..=x1 {
+                if !hidden(x, y0 + d) {
+                    data[(y0 + d) * w + x] = 255;
+                }
+            }
+        }
+        if y1 >= d && y1 - d >= y0 {
+            for x in x0..=x1 {
+                if !hidden(x, y1 - d) {
+                    data[(y1 - d) * w + x] = 255;
+                }
+            }
+        }
+        if x0 + d <= x1 {
+            for y in y0..=y1 {
+                if !hidden(x0 + d, y) {
+                    data[y * w + (x0 + d)] = 255;
+                }
+            }
+        }
+        if x1 >= d && x1 - d >= x0 {
+            for y in y0..=y1 {
+                if !hidden(x1 - d, y) {
+                    data[y * w + (x1 - d)] = 255;
+                }
+            }
+        }
+    }
+}
+
+/// Genera la mascara de una esquina redondeada superior (tab activa, variante C).
+///
+/// El tile es cuadrado de lado igual al radio; el recorte es un cuarto de
+/// circulo centrado en la esquina opuesta. `id` 5 = sup. izquierda, 6 = sup. derecha.
+pub fn rasterize_corner_mask(width: u16, height: u16, id: u16) -> Option<Vec<u8>> {
+    let w = width as usize;
+    let h = height as usize;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let r = w.min(h) as f32;
+    let mut data = vec![255u8; w * h];
+    let (cx, cy) = if id == CORNER_TR_MASK_GLYPH_ID {
+        (0.0, r)
+    } else {
+        (r, r)
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let dx = x as f32 + 0.5 - cx;
+            let dy = y as f32 + 0.5 - cy;
+            if dx * dx + dy * dy > r * r {
+                data[y * w + x] = 0;
+            }
+        }
+    }
+    Some(data)
+}
+
+/// Genera la mascara vectorial de un boton de ventana.
+///
+/// `id` 7 = minimizar, 8 = maximizar, 9 = restaurar, 10 = cerrar. El grosor
+/// escala con el lado del tile (minimo 1 px) para mantenerse nitido a cualquier escala.
+pub fn rasterize_button_mask(width: u16, height: u16, id: u16) -> Option<Vec<u8>> {
+    let w = width as usize;
+    let h = height as usize;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let mut data = vec![0u8; w * h];
+    // Grosor del trazo = 1 px logico escalado al fisico.
+    let s = ((w.min(h) as f32 / 10.0).round() as usize).max(1);
+    match id {
+        WIN_BTN_MINIMIZE_MASK_GLYPH_ID => {
+            let y0 = h.saturating_sub(s) / 2;
+            for dy in 0..s {
+                let y = y0 + dy;
+                if y < h {
+                    for x in 0..w {
+                        data[y * w + x] = 255;
+                    }
+                }
+            }
+        }
+        WIN_BTN_MAXIMIZE_MASK_GLYPH_ID => {
+            stroke_rect(
+                &mut data,
+                w,
+                h,
+                0,
+                0,
+                w.saturating_sub(1),
+                h.saturating_sub(1),
+                s,
+            );
+        }
+        WIN_BTN_RESTORE_MASK_GLYPH_ID => {
+            // Cuadrado de atras (sup-izq) recortado por el de adelante (inf-der).
+            stroke_rect_behind(
+                &mut data,
+                w,
+                h,
+                0,
+                0,
+                w.saturating_sub(1 + s),
+                h.saturating_sub(1 + s),
+                s,
+                s,
+                s,
+                w.saturating_sub(1),
+                h.saturating_sub(1),
+            );
+            stroke_rect(
+                &mut data,
+                w,
+                h,
+                s,
+                s,
+                w.saturating_sub(1),
+                h.saturating_sub(1),
+                s,
+            );
+        }
+        WIN_BTN_CLOSE_MASK_GLYPH_ID => {
+            for x in 0..w {
+                let y = (x * h / w.max(1)).min(h.saturating_sub(1));
+                let y2 = h
+                    .saturating_sub(1)
+                    .saturating_sub((x * h / w.max(1)).min(h.saturating_sub(1)));
+                for t in 0..s {
+                    set_px(&mut data, w, h, x, y + t);
+                    if y2 >= t {
+                        set_px(&mut data, w, h, x, y2 - t);
+                    }
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +535,61 @@ mod tests {
         assert_eq!(cursor_glyph(CursorStyle::Block, &metrics), '\u{2588}');
         assert_eq!(cursor_glyph(CursorStyle::Underline, &metrics), '\u{2581}');
         assert_eq!(cursor_glyph(CursorStyle::Bar, &metrics), '\u{258E}');
+    }
+
+    #[test]
+    fn corner_tl_mask_corta_esquina_sup_izq() {
+        let data = rasterize_corner_mask(8, 8, CORNER_TL_MASK_GLYPH_ID).expect("mask");
+        assert_eq!(data[0], 0, "la esquina (0,0) debe quedar recortada");
+        assert_eq!(
+            data[7 * 8 + 7],
+            255,
+            "el centro del arco (7,7) debe ser opaco"
+        );
+    }
+
+    #[test]
+    fn corner_tr_mask_corta_esquina_sup_der() {
+        let data = rasterize_corner_mask(8, 8, CORNER_TR_MASK_GLYPH_ID).expect("mask");
+        assert_eq!(data[7], 0, "la esquina sup-derecha debe quedar recortada");
+        assert_eq!(data[7 * 8], 255, "el centro del arco (0,7) debe ser opaco");
+    }
+
+    #[test]
+    fn button_minimize_es_linea_horizontal() {
+        let data = rasterize_button_mask(10, 10, WIN_BTN_MINIMIZE_MASK_GLYPH_ID).expect("mask");
+        let ink_rows: usize = (0..10)
+            .filter(|y| (0..10).any(|x| data[y * 10 + x] == 255))
+            .count();
+        assert_eq!(ink_rows, 1, "minimizar es una sola linea horizontal");
+    }
+
+    #[test]
+    fn button_maximize_es_cuadrado_hueco() {
+        let data = rasterize_button_mask(10, 10, WIN_BTN_MAXIMIZE_MASK_GLYPH_ID).expect("mask");
+        assert_eq!(data[0], 255);
+        assert_eq!(data[9 * 10 + 9], 255);
+        assert_eq!(data[4 * 10 + 4], 0, "el centro debe estar vacio");
+    }
+
+    #[test]
+    fn button_close_tiene_dos_diagonales() {
+        let data = rasterize_button_mask(10, 10, WIN_BTN_CLOSE_MASK_GLYPH_ID).expect("mask");
+        assert_eq!(data[0], 255);
+        assert_eq!(data[9 * 10 + 9], 255);
+        assert_eq!(data[9], 255);
+        assert_eq!(data[9 * 10], 255);
+        assert_eq!(data[4 * 10 + 4], 255, "el centro cruza ambas diagonales");
+    }
+
+    #[test]
+    fn button_restore_muestra_dos_cuadrados() {
+        let data = rasterize_button_mask(10, 10, WIN_BTN_RESTORE_MASK_GLYPH_ID).expect("mask");
+        assert_eq!(data[0], 255, "esquina sup-izq del cuadrado de atras");
+        assert_eq!(
+            data[9 * 10 + 9],
+            255,
+            "esquina inf-der del cuadrado de adelante"
+        );
     }
 }

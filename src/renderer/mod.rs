@@ -12,6 +12,7 @@ mod glyph_cache;
 pub mod limits;
 mod metrics;
 mod palette;
+mod process_icons;
 mod runs;
 mod tab_bar;
 mod terminal_fallback;
@@ -23,17 +24,17 @@ pub use decorations::SOLID_MASK_GLYPH_ID;
 pub use palette::{ColorOverrides, Palette};
 pub use tab_bar::{
     build_inactive_hover_chrome, build_segment_chrome, build_tab_track, compute_layout,
-    format_tab_label, push_close_scrub, segment_close_left_px, segment_title_label,
-    shorten_tab_title, tab_bar_inner_width, tab_chrome_reserve_px, tab_close_at, tab_index_at,
-    TabBarLayout, TabBarMouseState, TabSegment, TAB_CLOSE_WIDTH_CELLS, TAB_CONTENT_GAP_PX,
-    TAB_LABEL_PAD_CELLS,
+    format_tab_label, push_close_scrub, resolve_tab_title, segment_close_left_px,
+    segment_title_label, shorten_tab_title, tab_bar_inner_width, tab_chrome_reserve_px,
+    tab_close_at, tab_index_at, TabBarLayout, TabBarMouseState, TabSegment, TAB_CLOSE_WIDTH_CELLS,
+    TAB_CONTENT_GAP_PX, TAB_LABEL_PAD_CELLS,
 };
 pub(crate) use terminal_fallback::create_font_system_with_fallback;
 pub use title_bar::{
-    build_button_hover, build_title_bar_track, button_icon, compute_title_bar_layout, hit_test,
-    title_bar_height_px, title_button_size_px, TitleBarHit, TitleBarLayout, TitleButton,
-    TitleButtonKind, TITLE_BAR_HEIGHT_LOGICAL, TITLE_BUTTON_HEIGHT_LOGICAL,
-    TITLE_BUTTON_WIDTH_LOGICAL,
+    build_button_hover, build_title_bar_track, compute_title_bar_layout, hit_test,
+    push_button_icon, title_bar_height_px, title_button_size_px, TitleBarHit, TitleBarLayout,
+    TitleButton, TitleButtonKind, TITLE_BAR_HEIGHT_LOGICAL, TITLE_BUTTON_HEIGHT_LOGICAL,
+    TITLE_BUTTON_WIDTH_LOGICAL, WIN_BUTTON_ICON_SIZE_LOGICAL,
 };
 
 /// Base de ids reservados para box/block glyphs programaticos (sobre ids de cache).
@@ -302,6 +303,11 @@ pub struct Renderer {
     font_family: String,
     /// Fallbacks de fuente configurados por el usuario.
     font_fallback: Vec<String>,
+    /// Disponibilidad de iconos de proceso (Nerd Font) para la familia
+    /// activa: comprobada una vez por caracter y cacheada hasta que cambie
+    /// la fuente. Evita pintar `.notdef` cuando el fallback del usuario no
+    /// trae una Nerd Font.
+    icon_availability: std::collections::HashMap<char, bool>,
     /// Tamaño de fuente desde la configuracion (en puntos logicos).
     font_size: f32,
     /// Factor de escala DPI de la ventana (1.0 = 96 DPI).
@@ -355,8 +361,6 @@ pub struct Renderer {
     tab_bar_track_glyphs: Vec<glyphon::CustomGlyph>,
     /// Chrome del boton × (scrub acorde a tab activa/inactiva).
     tab_close_glyphs: Vec<glyphon::CustomGlyph>,
-    /// Buffers para los iconos de los botones de la barra de título.
-    title_bar_button_buffers: [glyphon::Buffer; 3],
     /// Quads de hover para cada botón de la barra de título.
     title_bar_button_glyphs: [Vec<glyphon::CustomGlyph>; 3],
     /// Pista de fondo de la barra de título propia.
@@ -440,10 +444,6 @@ impl Renderer {
             &mut self.tab_close_buffer,
             self.cell_w,
         );
-        for buf in self.title_bar_button_buffers.iter_mut() {
-            *buf = glyphon::Buffer::new(&mut self.font_system, metrics);
-            Self::configure_tab_buffer(&mut self.font_system, buf, self.cell_w);
-        }
         self.title_bar_button_glyphs = [Vec::new(), Vec::new(), Vec::new()];
         if self.status_active {
             self.status_overlay_dirty = true;
@@ -575,16 +575,10 @@ impl Renderer {
         let mut consent_buffer = glyphon::Buffer::new(&mut font_system, metrics);
         Self::configure_buffer(&mut font_system, &mut consent_buffer, cell_w);
 
-        let mut title_bar_button_buffers = Vec::with_capacity(3);
         let mut title_bar_button_glyphs = Vec::with_capacity(3);
         for _ in 0..3 {
-            let mut buf = glyphon::Buffer::new(&mut font_system, metrics);
-            Self::configure_tab_buffer(&mut font_system, &mut buf, cell_w);
-            title_bar_button_buffers.push(buf);
             title_bar_button_glyphs.push(Vec::new());
         }
-        let title_bar_button_buffers: [glyphon::Buffer; 3] =
-            title_bar_button_buffers.try_into().expect("3 buffers");
         let title_bar_button_glyphs: [Vec<glyphon::CustomGlyph>; 3] =
             title_bar_button_glyphs.try_into().expect("3 glyph vecs");
 
@@ -628,6 +622,7 @@ impl Renderer {
             prev_cursor_pos: None,
             font_family,
             font_fallback: font_config.fallback.clone(),
+            icon_availability: std::collections::HashMap::new(),
             font_size,
             scale_factor,
             padding_x: 0,
@@ -654,7 +649,6 @@ impl Renderer {
             tab_bar_seg_glyphs: Vec::new(),
             tab_bar_track_glyphs: Vec::new(),
             tab_close_glyphs: Vec::new(),
-            title_bar_button_buffers,
             title_bar_button_glyphs,
             title_bar_track_glyphs: Vec::new(),
         }
@@ -753,6 +747,7 @@ impl Renderer {
             self.line_height = font.line_height;
             self.glyph_offset = font.glyph_offset;
             self.builtin_box_drawing = font.builtin_box_drawing;
+            self.icon_availability.clear();
         }
 
         self.text_contrast = font.text_contrast;
@@ -760,6 +755,39 @@ impl Renderer {
         self.refresh_cell_metrics();
         self.reset_glyph_pipeline();
         self.reset_aux_buffers();
+    }
+
+    /// Comprueba, una vez por familia de fuente activa, si cada icono de
+    /// proceso posible rasteriza (no cae en `.notdef`). Barato si ya se
+    /// comprobo: `apply_font_config` limpia el cache solo cuando cambia la
+    /// fuente. Debe llamarse antes de construir el layout de la barra de
+    /// tabs (`icon_available` solo lee lo ya comprobado).
+    fn ensure_icon_availability(&mut self) {
+        if self.icon_availability.len() >= process_icons::ALL_ICONS.len() {
+            return;
+        }
+        let family = self.font_family.clone();
+        let size = self.effective_font_size();
+        for &ch in process_icons::ALL_ICONS {
+            if self.icon_availability.contains_key(&ch) {
+                continue;
+            }
+            let available = process_icons::glyph_rasterizes(
+                &mut self.font_system,
+                &mut self.swash_cache,
+                &family,
+                size,
+                ch,
+            );
+            self.icon_availability.insert(ch, available);
+        }
+    }
+
+    /// `true` si `ch` rasteriza con la fuente activa (ver
+    /// `ensure_icon_availability`). `false` para cualquier caracter no
+    /// comprobado todavia: mejor sin icono que un `.notdef` roto.
+    fn icon_available(&self, ch: char) -> bool {
+        self.icon_availability.get(&ch).copied().unwrap_or(false)
     }
 
     /// Invalida caches GPU tras cambio de metricas (resize).
@@ -861,6 +889,8 @@ impl Renderer {
         tabs: Option<&TabBarLayout>,
         tbar_layout: Option<&TitleBarLayout>,
         tbar_hover: Option<TitleButtonKind>,
+        tbar_hover_alpha: f32,
+        maximized: bool,
     ) -> Result<Vec<SessionId>, String> {
         let t0 = Instant::now();
 
@@ -950,6 +980,8 @@ impl Renderer {
                 tabs,
                 tbar_layout,
                 tbar_hover,
+                tbar_hover_alpha,
+                maximized,
                 frame,
                 &view,
                 encoder,
@@ -982,6 +1014,8 @@ impl Renderer {
         tabs: Option<&TabBarLayout>,
         tbar_layout: Option<&TitleBarLayout>,
         tbar_hover: Option<TitleButtonKind>,
+        tbar_hover_alpha: f32,
+        maximized: bool,
         frame: wgpu::SurfaceTexture,
         view: &wgpu::TextureView,
         mut encoder: wgpu::CommandEncoder,
@@ -1098,6 +1132,20 @@ impl Renderer {
             self.refill_status_overlay_buffer();
             self.status_overlay_dirty = false;
         }
+        // Debe resolverse antes de que `extra_areas` empiece a acumular
+        // referencias a buffers de `self` (push_title_bar/push_tab_bar mas
+        // abajo): con esas referencias vivas, `self` ya no se puede volver a
+        // pedir prestado ni mutable ni inmutable.
+        self.ensure_icon_availability();
+        let resolved_icons: Vec<Option<char>> = tabs
+            .map(|l| {
+                l.segments
+                    .iter()
+                    .map(|seg| seg.icon_candidate.filter(|&ch| self.icon_available(ch)))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let mut extra_areas: Vec<glyphon::TextArea<'_>> = Vec::with_capacity(8);
         let bar_top = self.cell_metrics.padding_y;
         let font_size = self.effective_font_size();
@@ -1108,17 +1156,15 @@ impl Renderer {
                 &self.cell_metrics,
                 self.config.width,
                 self.config.height,
-                cell_w,
-                cell_h,
-                &self.font_family,
-                &mut self.font_system,
                 &self.bg_buffer,
-                &mut self.title_bar_button_buffers,
                 &mut self.title_bar_button_glyphs,
                 &mut self.title_bar_track_glyphs,
                 &mut extra_areas,
                 tbar_hover,
+                tbar_hover_alpha,
                 &mut self.contrast_cache,
+                maximized,
+                self.scale_factor,
             );
             (tb.bar_height, false)
         } else {
@@ -1149,6 +1195,9 @@ impl Renderer {
                 &mut extra_areas,
                 draw_tab_track,
                 &mut self.contrast_cache,
+                self.scale_factor,
+                window_opacity,
+                &resolved_icons,
             );
         }
         if let Some(pre) = preedit.as_ref().filter(|p| !p.text.is_empty()) {
@@ -2249,17 +2298,15 @@ fn push_title_bar<'a>(
     cell_metrics: &CellMetrics,
     surface_w: u32,
     surface_h: u32,
-    cell_w: f32,
-    cell_h: f32,
-    font_family: &str,
-    font_system: &mut glyphon::FontSystem,
     empty_buffer: &'a glyphon::Buffer,
-    button_buffers: &'a mut [glyphon::Buffer; 3],
     button_glyphs: &'a mut [Vec<glyphon::CustomGlyph>; 3],
     track_glyphs: &'a mut Vec<glyphon::CustomGlyph>,
     extra_areas: &mut Vec<glyphon::TextArea<'a>>,
     hovered_button: Option<crate::renderer::TitleButtonKind>,
+    hover_alpha: f32,
     contrast_cache: &mut ContrastCache,
+    maximized: bool,
+    scale_factor: f32,
 ) {
     let bar_top = cell_metrics.padding_y;
     let full_bounds = glyphon::TextBounds {
@@ -2289,57 +2336,30 @@ fn push_title_bar<'a>(
     let bg_rgb = parse_hex(&theme.background);
     let (fr, fg, fb) = contrast_cache.adjust(fg_rgb, bg_rgb, MIN_LEGIBLE_CONTRAST);
     let icon_color = glyphon::Color::rgb(fr, fg, fb);
-    let family = resolve_family(font_family);
-    let default_attrs = glyphon::Attrs::new().family(family);
-    let text_top = bar_top + (layout.bar_height - cell_h).max(0.0) * 0.5;
 
+    // Iconos dibujados como mascaras vectoriales (no dependen de la fuente del terminal).
     let [ref mut glyphs0, ref mut glyphs1, ref mut glyphs2] = button_glyphs;
-    let [ref mut buf0, ref mut buf1, ref mut buf2] = button_buffers;
-    for (btn, (glyphs, buf)) in
-        layout
-            .buttons
-            .iter()
-            .zip([(glyphs0, buf0), (glyphs1, buf1), (glyphs2, buf2)])
-    {
+    for (btn, glyphs) in layout.buttons.iter().zip([glyphs0, glyphs1, glyphs2]) {
+        let is_close = btn.kind == crate::renderer::TitleButtonKind::Close;
         let is_hovered = hovered_button == Some(btn.kind);
+        let color = if is_hovered && is_close {
+            glyphon::Color::rgb(0xff, 0xff, 0xff)
+        } else {
+            icon_color
+        };
+        glyphs.clear();
         if is_hovered {
-            crate::renderer::build_button_hover(
-                btn,
-                btn.kind == crate::renderer::TitleButtonKind::Close,
-                theme,
-                glyphs,
-            );
-            extra_areas.push(glyphon::TextArea {
-                buffer: empty_buffer,
-                left: btn.left,
-                top: btn.top,
-                scale: 1.0,
-                bounds: full_bounds,
-                default_color: glyphon::Color::rgb(0xff, 0xff, 0xff),
-                custom_glyphs: glyphs,
-            });
+            crate::renderer::build_button_hover(btn, is_close, hover_alpha, theme, glyphs);
         }
-
-        let icon_attrs = glyphon::Attrs::new().family(family).color(icon_color);
-        buf.set_rich_text(
-            font_system,
-            vec![(crate::renderer::button_icon(btn.kind), icon_attrs)],
-            &default_attrs,
-            glyphon::Shaping::Advanced,
-            None,
-        );
-        buf.set_size(font_system, Some(btn.width), Some(btn.height));
-        buf.set_monospace_width(font_system, Some(cell_w));
-        buf.set_hinting(font_system, Hinting::Enabled);
-        buf.shape_until_scroll(font_system, false);
+        crate::renderer::push_button_icon(btn, btn.kind, maximized, scale_factor, color, glyphs);
         extra_areas.push(glyphon::TextArea {
-            buffer: buf,
+            buffer: empty_buffer,
             left: btn.left,
-            top: text_top,
+            top: btn.top,
             scale: 1.0,
             bounds: full_bounds,
-            default_color: icon_color,
-            custom_glyphs: &[],
+            default_color: glyphon::Color::rgb(0xff, 0xff, 0xff),
+            custom_glyphs: glyphs,
         });
     }
 }
@@ -2372,6 +2392,9 @@ fn push_tab_bar<'a>(
     extra_areas: &mut Vec<glyphon::TextArea<'a>>,
     draw_track: bool,
     contrast_cache: &mut ContrastCache,
+    scale_factor: f32,
+    window_opacity: f32,
+    resolved_icons: &[Option<char>],
 ) {
     let pad_x = cell_metrics.padding_x;
     let inner_w = layout.bar_width_px;
@@ -2401,6 +2424,8 @@ fn push_tab_bar<'a>(
     let (fr, fg, fb) = contrast_cache.adjust(fg_rgb, bg_rgb, MIN_LEGIBLE_CONTRAST);
     let inactive_fg = glyphon::Color::rgba(fr, fg, fb, 120);
     let active_fg = glyphon::Color::rgb(fr, fg, fb);
+    // Alfa del fondo de la tab activa = alfa del clear del grid (coherencia con window.opacity).
+    let bg_alpha = (window_opacity.clamp(0.0, 1.0) * 255.0) as u8;
     let family = resolve_family(font_family);
     let default_attrs = glyphon::Attrs::new().family(family);
     let metrics = glyphon::Metrics::new(font_size, cell_h);
@@ -2418,11 +2443,12 @@ fn push_tab_bar<'a>(
     let mut close_target: Option<&TabSegment> = None;
     let close_alpha = layout.mouse.close_alpha;
 
-    for (seg, (buf, chrome)) in layout
-        .segments
-        .iter()
-        .zip(segment_buffers.iter_mut().zip(seg_glyphs.iter_mut()))
-    {
+    for (seg, ((buf, chrome), icon)) in layout.segments.iter().zip(
+        segment_buffers
+            .iter_mut()
+            .zip(seg_glyphs.iter_mut())
+            .zip(resolved_icons.iter()),
+    ) {
         let show_close = layout.mouse.close_tab == Some(seg.index)
             && close_alpha > 0.02
             && seg.width_cells > TAB_CLOSE_WIDTH_CELLS;
@@ -2431,16 +2457,41 @@ fn push_tab_bar<'a>(
         }
 
         chrome.clear();
+        let hovered = layout.mouse.hover_index == Some(seg.index);
         if seg.active {
-            crate::renderer::build_segment_chrome(seg.width_px, bar_h, true, theme, chrome);
-        } else if show_close {
-            crate::renderer::build_inactive_hover_chrome(
+            crate::renderer::build_segment_chrome(
                 seg.width_px,
                 bar_h,
-                close_alpha,
+                tab_bar::TAB_CONTENT_GAP_PX,
+                scale_factor,
+                bg_alpha,
+                true,
                 theme,
                 chrome,
             );
+        } else if hovered {
+            crate::renderer::build_inactive_hover_chrome(
+                seg.width_px,
+                bar_h,
+                layout.mouse.hover_alpha,
+                theme,
+                chrome,
+            );
+        }
+        if seg.activity {
+            // Punto de actividad: salida reciente mientras la sesion no estaba enfocada.
+            let dot = (5.0 * scale_factor).max(2.0);
+            let (yr, yg, yb) = parse_hex(&theme.yellow);
+            chrome.push(glyphon::CustomGlyph {
+                id: decorations::SOLID_MASK_GLYPH_ID,
+                left: 2.0,
+                top: (bar_h - dot) * 0.5,
+                width: dot,
+                height: dot,
+                color: Some(glyphon::Color::rgb(yr, yg, yb)),
+                snap_to_physical_pixel: true,
+                metadata: 0,
+            });
         }
         if !chrome.is_empty() {
             extra_areas.push(glyphon::TextArea {
@@ -2454,12 +2505,25 @@ fn push_tab_bar<'a>(
             });
         }
 
+        // El icono ocupa una celda + un hueco de una celda; se resta del
+        // presupuesto de truncado para que icono+hueco+texto quepan siempre
+        // en el ancho ya reservado por `compute_layout` (sin agrandar la tab).
+        const ICON_RESERVE_CELLS: usize = 2;
+        let icon_reserve = if icon.is_some() {
+            ICON_RESERVE_CELLS
+        } else {
+            0
+        };
         let label = crate::renderer::segment_title_label(
             seg.index + 1,
             &seg.title_short,
-            seg.width_cells,
+            seg.width_cells.saturating_sub(icon_reserve),
             show_close,
         );
+        let text = match icon {
+            Some(ch) => format!("{ch} {label}"),
+            None => label,
+        };
         let label_pad_px = cell_w * TAB_LABEL_PAD_CELLS as f32;
         let text_w_px = if show_close {
             seg.width_px - label_pad_px * 2.0 - close_cell_w
@@ -2473,7 +2537,7 @@ fn push_tab_bar<'a>(
         };
         buf.set_rich_text(
             font_system,
-            vec![(label.as_str(), body_attrs)],
+            vec![(text.as_str(), body_attrs)],
             &default_attrs,
             glyphon::Shaping::Advanced,
             None,

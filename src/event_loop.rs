@@ -406,6 +406,10 @@ pub fn spawn_session(
 
     let master = pty::spawn_with(process_cfg)?;
     master.set_winsize(rows, cols)?;
+    // Duplicado antes de mover `master` al hilo del PTY: ese hilo posee el fd
+    // original, y el sondeo de proceso en primer plano vive en el hilo de la
+    // GUI (ver `about_to_wait`), asi que no puede compartir el mismo fd.
+    let foreground_probe = pty::foreground::make_probe(&master).ok();
 
     let (tx_pty_to_gui, rx_pty_to_gui) = mpsc::channel::<PtyEvent>();
     let (tx_gui_to_pty, rx_gui_to_pty) = mpsc::channel::<PtyCommand>();
@@ -587,6 +591,9 @@ pub fn spawn_session(
         dirty: false,
         hold,
         close_on_exit,
+        has_activity: false,
+        foreground_probe,
+        foreground_cache: None,
         input_reset_pending,
     };
 

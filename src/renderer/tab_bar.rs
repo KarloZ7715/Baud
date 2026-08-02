@@ -21,10 +21,15 @@ pub const SCROLL_INDICATOR_CELLS: usize = 2;
 pub const TAB_CLOSE_WIDTH_CELLS: usize = 1;
 /// Padding horizontal interno del titulo (1 celda a cada lado).
 pub const TAB_LABEL_PAD_CELLS: usize = 1;
+/// Radio de las esquinas superiores de la tab activa (px logicos, variante C).
+pub const TAB_CORNER_RADIUS_LOGICAL: f32 = 7.0;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TabBarMouseState {
+    /// Tab que dibuja el fondo de hover (persiste durante fade-out).
     pub hover_index: Option<usize>,
+    /// Opacidad animada del fondo de hover (0..1, ~120 ms).
+    pub hover_alpha: f32,
     /// Tab que muestra el boton × (persiste durante fade-out).
     pub close_tab: Option<usize>,
     /// Opacidad animada del boton cerrar (0..1).
@@ -41,6 +46,11 @@ pub struct TabSegment {
     /// Titulo acortado para etiqueta.
     pub title_short: String,
     pub active: bool,
+    /// Salida reciente mientras la sesion no estaba enfocada (punto de actividad).
+    pub activity: bool,
+    /// Icono candidato para el proceso en primer plano (sin comprobar si la
+    /// fuente activa lo puede dibujar; ver `resolve_tab_title`).
+    pub icon_candidate: Option<char>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +109,66 @@ fn truncate_chars(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+}
+
+/// Basename del cwd con `~` para `$HOME` (fuente OSC 7).
+pub fn cwd_basename(cwd: &str) -> Option<String> {
+    if let Some(home) = std::env::var_os("HOME").and_then(|h| h.into_string().ok()) {
+        if cwd == home {
+            return Some("~".to_string());
+        }
+    }
+    let name = std::path::Path::new(cwd)
+        .file_name()?
+        .to_string_lossy()
+        .to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// `true` si el nombre corresponde a un shell (no se muestra como titulo).
+fn is_shell(name: &str) -> bool {
+    matches!(
+        name,
+        "zsh" | "bash" | "fish" | "sh" | "dash" | "nu" | "pwsh" | "cmd"
+    )
+}
+
+/// Cadena de resolucion del titulo de una tab, en orden de prioridad:
+///
+/// * proceso en primer plano (si no es el shell)
+/// * basename del cwd (OSC 7) con `~` para `$HOME`
+/// * titulo OSC 0/2 acortado
+///
+/// Devuelve el titulo (vacio si ninguna fuente aporta; el layout cae al
+/// indice) y, cuando el titulo viene del proceso en primer plano, el icono
+/// candidato para ese proceso. El candidato es el glifo Nerd Font sin
+/// comprobar disponibilidad: el llamante decide si la fuente activa lo
+/// puede dibujar (ver `Renderer::icon_available`, plan 011 "Sin tofu").
+pub fn resolve_tab_title(
+    title: &str,
+    cwd: Option<&str>,
+    process: Option<&str>,
+) -> (String, Option<char>) {
+    if let Some(proc_name) = process {
+        let base = proc_name.rsplit('/').next().unwrap_or(proc_name);
+        if !base.is_empty() && !is_shell(base) {
+            return (
+                base.to_string(),
+                Some(super::process_icons::icon_for_process(base)),
+            );
+        }
+    }
+    if let Some(cwd) = cwd {
+        if let Some(name) = cwd_basename(cwd) {
+            return (name, None);
+        }
+    }
+    let short = shorten_tab_title(title);
+    (short, None)
 }
 
 /// Trunca por el final.
@@ -176,6 +246,8 @@ fn build_segments(
             width_cells: w,
             title_short: shorten_tab_title(title),
             active: i == focused,
+            activity: false,
+            icon_candidate: None,
         });
         x += (w + gap) as f32 * cell_w;
     }
@@ -376,15 +448,16 @@ pub fn build_inactive_hover_chrome(
 
     use crate::renderer::decorations::SOLID_MASK_GLYPH_ID;
 
-    let (br, bg, bb) = crate::config::parse_hex(&theme.black);
-    let a = (112.0 * alpha.clamp(0.0, 1.0)) as u8;
+    let (fr, fg, fb) = crate::config::parse_hex(&theme.foreground);
+    // 5 % del foreground: realza la tab sin competir con la activa.
+    let a = (13.0 * alpha.clamp(0.0, 1.0)) as u8;
     out.push(CustomGlyph {
         id: SOLID_MASK_GLYPH_ID,
         left: 0.0,
         top: 0.0,
         width: width_px,
         height: bar_h,
-        color: Some(glyphon::Color::rgba(br, bg, bb, a)),
+        color: Some(glyphon::Color::rgba(fr, fg, fb, a)),
         snap_to_physical_pixel: true,
         metadata: 0,
     });
@@ -481,40 +554,93 @@ pub fn build_tab_track(
 }
 
 /// Chrome de un segmento (coordenadas relativas al TextArea del tab).
+///
+/// Variante C: la tab activa comparte fondo con el grid (se extiende hasta
+/// tocarlo), lleva esquinas superiores redondeadas y prescinde de la barra de
+/// acento: la fusion con el grid es el indicador de la tab activa.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "chrome de tab activa: geometria + tema + alpha"
+)]
 pub fn build_segment_chrome(
     width_px: f32,
     bar_h: f32,
+    gap_px: f32,
+    scale_factor: f32,
+    bg_alpha: u8,
     active: bool,
     theme: &crate::config::ThemeConfig,
     out: &mut Vec<glyphon::CustomGlyph>,
 ) {
     use glyphon::CustomGlyph;
 
-    use crate::renderer::decorations::SOLID_MASK_GLYPH_ID;
+    use crate::renderer::decorations::{
+        CORNER_TL_MASK_GLYPH_ID, CORNER_TR_MASK_GLYPH_ID, SOLID_MASK_GLYPH_ID,
+    };
 
     out.clear();
     if !active {
         return;
     }
     let (br, bg, bb) = crate::config::parse_hex(&theme.background);
+    // Mismo alfa que el clear del grid: a opacity < 1 la tab activa es igual de translucida.
+    let fill = glyphon::Color::rgba(br, bg, bb, bg_alpha);
+    let full_h = bar_h + gap_px;
+    let radius = (TAB_CORNER_RADIUS_LOGICAL * scale_factor).round();
+    // Radio demasiado pequeno o tab estrecha: rectangulo liso hasta el grid.
+    if radius < 1.0 || radius * 2.0 >= width_px.min(full_h) {
+        out.push(CustomGlyph {
+            id: SOLID_MASK_GLYPH_ID,
+            left: 0.0,
+            top: 0.0,
+            width: width_px,
+            height: full_h,
+            color: Some(fill),
+            snap_to_physical_pixel: true,
+            metadata: 0,
+        });
+        return;
+    }
+    let r = radius;
+    // Cuerpo (bajo las esquinas, hasta el grid) y franja superior central.
     out.push(CustomGlyph {
         id: SOLID_MASK_GLYPH_ID,
         left: 0.0,
-        top: 0.0,
+        top: r,
         width: width_px,
-        height: bar_h,
-        color: Some(glyphon::Color::rgb(br, bg, bb)),
+        height: full_h - r,
+        color: Some(fill),
         snap_to_physical_pixel: true,
         metadata: 0,
     });
-    let (cr, cg, cb) = crate::config::parse_hex(&theme.cursor);
     out.push(CustomGlyph {
         id: SOLID_MASK_GLYPH_ID,
+        left: r,
+        top: 0.0,
+        width: (width_px - 2.0 * r).max(0.0),
+        height: r,
+        color: Some(fill),
+        snap_to_physical_pixel: true,
+        metadata: 0,
+    });
+    // Esquinas: la mascara rellena el arco y deja el recorte transparente (asoma el track).
+    out.push(CustomGlyph {
+        id: CORNER_TL_MASK_GLYPH_ID,
         left: 0.0,
-        top: bar_h - 2.0,
-        width: width_px,
-        height: 2.0,
-        color: Some(glyphon::Color::rgb(cr, cg, cb)),
+        top: 0.0,
+        width: r,
+        height: r,
+        color: Some(fill),
+        snap_to_physical_pixel: true,
+        metadata: 0,
+    });
+    out.push(CustomGlyph {
+        id: CORNER_TR_MASK_GLYPH_ID,
+        left: width_px - r,
+        top: 0.0,
+        width: r,
+        height: r,
+        color: Some(fill),
         snap_to_physical_pixel: true,
         metadata: 0,
     });
@@ -523,6 +649,47 @@ pub fn build_segment_chrome(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cwd_basename_extrae_ultimo_segmento() {
+        assert_eq!(cwd_basename("/foo/bar/baz").as_deref(), Some("baz"));
+        assert_eq!(cwd_basename("/foo").as_deref(), Some("foo"));
+        assert_eq!(cwd_basename("/").as_deref(), None);
+    }
+
+    #[test]
+    fn resolve_tab_title_prefiere_cwd_sobre_osc() {
+        assert_eq!(
+            resolve_tab_title("user@host ~/x", Some("/home/u/Dev/baud"), None),
+            ("baud".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn resolve_tab_title_cae_a_osc_sin_cwd() {
+        assert_eq!(
+            resolve_tab_title("carloscc@cachy ~/Documentos/Dev/baud", None, None),
+            ("baud".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn resolve_tab_title_proceso_no_shell_gana() {
+        let (title, icon) = resolve_tab_title("x", Some("/home/u/Dev/baud"), Some("/usr/bin/nvim"));
+        assert_eq!(title, "nvim");
+        assert_eq!(
+            icon,
+            Some(super::super::process_icons::icon_for_process("nvim"))
+        );
+    }
+
+    #[test]
+    fn resolve_tab_title_proceso_shell_cae_a_cwd() {
+        assert_eq!(
+            resolve_tab_title("x", Some("/home/u/Dev/baud"), Some("/bin/bash")),
+            ("baud".to_string(), None)
+        );
+    }
 
     #[test]
     fn shorten_extrae_basename_de_ruta() {

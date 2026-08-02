@@ -81,8 +81,8 @@ impl Default for GlyphCache {
 }
 
 impl GlyphCache {
-    /// Ids 0-7 reservados para mascaras de decoracion; texto empieza en 8.
-    const FIRST_TEXT_ID: u16 = 8;
+    /// Ids 0-10 reservados para mascaras de decoracion y chrome; texto empieza en 11.
+    const FIRST_TEXT_ID: u16 = 11;
 
     pub fn new() -> Self {
         Self {
@@ -514,7 +514,7 @@ mod tests {
         let first_id =
             cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &strings, key);
         assert_eq!(cache.len(), 1);
-        assert_eq!(first_id, 8);
+        assert_eq!(first_id, GlyphCache::FIRST_TEXT_ID);
 
         let second_id =
             cache.get_or_insert(&mut font_system, &mut swash_cache, &metrics, &strings, key);
