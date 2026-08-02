@@ -422,3 +422,159 @@ Every embedded preset, generated from its TOML body. Pick one with `theme = "nam
 | selection_bg | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#403e3c;border:1px solid rgba(127,127,127,0.4)"></span> `#403e3c` |
 | selection_fg | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#cecdc3;border:1px solid rgba(127,127,127,0.4)"></span> `#cecdc3` |
 
+## catppuccin-latte {#theme-catppuccin-latte}
+
+| Color | Value |
+| --- | --- |
+| foreground | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#4c4f69;border:1px solid rgba(127,127,127,0.4)"></span> `#4c4f69` |
+| background | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#eff1f5;border:1px solid rgba(127,127,127,0.4)"></span> `#eff1f5` |
+| cursor | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#dc8a78;border:1px solid rgba(127,127,127,0.4)"></span> `#dc8a78` |
+| black | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#bcc0cc;border:1px solid rgba(127,127,127,0.4)"></span> `#bcc0cc` |
+| red | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#d20f39;border:1px solid rgba(127,127,127,0.4)"></span> `#d20f39` |
+| green | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#40a02b;border:1px solid rgba(127,127,127,0.4)"></span> `#40a02b` |
+| yellow | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#df8e1d;border:1px solid rgba(127,127,127,0.4)"></span> `#df8e1d` |
+| blue | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#1e66f5;border:1px solid rgba(127,127,127,0.4)"></span> `#1e66f5` |
+| magenta | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#ea76cb;border:1px solid rgba(127,127,127,0.4)"></span> `#ea76cb` |
+| cyan | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#179299;border:1px solid rgba(127,127,127,0.4)"></span> `#179299` |
+| white | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#5c5f77;border:1px solid rgba(127,127,127,0.4)"></span> `#5c5f77` |
+| bright_black | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#acb0be;border:1px solid rgba(127,127,127,0.4)"></span> `#acb0be` |
+| bright_red | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#e7103f;border:1px solid rgba(127,127,127,0.4)"></span> `#e7103f` |
+| bright_green | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#46b02f;border:1px solid rgba(127,127,127,0.4)"></span> `#46b02f` |
+| bright_yellow | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#e49931;border:1px solid rgba(127,127,127,0.4)"></span> `#e49931` |
+| bright_blue | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#3878f6;border:1px solid rgba(127,127,127,0.4)"></span> `#3878f6` |
+| bright_magenta | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#ef95d7;border:1px solid rgba(127,127,127,0.4)"></span> `#ef95d7` |
+| bright_cyan | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#19a1a8;border:1px solid rgba(127,127,127,0.4)"></span> `#19a1a8` |
+| bright_white | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#6c6f85;border:1px solid rgba(127,127,127,0.4)"></span> `#6c6f85` |
+| selection_bg | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#dc8a78;border:1px solid rgba(127,127,127,0.4)"></span> `#dc8a78` |
+| selection_fg | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#4c4f69;border:1px solid rgba(127,127,127,0.4)"></span> `#4c4f69` |
+
+## gruvbox-light {#theme-gruvbox-light}
+
+| Color | Value |
+| --- | --- |
+| foreground | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#3c3836;border:1px solid rgba(127,127,127,0.4)"></span> `#3c3836` |
+| background | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#fbf1c7;border:1px solid rgba(127,127,127,0.4)"></span> `#fbf1c7` |
+| cursor | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#3c3836;border:1px solid rgba(127,127,127,0.4)"></span> `#3c3836` |
+| black | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#fbf1c7;border:1px solid rgba(127,127,127,0.4)"></span> `#fbf1c7` |
+| red | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#cc241d;border:1px solid rgba(127,127,127,0.4)"></span> `#cc241d` |
+| green | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#98971a;border:1px solid rgba(127,127,127,0.4)"></span> `#98971a` |
+| yellow | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#d79921;border:1px solid rgba(127,127,127,0.4)"></span> `#d79921` |
+| blue | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#458588;border:1px solid rgba(127,127,127,0.4)"></span> `#458588` |
+| magenta | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#b16286;border:1px solid rgba(127,127,127,0.4)"></span> `#b16286` |
+| cyan | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#689d6a;border:1px solid rgba(127,127,127,0.4)"></span> `#689d6a` |
+| white | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#7c6f64;border:1px solid rgba(127,127,127,0.4)"></span> `#7c6f64` |
+| bright_black | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#928374;border:1px solid rgba(127,127,127,0.4)"></span> `#928374` |
+| bright_red | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#9d0006;border:1px solid rgba(127,127,127,0.4)"></span> `#9d0006` |
+| bright_green | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#79740e;border:1px solid rgba(127,127,127,0.4)"></span> `#79740e` |
+| bright_yellow | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#b57614;border:1px solid rgba(127,127,127,0.4)"></span> `#b57614` |
+| bright_blue | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#076678;border:1px solid rgba(127,127,127,0.4)"></span> `#076678` |
+| bright_magenta | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#8f3f71;border:1px solid rgba(127,127,127,0.4)"></span> `#8f3f71` |
+| bright_cyan | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#427b58;border:1px solid rgba(127,127,127,0.4)"></span> `#427b58` |
+| bright_white | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#3c3836;border:1px solid rgba(127,127,127,0.4)"></span> `#3c3836` |
+| selection_bg | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#3c3836;border:1px solid rgba(127,127,127,0.4)"></span> `#3c3836` |
+| selection_fg | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#fbf1c7;border:1px solid rgba(127,127,127,0.4)"></span> `#fbf1c7` |
+
+## solarized-light {#theme-solarized-light}
+
+| Color | Value |
+| --- | --- |
+| foreground | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#657b83;border:1px solid rgba(127,127,127,0.4)"></span> `#657b83` |
+| background | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#fdf6e3;border:1px solid rgba(127,127,127,0.4)"></span> `#fdf6e3` |
+| cursor | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#657b83;border:1px solid rgba(127,127,127,0.4)"></span> `#657b83` |
+| black | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#073642;border:1px solid rgba(127,127,127,0.4)"></span> `#073642` |
+| red | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#dc322f;border:1px solid rgba(127,127,127,0.4)"></span> `#dc322f` |
+| green | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#859900;border:1px solid rgba(127,127,127,0.4)"></span> `#859900` |
+| yellow | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#b58900;border:1px solid rgba(127,127,127,0.4)"></span> `#b58900` |
+| blue | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#268bd2;border:1px solid rgba(127,127,127,0.4)"></span> `#268bd2` |
+| magenta | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#d33682;border:1px solid rgba(127,127,127,0.4)"></span> `#d33682` |
+| cyan | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#2aa198;border:1px solid rgba(127,127,127,0.4)"></span> `#2aa198` |
+| white | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#bbb5a2;border:1px solid rgba(127,127,127,0.4)"></span> `#bbb5a2` |
+| bright_black | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#002b36;border:1px solid rgba(127,127,127,0.4)"></span> `#002b36` |
+| bright_red | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#cb4b16;border:1px solid rgba(127,127,127,0.4)"></span> `#cb4b16` |
+| bright_green | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#586e75;border:1px solid rgba(127,127,127,0.4)"></span> `#586e75` |
+| bright_yellow | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#657b83;border:1px solid rgba(127,127,127,0.4)"></span> `#657b83` |
+| bright_blue | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#839496;border:1px solid rgba(127,127,127,0.4)"></span> `#839496` |
+| bright_magenta | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#6c71c4;border:1px solid rgba(127,127,127,0.4)"></span> `#6c71c4` |
+| bright_cyan | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#93a1a1;border:1px solid rgba(127,127,127,0.4)"></span> `#93a1a1` |
+| bright_white | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#fdf6e3;border:1px solid rgba(127,127,127,0.4)"></span> `#fdf6e3` |
+| selection_bg | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#eee8d5;border:1px solid rgba(127,127,127,0.4)"></span> `#eee8d5` |
+| selection_fg | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#657b83;border:1px solid rgba(127,127,127,0.4)"></span> `#657b83` |
+
+## rose-pine-dawn {#theme-rose-pine-dawn}
+
+| Color | Value |
+| --- | --- |
+| foreground | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#575279;border:1px solid rgba(127,127,127,0.4)"></span> `#575279` |
+| background | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#faf4ed;border:1px solid rgba(127,127,127,0.4)"></span> `#faf4ed` |
+| cursor | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#575279;border:1px solid rgba(127,127,127,0.4)"></span> `#575279` |
+| black | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#f2e9e1;border:1px solid rgba(127,127,127,0.4)"></span> `#f2e9e1` |
+| red | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#b4637a;border:1px solid rgba(127,127,127,0.4)"></span> `#b4637a` |
+| green | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#286983;border:1px solid rgba(127,127,127,0.4)"></span> `#286983` |
+| yellow | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#ea9d34;border:1px solid rgba(127,127,127,0.4)"></span> `#ea9d34` |
+| blue | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#56949f;border:1px solid rgba(127,127,127,0.4)"></span> `#56949f` |
+| magenta | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#907aa9;border:1px solid rgba(127,127,127,0.4)"></span> `#907aa9` |
+| cyan | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#d7827e;border:1px solid rgba(127,127,127,0.4)"></span> `#d7827e` |
+| white | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#575279;border:1px solid rgba(127,127,127,0.4)"></span> `#575279` |
+| bright_black | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#9893a5;border:1px solid rgba(127,127,127,0.4)"></span> `#9893a5` |
+| bright_red | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#b4637a;border:1px solid rgba(127,127,127,0.4)"></span> `#b4637a` |
+| bright_green | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#286983;border:1px solid rgba(127,127,127,0.4)"></span> `#286983` |
+| bright_yellow | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#ea9d34;border:1px solid rgba(127,127,127,0.4)"></span> `#ea9d34` |
+| bright_blue | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#56949f;border:1px solid rgba(127,127,127,0.4)"></span> `#56949f` |
+| bright_magenta | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#907aa9;border:1px solid rgba(127,127,127,0.4)"></span> `#907aa9` |
+| bright_cyan | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#d7827e;border:1px solid rgba(127,127,127,0.4)"></span> `#d7827e` |
+| bright_white | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#575279;border:1px solid rgba(127,127,127,0.4)"></span> `#575279` |
+| selection_bg | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#dfdad9;border:1px solid rgba(127,127,127,0.4)"></span> `#dfdad9` |
+| selection_fg | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#575279;border:1px solid rgba(127,127,127,0.4)"></span> `#575279` |
+
+## github-light {#theme-github-light}
+
+| Color | Value |
+| --- | --- |
+| foreground | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#1f2328;border:1px solid rgba(127,127,127,0.4)"></span> `#1f2328` |
+| background | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#ffffff;border:1px solid rgba(127,127,127,0.4)"></span> `#ffffff` |
+| cursor | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#0969da;border:1px solid rgba(127,127,127,0.4)"></span> `#0969da` |
+| black | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#24292f;border:1px solid rgba(127,127,127,0.4)"></span> `#24292f` |
+| red | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#cf222e;border:1px solid rgba(127,127,127,0.4)"></span> `#cf222e` |
+| green | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#116329;border:1px solid rgba(127,127,127,0.4)"></span> `#116329` |
+| yellow | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#4d2d00;border:1px solid rgba(127,127,127,0.4)"></span> `#4d2d00` |
+| blue | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#0969da;border:1px solid rgba(127,127,127,0.4)"></span> `#0969da` |
+| magenta | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#8250df;border:1px solid rgba(127,127,127,0.4)"></span> `#8250df` |
+| cyan | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#1b7c83;border:1px solid rgba(127,127,127,0.4)"></span> `#1b7c83` |
+| white | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#6e7781;border:1px solid rgba(127,127,127,0.4)"></span> `#6e7781` |
+| bright_black | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#57606a;border:1px solid rgba(127,127,127,0.4)"></span> `#57606a` |
+| bright_red | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#a40e26;border:1px solid rgba(127,127,127,0.4)"></span> `#a40e26` |
+| bright_green | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#1a7f37;border:1px solid rgba(127,127,127,0.4)"></span> `#1a7f37` |
+| bright_yellow | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#633c01;border:1px solid rgba(127,127,127,0.4)"></span> `#633c01` |
+| bright_blue | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#218bff;border:1px solid rgba(127,127,127,0.4)"></span> `#218bff` |
+| bright_magenta | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#a475f9;border:1px solid rgba(127,127,127,0.4)"></span> `#a475f9` |
+| bright_cyan | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#3192aa;border:1px solid rgba(127,127,127,0.4)"></span> `#3192aa` |
+| bright_white | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#8c959f;border:1px solid rgba(127,127,127,0.4)"></span> `#8c959f` |
+| selection_bg | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#1f2328;border:1px solid rgba(127,127,127,0.4)"></span> `#1f2328` |
+| selection_fg | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#ffffff;border:1px solid rgba(127,127,127,0.4)"></span> `#ffffff` |
+
+## everforest-light {#theme-everforest-light}
+
+| Color | Value |
+| --- | --- |
+| foreground | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#5c6a72;border:1px solid rgba(127,127,127,0.4)"></span> `#5c6a72` |
+| background | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#efebd4;border:1px solid rgba(127,127,127,0.4)"></span> `#efebd4` |
+| cursor | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#f57d26;border:1px solid rgba(127,127,127,0.4)"></span> `#f57d26` |
+| black | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#7a8478;border:1px solid rgba(127,127,127,0.4)"></span> `#7a8478` |
+| red | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#e67e80;border:1px solid rgba(127,127,127,0.4)"></span> `#e67e80` |
+| green | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#9ab373;border:1px solid rgba(127,127,127,0.4)"></span> `#9ab373` |
+| yellow | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#c1a266;border:1px solid rgba(127,127,127,0.4)"></span> `#c1a266` |
+| blue | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#7fbbb3;border:1px solid rgba(127,127,127,0.4)"></span> `#7fbbb3` |
+| magenta | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#d699b6;border:1px solid rgba(127,127,127,0.4)"></span> `#d699b6` |
+| cyan | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#83c092;border:1px solid rgba(127,127,127,0.4)"></span> `#83c092` |
+| white | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#b2af9f;border:1px solid rgba(127,127,127,0.4)"></span> `#b2af9f` |
+| bright_black | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#a6b0a0;border:1px solid rgba(127,127,127,0.4)"></span> `#a6b0a0` |
+| bright_red | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#f85552;border:1px solid rgba(127,127,127,0.4)"></span> `#f85552` |
+| bright_green | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#8da101;border:1px solid rgba(127,127,127,0.4)"></span> `#8da101` |
+| bright_yellow | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#dfa000;border:1px solid rgba(127,127,127,0.4)"></span> `#dfa000` |
+| bright_blue | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#3a94c5;border:1px solid rgba(127,127,127,0.4)"></span> `#3a94c5` |
+| bright_magenta | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#df69ba;border:1px solid rgba(127,127,127,0.4)"></span> `#df69ba` |
+| bright_cyan | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#35a77c;border:1px solid rgba(127,127,127,0.4)"></span> `#35a77c` |
+| bright_white | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#fffbef;border:1px solid rgba(127,127,127,0.4)"></span> `#fffbef` |
+| selection_bg | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#eaedc8;border:1px solid rgba(127,127,127,0.4)"></span> `#eaedc8` |
+| selection_fg | <span style="display:inline-block;width:0.9em;height:0.9em;border-radius:2px;vertical-align:middle;margin-right:0.35em;background:#5c6a72;border:1px solid rgba(127,127,127,0.4)"></span> `#5c6a72` |
+

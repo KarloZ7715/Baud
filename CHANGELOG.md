@@ -9,6 +9,7 @@ Full documentation is published at <https://karloz7715.github.io/Baud/>.
 ### Changed
 
 - *(themes)* restore the 16 embedded presets to their exact upstream hex, citing their source in each `.toml` — several had ANSI colors hand-edited (mainly `bright_black`, and the entire bright row in `catppuccin-mocha` and `tokyo-night`) to dodge the old raw-palette contrast test. Themes look different now; this is intentional.
+- *(themes)* add 6 light presets (`catppuccin-latte`, `gruvbox-light`, `solarized-light`, `rose-pine-dawn`, `github-light`, `everforest-light`), one per existing dark family.
 
 ## [0.0.8](https://github.com/KarloZ7715/Baud/compare/v0.0.7...v0.0.8) - 2026-07-25
 

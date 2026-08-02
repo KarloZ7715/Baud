@@ -32,6 +32,21 @@ presets!(
     ("github-dark", include_str!("themes/github-dark.toml")),
     ("cobalt2", include_str!("themes/cobalt2.toml")),
     ("flexoki-dark", include_str!("themes/flexoki-dark.toml")),
+    (
+        "catppuccin-latte",
+        include_str!("themes/catppuccin-latte.toml")
+    ),
+    ("gruvbox-light", include_str!("themes/gruvbox-light.toml")),
+    (
+        "solarized-light",
+        include_str!("themes/solarized-light.toml")
+    ),
+    ("rose-pine-dawn", include_str!("themes/rose-pine-dawn.toml")),
+    ("github-light", include_str!("themes/github-light.toml")),
+    (
+        "everforest-light",
+        include_str!("themes/everforest-light.toml")
+    ),
 );
 
 /// Error al resolver un preset embebido.
@@ -197,6 +212,10 @@ mod tests {
                 "catppuccin-mocha",
                 include_str!("themes/catppuccin-mocha.toml"),
             ),
+            (
+                "catppuccin-latte",
+                include_str!("themes/catppuccin-latte.toml"),
+            ),
             ("claude-dark", include_str!("themes/claude-dark.toml")),
             ("cobalt2", include_str!("themes/cobalt2.toml")),
             ("dracula", include_str!("themes/dracula.toml")),
@@ -204,15 +223,26 @@ mod tests {
                 "everforest-dark",
                 include_str!("themes/everforest-dark.toml"),
             ),
+            (
+                "everforest-light",
+                include_str!("themes/everforest-light.toml"),
+            ),
             ("flexoki-dark", include_str!("themes/flexoki-dark.toml")),
             ("github-dark", include_str!("themes/github-dark.toml")),
+            ("github-light", include_str!("themes/github-light.toml")),
             ("gruvbox-dark", include_str!("themes/gruvbox-dark.toml")),
+            ("gruvbox-light", include_str!("themes/gruvbox-light.toml")),
             ("kanagawa-wave", include_str!("themes/kanagawa-wave.toml")),
             ("monokai", include_str!("themes/monokai.toml")),
             ("nord", include_str!("themes/nord.toml")),
             ("one-dark", include_str!("themes/one-dark.toml")),
             ("rose-pine", include_str!("themes/rose-pine.toml")),
+            ("rose-pine-dawn", include_str!("themes/rose-pine-dawn.toml")),
             ("solarized-dark", include_str!("themes/solarized-dark.toml")),
+            (
+                "solarized-light",
+                include_str!("themes/solarized-light.toml"),
+            ),
             ("tokyo-night", include_str!("themes/tokyo-night.toml")),
         ];
         assert_eq!(
@@ -256,5 +286,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// El motor de contraste distingue polaridad de fondo (`contrast.rs`,
+    /// `light_bg = bg_lab.l > 0.6`); hasta este batch ningún preset claro lo
+    /// ejercitaba. `catppuccin-latte` tiene fondo claro y un ANSI de bajo
+    /// contraste (`yellow`) que demuestra que el ajuste sube el ratio sin
+    /// invertir la dirección de la búsqueda binaria.
+    #[test]
+    fn adjust_fg_funciona_sobre_preset_claro() {
+        use crate::color::contrast_ratio_rgb;
+        use crate::config::parse_hex;
+        use crate::renderer::adjust_fg;
+
+        let theme = try_preset("catppuccin-latte").unwrap();
+        let bg = parse_hex(&theme.background);
+        let fg = parse_hex(&theme.yellow);
+        let before = contrast_ratio_rgb(fg, bg);
+        let adjusted = adjust_fg(fg, bg, 4.5);
+        assert!(
+            contrast_ratio_rgb(adjusted, bg) >= 4.5,
+            "catppuccin-latte yellow ajustado no alcanza 4.5:1"
+        );
+        assert!(contrast_ratio_rgb(adjusted, bg) >= before);
     }
 }
