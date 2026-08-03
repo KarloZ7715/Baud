@@ -5,7 +5,7 @@
 //! - `enter`/`leave`: atomics ordenados + `*const` (sin Mutex/mpsc/Arc::clone).
 //! - El hilo watchdog lee cada 2s y materializa timestamps al detectar stall.
 
-use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -23,6 +23,9 @@ pub struct TelemetrySnapshot {
     pub term_lock_busy: u64,
     pub slow_handlers: u64,
     pub stalls: u64,
+    /// True si un stall en este instante generaría aviso. False mientras el
+    /// loop duerme a propósito.
+    pub stall_would_warn: bool,
 }
 
 /// Estado compartido GUI ↔ hilo `baud-watchdog` (lock-free en hot path).
@@ -42,6 +45,9 @@ struct LoopTelemetry {
     term_lock_busy: AtomicU64,
     slow_handlers: AtomicU64,
     stalls: AtomicU64,
+    /// True mientras el event loop está dormido a propósito (`ControlFlow::Wait`
+    /// sin eventos). No se avisa de stall en ese estado: no hay nada bloqueado.
+    idle: AtomicBool,
 }
 
 impl LoopTelemetry {
@@ -57,6 +63,7 @@ impl LoopTelemetry {
             term_lock_busy: AtomicU64::new(0),
             slow_handlers: AtomicU64::new(0),
             stalls: AtomicU64::new(0),
+            idle: AtomicBool::new(false),
         }
     }
 
@@ -72,7 +79,18 @@ impl LoopTelemetry {
     }
 
     #[inline]
+    fn set_idle(&self, idle: bool) {
+        self.idle.store(idle, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn is_idle(&self) -> bool {
+        self.idle.load(Ordering::Relaxed)
+    }
+
+    #[inline]
     fn enter(&self, name: &'static str) {
+        self.set_idle(false);
         let now = self.now_ms();
         self.handler_started_ms.store(now, Ordering::Relaxed);
         self.handler_len.store(name.len(), Ordering::Relaxed);
@@ -136,6 +154,7 @@ impl LoopTelemetry {
             term_lock_busy: self.term_lock_busy.load(Ordering::Relaxed),
             slow_handlers: self.slow_handlers.load(Ordering::Relaxed),
             stalls: self.stalls.load(Ordering::Relaxed),
+            stall_would_warn: !self.is_idle(),
         }
     }
 
@@ -154,6 +173,7 @@ impl LoopTelemetry {
             term_lock_busy: self.term_lock_busy.load(Ordering::Relaxed),
             slow_handlers: self.slow_handlers.load(Ordering::Relaxed),
             stalls: self.stalls.load(Ordering::Relaxed),
+            stall_would_warn: !self.is_idle(),
         }
     }
 
@@ -220,6 +240,13 @@ impl EventLoopWatchdog {
                     if age.as_millis() < u128::from(HEARTBEAT_INTERVAL_MS) {
                         continue;
                     }
+                    if tel.is_idle() {
+                        // El loop duerme en ControlFlow::Wait sin eventos: no
+                        // hay nada bloqueado. Reponer la referencia temporal
+                        // para no acumular una edad falsa al despertar.
+                        last_seen_at = Instant::now();
+                        continue;
+                    }
                     let stalls = tel.stalls.fetch_add(1, Ordering::Relaxed) + 1;
                     let snap = tel.snapshot_for_stall(age);
                     let handler = snap.current_handler.unwrap_or("idle");
@@ -258,6 +285,13 @@ impl EventLoopWatchdog {
             telemetry: Arc::as_ptr(&self.telemetry),
             name,
         }
+    }
+
+    /// Marca si el event loop está dormido a propósito. `about_to_wait` llama
+    /// con `false` al entrar y con `true` justo antes de ceder el control.
+    #[inline]
+    pub fn mark_idle(&self, idle: bool) {
+        self.telemetry.set_idle(idle);
     }
 
     /// Contador de veces que el hot path del mouse no pudo tomar el Term.
@@ -358,5 +392,23 @@ mod tests {
         let _g = wd.enter("RedrawRequested");
         wd.telemetry.leave("CursorMoved");
         assert_eq!(wd.snapshot().current_handler, Some("RedrawRequested"));
+    }
+
+    #[test]
+    fn idle_no_cuenta_como_bloqueo() {
+        let wd = EventLoopWatchdog::noop();
+
+        wd.mark_idle(false);
+        assert!(
+            wd.snapshot().stall_would_warn,
+            "con el loop despierto y sin heartbeat, el aviso es legitimo"
+        );
+
+        wd.mark_idle(true);
+        assert!(
+            !wd.snapshot().stall_would_warn,
+            "un loop durmiendo en ControlFlow::Wait no esta bloqueado: avisar aqui \
+             entrena a ignorar el watchdog"
+        );
     }
 }

@@ -3319,11 +3319,8 @@ impl App {
         drop(guard);
         self.send_pty_bytes(bytes);
     }
-}
 
-impl ApplicationHandler<UserEvent> for App {
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        self.watchdog.ping();
+    fn about_to_wait_inner(&mut self, event_loop: &ActiveEventLoop) {
         if self.pending_exit {
             event_loop.exit();
             return;
@@ -3398,6 +3395,19 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(deadline) = wake_at {
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
+    }
+}
+
+impl ApplicationHandler<UserEvent> for App {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.watchdog.ping();
+        // Despierto mientras corre este handler: si se bloquea aquí dentro, el
+        // watchdog debe verlo. Se marca idle en cada salida.
+        self.watchdog.mark_idle(false);
+        self.about_to_wait_inner(event_loop);
+        // El loop va a dormir hasta el próximo evento o deadline: a partir de
+        // aquí la ausencia de heartbeat es normal, no un bloqueo.
+        self.watchdog.mark_idle(true);
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
