@@ -85,7 +85,15 @@ impl SessionBackend for Pty {
     }
 
     fn read_output(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.read(buf)
+        match self.read(buf) {
+            // En Linux el master de un PTY devuelve EIO (no 0) cuando el
+            // esclavo se cierra al morir el hijo. Es un fin de sesion normal:
+            // traducirlo a EOF evita un WARN por cada sesion cerrada y deja
+            // que el drain tome el camino de Exited, que respeta `hold` y
+            // `close_on_exit`.
+            Err(e) if e.raw_os_error() == Some(nix::errno::Errno::EIO as i32) => Ok(0),
+            other => other,
+        }
     }
 
     fn set_nonblocking(&mut self) -> io::Result<()> {
@@ -547,5 +555,31 @@ mod tests {
         );
 
         drop(result);
+    }
+
+    /// En Linux, leer del master de un PTY cuyo hijo ya murio devuelve EIO,
+    /// no 0. Tratarlo como error genera un WARN por cada sesion cerrada
+    /// normalmente y se salta el camino de cierre limpio (hold/close_on_exit).
+    #[test]
+    fn read_output_traduce_eio_a_eof() {
+        let mut master = spawn("bash", &["-c", "exit 0"]).expect("spawn");
+        master.set_nonblocking().expect("nonblock");
+
+        let mut buf = [0u8; 1024];
+        let mut saw_eof = false;
+        for _ in 0..200 {
+            match master.read_output(&mut buf) {
+                Ok(0) => {
+                    saw_eof = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => panic!("EIO debe traducirse a EOF, llego: {e}"),
+            }
+        }
+        assert!(saw_eof, "el fin del hijo debe verse como EOF");
     }
 }
