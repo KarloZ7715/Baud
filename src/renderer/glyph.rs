@@ -393,6 +393,7 @@ mod tests {
             font_config.size as f32,
             font_config.line_height,
             font_config.glyph_offset,
+            1.0,
         );
         (font_system, metrics)
     }

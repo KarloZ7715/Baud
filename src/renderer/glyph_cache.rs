@@ -506,6 +506,7 @@ mod tests {
             font_config.size as f32,
             font_config.line_height,
             font_config.glyph_offset,
+            1.0,
         );
         let mut cache = GlyphCache::new();
         let mut strings = GlyphStrings::new();
@@ -548,6 +549,7 @@ mod tests {
             font_config.size as f32,
             font_config.line_height,
             font_config.glyph_offset,
+            1.0,
         );
         let mut cache = GlyphCache::new();
         let mut strings = GlyphStrings::new();
@@ -592,6 +594,7 @@ mod tests {
             font_config.size as f32,
             font_config.line_height,
             font_config.glyph_offset,
+            1.0,
         );
         let mut cache = GlyphCache::new();
         let mut strings = GlyphStrings::new();
@@ -644,8 +647,8 @@ mod tests {
         let family = FontConfig::default().family;
         use crate::config::GlyphOffset;
         let offset = GlyphOffset { x: 0.0, y: 0.0 };
-        let metrics_12 = CellMetrics::measure(&mut font_system, &family, 12.0, 1.0, offset);
-        let metrics_14 = CellMetrics::measure(&mut font_system, &family, 14.0, 1.3, offset);
+        let metrics_12 = CellMetrics::measure(&mut font_system, &family, 12.0, 1.0, offset, 1.0);
+        let metrics_14 = CellMetrics::measure(&mut font_system, &family, 14.0, 1.3, offset, 1.0);
         let mut strings = GlyphStrings::new();
         let key = test_key(&mut strings, 'M', &family);
         let mut cache = GlyphCache::new();
@@ -732,6 +735,7 @@ mod tests {
             12.0,
             1.0,
             crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+            1.0,
         );
         let mut strings = GlyphStrings::new();
         let key = test_key(&mut strings, 'M', &family);
@@ -775,6 +779,7 @@ mod tests {
             font_config.size as f32,
             font_config.line_height,
             font_config.glyph_offset,
+            1.0,
         );
         let mut cache = GlyphCache::new();
         let mut strings = GlyphStrings::new();
@@ -810,6 +815,7 @@ mod tests {
             font_config.size as f32,
             font_config.line_height,
             font_config.glyph_offset,
+            1.0,
         );
         let mut cache = GlyphCache::new();
         let mut strings = GlyphStrings::new();

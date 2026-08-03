@@ -17,6 +17,9 @@ fn dummy_metrics() -> CellMetrics {
         baseline_y: 14.0,
         underline_position: 1.0,
         underline_thickness: 1.0,
+        scale_factor: 1.0,
+        strike_y: 10.0,
+        strike_thickness: 1.0,
         glyph_offset_x: 0.0,
         glyph_offset_y: 0.0,
         padding_x: 0.0,
@@ -112,6 +115,7 @@ fn bench_display_list_build(c: &mut Criterion) {
                     false,
                     true,
                     true,
+                    true,
                     false,
                     &mut None,
                     &mut None,
@@ -142,6 +146,7 @@ fn synthetic_ligature_grid(
         14.0,
         1.0,
         baud::config::GlyphOffset { x: 0.0, y: 0.0 },
+        1.0,
     );
 
     let patterns = ["=>", "!==", "<=>", "->", "::", "..."];
@@ -202,6 +207,7 @@ fn bench_display_list_build_ligatures(c: &mut Criterion) {
                 true,
                 true,
                 true,
+                true,
                 &mut Some(&mut font_system),
                 &mut Some(&mut swash_cache),
                 &mut contrast_cache,
@@ -241,6 +247,7 @@ fn bench_custom_glyphs_build(c: &mut Criterion) {
         false,
         true,
         true,
+        true,
         false,
         &mut None,
         &mut None,
@@ -269,6 +276,7 @@ fn bench_custom_glyphs_build(c: &mut Criterion) {
                 &mut row_cache,
                 &DamageSnapshot::Full,
                 &mut out,
+                true,
             )
             .expect("build_custom_glyphs");
         });

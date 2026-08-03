@@ -490,6 +490,7 @@ mod tests {
             14.0,
             1.0,
             crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+            1.0,
         );
         let mut swash = glyphon::SwashCache::new();
         let mut cache = RunShapeCache::new();
@@ -536,6 +537,7 @@ mod tests {
             14.0,
             1.0,
             crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+            1.0,
         );
         let mut swash = glyphon::SwashCache::new();
         let (id, ..) = cache.shape(&mut fs, &mut swash, &m, 0, &fam, "=>", false, false, false);
@@ -560,6 +562,7 @@ mod tests {
             14.0,
             1.0,
             crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+            1.0,
         );
         for text in ["=>", "==", "==="] {
             let glyphs = shape_run(&mut fs, &m, &fam, text, false, false, false);
@@ -579,6 +582,7 @@ mod tests {
             14.0,
             1.0,
             crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+            1.0,
         );
         for text in ["=>", "->", "=="] {
             let glyphs = shape_run(&mut fs, &m, &fam, text, false, false, false);
@@ -602,6 +606,7 @@ mod tests {
             14.0,
             1.0,
             crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+            1.0,
         );
         let run_g = shape_run(&mut fs, &m, &fam, "==", false, false, false)
             .into_iter()
@@ -643,6 +648,7 @@ mod tests {
             14.0,
             1.0,
             crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+            1.0,
         );
         let glyphs = shape_run(&mut fs, &m, &fam, "=>", false, false, false);
         assert!(!glyphs.is_empty());
@@ -669,6 +675,7 @@ mod tests {
                 size,
                 1.0,
                 crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+                1.0,
             );
             for pattern in ["=>", "==", "==="] {
                 let glyphs = shape_run(&mut fs, &m, "Fira Code", pattern, false, false, false);
@@ -700,6 +707,7 @@ mod tests {
             12.0,
             1.0,
             crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+            1.0,
         );
         let mut swash = glyphon::SwashCache::new();
         let mut strings = crate::renderer::GlyphStrings::new();
@@ -753,6 +761,7 @@ mod tests {
             12.0,
             1.0,
             crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+            1.0,
         );
         let mut swash = glyphon::SwashCache::new();
         let mut cache = crate::renderer::glyph_cache::GlyphCache::new();
@@ -957,6 +966,7 @@ mod ligature_probe {
             font_size,
             line_height,
             crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+            1.0,
         );
         let mut swash = glyphon::SwashCache::new();
 

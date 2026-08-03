@@ -51,6 +51,7 @@ pub fn picker_cell_metrics(font_system: &mut FontSystem, font_family: &str) -> C
         PICKER_FONT_SIZE,
         PICKER_LINE_HEIGHT,
         GlyphOffset { x: 0.0, y: 0.0 },
+        1.0,
     )
 }
 
@@ -192,6 +193,7 @@ pub fn build_sample_custom_glyphs(
         false,
         true,
         true,
+        true,
         false,
         &mut None,
         &mut None,
@@ -215,6 +217,7 @@ pub fn build_sample_custom_glyphs(
         &mut row_cache,
         &DamageSnapshot::Full,
         &mut glyphs,
+        true,
     )?;
 
     for glyph in &mut glyphs {

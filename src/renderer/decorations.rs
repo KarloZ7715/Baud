@@ -37,11 +37,23 @@ pub fn underline_style_glyph_id(style: UnderlineStyle) -> u16 {
     }
 }
 
-fn line_height_for_style(style: UnderlineStyle) -> f32 {
-    if style == UnderlineStyle::Double {
-        3.0
-    } else {
-        1.0
+/// Escala una constante logica a pixeles enteros (minimo 1).
+fn scaled_px(logical: f32, scale: f32) -> f32 {
+    (logical * scale).round().max(1.0)
+}
+
+/// Altura del quad de subrayado segun estilo.
+pub fn underline_quad_height(style: UnderlineStyle, metrics: &CellMetrics) -> f32 {
+    match style {
+        UnderlineStyle::Double => scaled_px(3.0, metrics.scale_factor),
+        UnderlineStyle::Curly => {
+            let thickness = metrics.underline_thickness.max(1.0);
+            (thickness * 3.0).max(scaled_px(3.0, metrics.scale_factor))
+        }
+        UnderlineStyle::None
+        | UnderlineStyle::Single
+        | UnderlineStyle::Dotted
+        | UnderlineStyle::Dashed => metrics.underline_thickness.max(1.0),
     }
 }
 
@@ -59,15 +71,26 @@ pub fn line_quad(
     let col_left = col as f32 * metrics.cell_w + metrics.padding_x;
     let (top, height) = match kind {
         LineKind::Under => {
-            let h = if style == UnderlineStyle::Double {
-                line_height_for_style(style)
-            } else {
-                metrics.underline_thickness.max(1.0)
-            };
-            (row_top + metrics.baseline_y + metrics.underline_position, h)
+            let h = underline_quad_height(style, metrics);
+            let mut top = row_top + metrics.baseline_y + metrics.underline_position;
+            // La onda crece hacia abajo desde la posicion tipografica; si
+            // invadiria la fila siguiente, se desplaza hacia arriba.
+            if style == UnderlineStyle::Curly {
+                let row_bottom = row_top + metrics.cell_h;
+                if top + h > row_bottom {
+                    top = (row_bottom - h).max(row_top);
+                }
+            }
+            (top, h)
         }
-        LineKind::Strike => (row_top + metrics.cell_h * 0.5, 1.0),
-        LineKind::Over => (row_top + 1.0, 1.0),
+        LineKind::Strike => (
+            row_top + metrics.strike_y,
+            metrics.strike_thickness.max(1.0),
+        ),
+        LineKind::Over => (
+            row_top + metrics.glyph_offset_y.max(0.0),
+            scaled_px(1.0, metrics.scale_factor),
+        ),
     };
     CustomGlyph {
         id: underline_style_glyph_id(style),
@@ -145,7 +168,7 @@ pub fn bar_quad(
     metrics: &CellMetrics,
     color: glyphon::Color,
 ) -> CustomGlyph {
-    let bar_w = (metrics.cell_w * 0.2).max(2.0);
+    let bar_w = (metrics.cell_w * 0.2).max(scaled_px(2.0, metrics.scale_factor));
     CustomGlyph {
         id: SOLID_MASK_GLYPH_ID,
         left: col as f32 * metrics.cell_w + metrics.padding_x,
@@ -156,6 +179,36 @@ pub fn bar_quad(
         snap_to_physical_pixel: true,
         metadata: 0,
     }
+}
+
+/// Contorno de 1 px logico para el cursor bloque sin foco (arriba, abajo, izq, der).
+pub fn cursor_outline_quads(
+    row: usize,
+    col: usize,
+    metrics: &CellMetrics,
+    color: glyphon::Color,
+) -> [CustomGlyph; 4] {
+    let t = scaled_px(1.0, metrics.scale_factor);
+    let left = col as f32 * metrics.cell_w + metrics.padding_x;
+    let top = row as f32 * metrics.cell_h + metrics.padding_y;
+    let w = metrics.cell_w;
+    let h = metrics.cell_h;
+    let solid = |l: f32, tp: f32, width: f32, height: f32| CustomGlyph {
+        id: SOLID_MASK_GLYPH_ID,
+        left: l,
+        top: tp,
+        width,
+        height,
+        color: Some(color),
+        snap_to_physical_pixel: true,
+        metadata: 0,
+    };
+    [
+        solid(left, top, w, t),
+        solid(left, top + h - t, w, t),
+        solid(left, top, t, h),
+        solid(left + w - t, top, t, h),
+    ]
 }
 
 /// Caracter de bloque para el estilo de cursor DECSCUSR (copy mode / fallback).
@@ -182,12 +235,21 @@ pub fn cursor_anchor_offset(
 }
 
 /// Genera mascara de linea segun id de glifo reservado.
-pub fn rasterize_line_mask(width: u16, height: u16, id: u16) -> Option<Vec<u8>> {
+///
+/// `cell_w` fija el periodo del ondulado; `scale` el paso de punteado/discontinuo.
+pub fn rasterize_line_mask(
+    width: u16,
+    height: u16,
+    id: u16,
+    cell_w: f32,
+    scale: f32,
+) -> Option<Vec<u8>> {
     let w = width as usize;
     let h = height as usize;
     if w == 0 || h == 0 {
         return None;
     }
+    let scale = scale.max(0.01);
     let mut data = vec![0u8; w * h];
     match id {
         LINE_DOUBLE_GLYPH_ID => {
@@ -195,29 +257,42 @@ pub fn rasterize_line_mask(width: u16, height: u16, id: u16) -> Option<Vec<u8>> 
                 data[..w].fill(255);
             }
             if h >= 3 {
-                data[2 * w..2 * w + w].fill(255);
+                let bottom = h - 1;
+                data[bottom * w..bottom * w + w].fill(255);
             }
         }
         LINE_DOTTED_GLYPH_ID => {
             let y = h.saturating_sub(1);
-            for x in (0..w).step_by(2) {
+            let step = scaled_px(2.0, scale) as usize;
+            for x in (0..w).step_by(step.max(1)) {
                 data[y * w + x] = 255;
             }
         }
         LINE_DASHED_GLYPH_ID => {
             let y = h.saturating_sub(1);
+            let dash = scaled_px(4.0, scale) as usize;
+            let dash = dash.max(1);
             for x in 0..w {
-                if (x / 4) % 2 == 0 {
+                if (x / dash).is_multiple_of(2) {
                     data[y * w + x] = 255;
                 }
             }
         }
         LINE_CURLY_GLYPH_ID => {
+            let stroke = ((h as f32) / 3.0).round().max(1.0) as usize;
+            let amplitude = ((h as f32 - stroke as f32) / 2.0).max(0.0);
+            let period = cell_w.max(1.0);
+            let freq = std::f32::consts::TAU / period;
+            let mid = h as f32 / 2.0;
             for x in 0..w {
-                let wave = (x as f32 * 0.5).sin() * 1.0;
-                let y = ((h as f32 / 2.0) + wave).round() as usize;
-                if y < h {
-                    data[y * w + x] = 255;
+                let wave = (x as f32 * freq).sin() * amplitude;
+                let y_center = mid + wave;
+                let y0 = (y_center - stroke as f32 / 2.0).round() as isize;
+                for dy in 0..stroke as isize {
+                    let y = y0 + dy;
+                    if y >= 0 && (y as usize) < h {
+                        data[y as usize * w + x] = 255;
+                    }
                 }
             }
         }
@@ -465,6 +540,9 @@ mod tests {
             baseline_y: 16.0,
             underline_position: 1.0,
             underline_thickness: 1.0,
+            scale_factor: 1.0,
+            strike_y: 10.0,
+            strike_thickness: 1.0,
             glyph_offset_x: 0.0,
             glyph_offset_y: 2.0,
             padding_x: 0.0,
@@ -483,22 +561,23 @@ mod tests {
     }
 
     #[test]
-    fn strikethrough_quad_sits_mid_cell() {
+    fn strikethrough_quad_sits_near_x_height() {
         let m = test_metrics();
         let q = strikethrough_quad(1, 2, 1, &m, glyphon::Color::rgb(0, 0, 0));
-        assert!((q.top - (1.0 * 20.0 + 20.0 * 0.5)).abs() < 2.0);
+        assert!((q.top - (1.0 * 20.0 + m.strike_y)).abs() < 0.5);
+        assert!((q.height - m.strike_thickness).abs() < 0.5);
     }
 
     #[test]
-    fn overline_quad_sits_near_top() {
+    fn overline_quad_sits_at_glyph_offset() {
         let m = test_metrics();
         let q = overline_quad(1, 2, 1, &m, glyphon::Color::rgb(0, 0, 0));
-        assert!((q.top - (1.0 * 20.0 + 1.0)).abs() < 2.0);
+        assert!((q.top - (1.0 * 20.0 + m.glyph_offset_y)).abs() < 0.5);
     }
 
     #[test]
     fn rasterize_double_line_mask_has_two_rows() {
-        let data = rasterize_line_mask(8, 3, LINE_DOUBLE_GLYPH_ID).expect("mask");
+        let data = rasterize_line_mask(8, 3, LINE_DOUBLE_GLYPH_ID, 8.0, 1.0).expect("mask");
         assert_eq!(data.len(), 24);
         assert!(data[0..8].iter().all(|&b| b == 255), "fila superior");
         assert!(data[8..16].iter().all(|&b| b == 0), "fila central vacia");
@@ -507,26 +586,60 @@ mod tests {
 
     #[test]
     fn rasterize_dotted_mask_alternates_pixels() {
-        let data = rasterize_line_mask(8, 1, LINE_DOTTED_GLYPH_ID).expect("mask");
+        let data = rasterize_line_mask(8, 1, LINE_DOTTED_GLYPH_ID, 8.0, 1.0).expect("mask");
         assert_eq!(data, [255, 0, 255, 0, 255, 0, 255, 0]);
     }
 
     #[test]
     fn rasterize_dashed_mask_has_gaps() {
-        let data = rasterize_line_mask(8, 1, LINE_DASHED_GLYPH_ID).expect("mask");
+        let data = rasterize_line_mask(8, 1, LINE_DASHED_GLYPH_ID, 8.0, 1.0).expect("mask");
         assert_eq!(data, [255, 255, 255, 255, 0, 0, 0, 0]);
     }
 
     #[test]
     fn rasterize_curly_mask_is_non_flat() {
-        let data = rasterize_line_mask(16, 3, LINE_CURLY_GLYPH_ID).expect("mask");
-        let rows_with_ink: Vec<usize> = (0..3)
-            .filter(|&row| data[row * 16..(row + 1) * 16].contains(&255))
+        // Altura que produce line_quad para Curly con thickness=1 y scale=1.
+        let metrics = test_metrics();
+        let h = underline_quad_height(UnderlineStyle::Curly, &metrics).round() as u16;
+        assert!(
+            h >= 3,
+            "curly en ejecucion debe medir al menos 3 px (h={h})"
+        );
+        let w = 16u16;
+        let data = rasterize_line_mask(
+            w,
+            h,
+            LINE_CURLY_GLYPH_ID,
+            metrics.cell_w,
+            metrics.scale_factor,
+        )
+        .expect("mask");
+        let rows_with_ink: Vec<usize> = (0..h as usize)
+            .filter(|&row| data[row * w as usize..(row + 1) * w as usize].contains(&255))
             .collect();
         assert!(
-            rows_with_ink.len() > 1,
-            "curly debe ocupar mas de una fila de mascara"
+            rows_with_ink.len() >= 3,
+            "curly debe ocupar al menos tres filas distintas, got {rows_with_ink:?}"
         );
+        for x in 0..w as usize {
+            let col_has_ink = (0..h as usize).any(|y| data[y * w as usize + x] == 255);
+            assert!(col_has_ink, "columna {x} no debe quedar vacia");
+        }
+    }
+
+    #[test]
+    fn curly_line_quad_height_is_at_least_three() {
+        let metrics = test_metrics();
+        let q = line_quad(
+            0,
+            0,
+            1,
+            LineKind::Under,
+            UnderlineStyle::Curly,
+            &metrics,
+            glyphon::Color::rgb(255, 0, 0),
+        );
+        assert!(q.height >= 3.0, "altura curly = {}", q.height);
     }
 
     #[test]
