@@ -586,6 +586,14 @@ pub fn spawn_session(
                 }
             }
 
+            // Con backlog pendiente el drain volveria a tomar el mutex del Term
+            // antes de que la GUI, ya avisada, llegue a su try_lock. Ceder aqui
+            // le da el turno: el coste es un cambio de contexto por pasada y a
+            // cambio el frame lleva contenido nuevo en vez de la cache.
+            if !output_backlog.is_empty() {
+                std::thread::yield_now();
+            }
+
             metrics.maybe_log();
         }
     });
