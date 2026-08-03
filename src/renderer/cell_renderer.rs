@@ -10,13 +10,15 @@ use crate::grid::DamageSnapshot;
 use super::builtin;
 use super::contrast::ContrastCache;
 use super::decorations::{
-    cursor_anchor_offset, line_quad, rasterize_button_mask, rasterize_corner_mask,
-    rasterize_line_mask, CORNER_TL_MASK_GLYPH_ID, CORNER_TR_MASK_GLYPH_ID, LINE_CURLY_GLYPH_ID,
-    LINE_DASHED_GLYPH_ID, LINE_DOTTED_GLYPH_ID, LINE_DOUBLE_GLYPH_ID, SOLID_MASK_GLYPH_ID,
-    WIN_BTN_CLOSE_MASK_GLYPH_ID, WIN_BTN_MAXIMIZE_MASK_GLYPH_ID, WIN_BTN_MINIMIZE_MASK_GLYPH_ID,
-    WIN_BTN_RESTORE_MASK_GLYPH_ID,
+    cursor_anchor_offset, cursor_outline_quads, line_quad, rasterize_button_mask,
+    rasterize_corner_mask, rasterize_line_mask, CORNER_TL_MASK_GLYPH_ID, CORNER_TR_MASK_GLYPH_ID,
+    LINE_CURLY_GLYPH_ID, LINE_DASHED_GLYPH_ID, LINE_DOTTED_GLYPH_ID, LINE_DOUBLE_GLYPH_ID,
+    SOLID_MASK_GLYPH_ID, WIN_BTN_CLOSE_MASK_GLYPH_ID, WIN_BTN_MAXIMIZE_MASK_GLYPH_ID,
+    WIN_BTN_MINIMIZE_MASK_GLYPH_ID, WIN_BTN_RESTORE_MASK_GLYPH_ID,
 };
-use super::display_list::{resolve_fg_glyphon, CursorGlyph, DisplayList, LineQuad, TextGlyph};
+use super::display_list::{
+    attenuate_glyphon, resolve_fg_glyphon, CursorGlyph, DisplayList, LineQuad, TextGlyph,
+};
 use super::geometry::cell_origin;
 use super::glyph::{GlyphKey, GlyphStrings, ShapedGlyph};
 use super::glyph_cache::GlyphCache;
@@ -120,6 +122,13 @@ impl CellRenderer {
             row_out.push(bar);
         }
 
+        for &(outline_row, col) in &display_list.cursor_outlines[row_idx] {
+            for mut edge in cursor_outline_quads(outline_row, col, metrics, cursor_color) {
+                edge.metadata = LAYER_DECORATION;
+                row_out.push(edge);
+            }
+        }
+
         for text in &display_list.text_glyphs[row_idx] {
             text_glyph_to_customs(
                 text,
@@ -164,6 +173,7 @@ impl CellRenderer {
         row_cache: &mut Vec<Vec<CustomGlyph>>,
         damage: &DamageSnapshot,
         out: &mut Vec<CustomGlyph>,
+        window_focused: bool,
     ) -> Result<(), String> {
         let rows = display_list.bg_quads.len();
         let force_full = row_cache.len() != rows;
@@ -176,7 +186,12 @@ impl CellRenderer {
 
         let cursor_color = {
             let (r, g, b) = palette.cursor_rgb();
-            glyphon::Color::rgb(r, g, b)
+            let color = glyphon::Color::rgb(r, g, b);
+            if window_focused {
+                color
+            } else {
+                attenuate_glyphon(color)
+            }
         };
 
         #[allow(
@@ -259,6 +274,8 @@ impl CellRenderer {
         surface_height: u32,
         default_fg: glyphon::Color,
         extra_areas: &[TextArea<'_>],
+        cell_w: f32,
+        scale_factor: f32,
     ) -> Result<(), String> {
         let grid_area = TextArea {
             buffer: empty_buffer,
@@ -288,7 +305,7 @@ impl CellRenderer {
                 viewport,
                 areas,
                 swash_cache,
-                |request| rasterize_custom_glyph(request, glyph_cache),
+                |request| rasterize_custom_glyph(request, glyph_cache, cell_w, scale_factor),
             )
             .map_err(|e| format!("error al preparar cell renderer: {e}"))?;
 
@@ -592,6 +609,8 @@ fn cursor_glyph_to_custom(
 fn rasterize_custom_glyph(
     request: RasterizeCustomGlyphRequest,
     glyph_cache: &GlyphCache,
+    cell_w: f32,
+    scale_factor: f32,
 ) -> Option<RasterizedCustomGlyph> {
     if let Some(ch) = char_from_builtin_glyph_id(request.id) {
         let data = builtin::render(ch, u32::from(request.width), u32::from(request.height))?;
@@ -606,7 +625,13 @@ fn rasterize_custom_glyph(
             return None;
         }
         if request.height <= 4 {
-            let data = rasterize_line_mask(request.width, request.height, SOLID_MASK_GLYPH_ID)?;
+            let data = rasterize_line_mask(
+                request.width,
+                request.height,
+                SOLID_MASK_GLYPH_ID,
+                cell_w,
+                scale_factor,
+            )?;
             return Some(RasterizedCustomGlyph {
                 data,
                 content_type: ContentType::Mask,
@@ -623,7 +648,13 @@ fn rasterize_custom_glyph(
         request.id,
         LINE_DOUBLE_GLYPH_ID | LINE_DOTTED_GLYPH_ID | LINE_DASHED_GLYPH_ID | LINE_CURLY_GLYPH_ID
     ) {
-        let data = rasterize_line_mask(request.width, request.height, request.id)?;
+        let data = rasterize_line_mask(
+            request.width,
+            request.height,
+            request.id,
+            cell_w,
+            scale_factor,
+        )?;
         return Some(RasterizedCustomGlyph {
             data,
             content_type: ContentType::Mask,
@@ -717,6 +748,7 @@ mod tests {
             font_config.size as f32,
             font_config.line_height,
             font_config.glyph_offset,
+            1.0,
         );
         (font_system, metrics)
     }
@@ -732,7 +764,7 @@ mod tests {
             scale: 1.0,
         };
         let cache = GlyphCache::new();
-        let out = rasterize_custom_glyph(request, &cache).expect("box glyph");
+        let out = rasterize_custom_glyph(request, &cache, 10.0, 1.0).expect("box glyph");
         assert_eq!(out.content_type, ContentType::Mask);
         assert_eq!(out.data.len(), 200);
         assert!(out.data[100] > 0);
@@ -750,7 +782,7 @@ mod tests {
             y_bin: glyphon::SubpixelBin::Zero,
             scale: 1.0,
         };
-        let out = rasterize_custom_glyph(request, &GlyphCache::new()).expect("junction");
+        let out = rasterize_custom_glyph(request, &GlyphCache::new(), 10.0, 1.0).expect("junction");
         assert_eq!(out.data.len(), 12 * 24);
         assert!(out.data[12 * 12 + 6] > 0);
     }
@@ -772,6 +804,9 @@ mod tests {
             baseline_y: 14.0,
             underline_position: 1.0,
             underline_thickness: 1.0,
+            scale_factor: 1.0,
+            strike_y: 10.0,
+            strike_thickness: 1.0,
             glyph_offset_x: 4.0,
             glyph_offset_y: 2.0,
             padding_x: 2.0,
@@ -847,6 +882,9 @@ mod tests {
             baseline_y: 14.0,
             underline_position: 1.0,
             underline_thickness: 1.0,
+            scale_factor: 1.0,
+            strike_y: 10.0,
+            strike_thickness: 1.0,
             glyph_offset_x: 4.0,
             glyph_offset_y: 2.0,
             padding_x: 2.0,
@@ -906,7 +944,7 @@ mod tests {
             y_bin: glyphon::SubpixelBin::Zero,
             scale: 1.0,
         };
-        let out = rasterize_custom_glyph(request, &GlyphCache::new()).expect("raster");
+        let out = rasterize_custom_glyph(request, &GlyphCache::new(), 10.0, 1.0).expect("raster");
         assert_eq!(out.data.len(), 200);
         assert!(out.data.iter().any(|&p| p > 0));
     }
@@ -921,6 +959,9 @@ mod tests {
             baseline_y: 14.0,
             underline_position: 1.0,
             underline_thickness: 1.0,
+            scale_factor: 1.0,
+            strike_y: 10.0,
+            strike_thickness: 1.0,
             glyph_offset_x: 0.0,
             glyph_offset_y: 0.0,
             padding_x: 0.0,
@@ -951,7 +992,7 @@ mod tests {
             scale: 1.0,
         };
         let cache = GlyphCache::new();
-        let out = rasterize_custom_glyph(request, &cache).expect("solid bg");
+        let out = rasterize_custom_glyph(request, &cache, 10.0, 1.0).expect("solid bg");
         assert_eq!(out.content_type, ContentType::Mask);
         assert_eq!(out.data.len(), 80);
         assert!(out.data.iter().all(|&b| b == 255));
@@ -1090,6 +1131,8 @@ mod tests {
                 scale: 1.0,
             },
             &cache,
+            10.0,
+            1.0,
         );
         assert!(
             out.is_some(),
@@ -1110,6 +1153,8 @@ mod tests {
                     scale: 1.0,
                 },
                 &cache,
+                10.0,
+                1.0,
             );
             assert!(
                 mismatched.is_none(),
@@ -1274,6 +1319,8 @@ mod tests {
                 scale: 1.0,
             },
             &cache,
+            10.0,
+            1.0,
         );
         assert!(
             out.is_some(),
@@ -1318,6 +1365,8 @@ mod tests {
                 scale: 1.0,
             },
             &cache,
+            10.0,
+            1.0,
         );
         assert!(
             out.is_some(),
@@ -1338,6 +1387,9 @@ mod tests {
             baseline_y: 14.0,
             underline_position: 1.0,
             underline_thickness: 1.0,
+            scale_factor: 1.0,
+            strike_y: 10.0,
+            strike_thickness: 1.0,
             glyph_offset_x: 0.0,
             glyph_offset_y: 0.0,
             padding_x: 0.0,
@@ -1397,6 +1449,7 @@ mod tests {
             &mut row_cache,
             &DamageSnapshot::Full,
             &mut out,
+            true,
         )
         .expect("build inicial");
         assert_eq!(row_cache[0][0].color, Some(original_color));
@@ -1419,6 +1472,7 @@ mod tests {
             &mut row_cache,
             &damage,
             &mut out,
+            true,
         )
         .expect("build incremental");
 
@@ -1457,6 +1511,7 @@ mod tests {
             &mut row_cache,
             &DamageSnapshot::Full,
             &mut out,
+            true,
         )
         .expect("build");
 
@@ -1500,6 +1555,7 @@ mod tests {
             &mut row_cache,
             &DamageSnapshot::Full,
             &mut out,
+            true,
         )
         .expect("build inicial");
 
@@ -1523,6 +1579,7 @@ mod tests {
             &mut row_cache,
             &damage,
             &mut out,
+            true,
         )
         .expect("build tras resize");
 
@@ -1570,6 +1627,7 @@ mod tests {
             &mut row_cache,
             &DamageSnapshot::Full,
             &mut out,
+            true,
         )
         .expect("build inicial");
 
@@ -1593,6 +1651,7 @@ mod tests {
             &mut row_cache,
             &damage,
             &mut out,
+            true,
         )
         .expect("build incremental tras scroll");
 
@@ -1619,6 +1678,7 @@ mod tests {
             &mut expected_row_cache,
             &DamageSnapshot::Full,
             &mut expected_out,
+            true,
         )
         .expect("build de referencia");
 

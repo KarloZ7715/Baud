@@ -89,6 +89,8 @@ pub struct DisplayList {
     pub text_glyphs: Vec<Vec<TextGlyph>>,
     pub cursor: Option<CursorGlyph>,
     pub cursor_bars: Vec<Vec<(usize, usize)>>,
+    /// Celdas con contorno de cursor bloque (ventana sin foco).
+    pub cursor_outlines: Vec<Vec<(usize, usize)>>,
 }
 
 impl DisplayList {
@@ -106,6 +108,9 @@ impl DisplayList {
         if self.cursor_bars.len() < rows {
             self.cursor_bars.resize_with(rows, Vec::new);
         }
+        if self.cursor_outlines.len() < rows {
+            self.cursor_outlines.resize_with(rows, Vec::new);
+        }
     }
 
     pub fn clear(&mut self) {
@@ -122,6 +127,9 @@ impl DisplayList {
         for row in &mut self.cursor_bars {
             row.clear();
         }
+        for row in &mut self.cursor_outlines {
+            row.clear();
+        }
     }
 
     pub fn is_populated(&self) -> bool {
@@ -129,6 +137,7 @@ impl DisplayList {
             || self.bg_quads.iter().any(|r| !r.is_empty())
             || self.text_glyphs.iter().any(|r| !r.is_empty())
             || self.cursor_bars.iter().any(|r| !r.is_empty())
+            || self.cursor_outlines.iter().any(|r| !r.is_empty())
     }
 
     /// Iteradores planos para tests y consumidores que no necesitan la
@@ -147,6 +156,10 @@ impl DisplayList {
 
     pub fn cursor_bars_flat(&self) -> impl Iterator<Item = &(usize, usize)> {
         self.cursor_bars.iter().flatten()
+    }
+
+    pub fn cursor_outlines_flat(&self) -> impl Iterator<Item = &(usize, usize)> {
+        self.cursor_outlines.iter().flatten()
     }
 
     /// Accesos indexados para tests que no necesitan saber la estructura interna.
@@ -193,12 +206,18 @@ impl DisplayList {
             if bottom < self.cursor_bars.len() {
                 self.cursor_bars[top..=bottom].rotate_left(n);
             }
+            if bottom < self.cursor_outlines.len() {
+                self.cursor_outlines[top..=bottom].rotate_left(n);
+            }
         } else {
             self.bg_quads[top..=bottom].rotate_right(n);
             self.line_quads[top..=bottom].rotate_right(n);
             self.text_glyphs[top..=bottom].rotate_right(n);
             if bottom < self.cursor_bars.len() {
                 self.cursor_bars[top..=bottom].rotate_right(n);
+            }
+            if bottom < self.cursor_outlines.len() {
+                self.cursor_outlines[top..=bottom].rotate_right(n);
             }
         }
         for row in top..=bottom {
@@ -216,6 +235,13 @@ impl DisplayList {
             for row in top..=bottom {
                 for bar in &mut self.cursor_bars[row] {
                     bar.0 = row;
+                }
+            }
+        }
+        if bottom < self.cursor_outlines.len() {
+            for row in top..=bottom {
+                for outline in &mut self.cursor_outlines[row] {
+                    outline.0 = row;
                 }
             }
         }
@@ -332,6 +358,55 @@ fn effective_underline_style(cell: &Cell) -> UnderlineStyle {
     }
 }
 
+/// Extiende el ultimo LineQuad de la fila si comparte kind/style/color y es
+/// contiguo; si no, emite uno nuevo. Parte el run si supera el limite de
+/// pixeles de CustomGlyph o el maximo de `width_cells` (u8).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "run de linea: geometria + estilo + metricas de limite"
+)]
+fn push_line_run(
+    line_quads: &mut Vec<LineQuad>,
+    row: usize,
+    col: usize,
+    width_cells: u8,
+    kind: LineKind,
+    style: UnderlineStyle,
+    color: glyphon::Color,
+    metrics: &CellMetrics,
+) {
+    let height_style = if kind == LineKind::Under {
+        style
+    } else {
+        UnderlineStyle::Single
+    };
+    let height = super::decorations::underline_quad_height(height_style, metrics).max(1.0);
+    if let Some(last) = line_quads.last_mut() {
+        let adjacent = last.row == row
+            && last.kind == kind
+            && last.style == style
+            && last.color == color
+            && last.col + last.width_cells as usize == col;
+        if adjacent {
+            let new_width = last.width_cells as u16 + u16::from(width_cells);
+            let pixels =
+                super::limits::custom_pixels(metrics.cell_w * f32::from(new_width), height);
+            if new_width <= u16::from(u8::MAX) && pixels <= super::limits::MAX_CUSTOM_GLYPH_PIXELS {
+                last.width_cells = new_width as u8;
+                return;
+            }
+        }
+    }
+    line_quads.push(LineQuad {
+        row,
+        col,
+        width_cells,
+        kind,
+        style,
+        color,
+    });
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "underline color shares cell contrast context with fg resolution"
@@ -395,6 +470,7 @@ impl DisplayListBuilder {
         show_scrollback: bool,
         builtin_box_drawing: bool,
         blink_on: bool,
+        window_focused: bool,
         ligatures: bool,
         font_system: &mut Option<&mut glyphon::FontSystem>,
         swash_cache: &mut Option<&mut glyphon::SwashCache>,
@@ -420,6 +496,7 @@ impl DisplayListBuilder {
                     show_scrollback,
                     builtin_box_drawing,
                     blink_on,
+                    window_focused,
                     ligatures,
                     font_system,
                     swash_cache,
@@ -450,6 +527,7 @@ impl DisplayListBuilder {
                     show_scrollback,
                     builtin_box_drawing,
                     blink_on,
+                    window_focused,
                     ligatures,
                     font_system,
                     swash_cache,
@@ -550,6 +628,9 @@ impl DisplayListBuilder {
         if let Some(slot) = list.cursor_bars.get_mut(row) {
             slot.clear();
         }
+        if let Some(slot) = list.cursor_outlines.get_mut(row) {
+            slot.clear();
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -566,6 +647,7 @@ impl DisplayListBuilder {
         show_scrollback: bool,
         builtin_box_drawing: bool,
         blink_on: bool,
+        window_focused: bool,
         ligatures: bool,
         font_system: &mut Option<&mut glyphon::FontSystem>,
         swash_cache: &mut Option<&mut glyphon::SwashCache>,
@@ -632,11 +714,10 @@ impl DisplayListBuilder {
             let search_hit = term.search_hit_at(row, col);
             let is_search = search_hit.is_some();
             let is_cursor = Self::shell_cursor_here(term, row, col, show_scrollback);
-            // El shell cursor se suprime en la fase "off" del parpadeo cuando
-            // el parpadeo del cursor esta habilitado en config. Si el usuario
-            // lo desactivo, el cursor siempre es visible (independiente de
-            // SGR 5 en el texto).
-            let cursor_rendered = is_cursor && (blink_on || !term.cursor_blink_enabled);
+            // Sin foco de ventana el cursor se dibuja siempre (contorno/atenuado)
+            // y no respeta la fase de parpadeo.
+            let cursor_rendered =
+                is_cursor && ((!window_focused) || blink_on || !term.cursor_blink_enabled);
             let bold = cell.attrs.bold();
 
             if cursor_rendered && matches!(term.cursor_style, CursorStyle::Bar) {
@@ -648,7 +729,12 @@ impl DisplayListBuilder {
                 std::mem::swap(&mut fg, &mut bg);
             }
 
-            let cursor_block = cursor_rendered && matches!(term.cursor_style, CursorStyle::Block);
+            let cursor_block = cursor_rendered
+                && window_focused
+                && matches!(term.cursor_style, CursorStyle::Block);
+            let cursor_outline = cursor_rendered
+                && !window_focused
+                && matches!(term.cursor_style, CursorStyle::Block);
             let (contrast_bg, skip_contrast) =
                 cell_contrast_context(fg, bg, is_sel || is_search, cursor_block, palette, cell.ch);
 
@@ -674,7 +760,7 @@ impl DisplayListBuilder {
                     width_cells: cell.width().max(1),
                     color,
                 });
-            } else if cursor_rendered && matches!(term.cursor_style, CursorStyle::Block) {
+            } else if cursor_block {
                 list.bg_quads[row].push(BgQuad {
                     row,
                     col,
@@ -697,6 +783,16 @@ impl DisplayListBuilder {
             // el clear color ya translucido, el resultado se veia opaco: un
             // recuadro negro solido justo donde habia box-drawing.
 
+            if cursor_outline {
+                list.cursor_outlines[row].push((row, col));
+            }
+
+            let cursor_line_color = if window_focused {
+                Self::cursor_color(palette)
+            } else {
+                attenuate_glyphon(Self::cursor_color(palette))
+            };
+
             if cursor_rendered && matches!(term.cursor_style, CursorStyle::Underline) {
                 list.line_quads[row].push(LineQuad {
                     row,
@@ -704,7 +800,7 @@ impl DisplayListBuilder {
                     width_cells: cell.width().max(1),
                     kind: LineKind::Under,
                     style: UnderlineStyle::Single,
-                    color: Self::cursor_color(palette),
+                    color: cursor_line_color,
                 });
             } else {
                 let underline_style = if is_link_hover {
@@ -713,13 +809,14 @@ impl DisplayListBuilder {
                     effective_underline_style(cell)
                 };
                 if underline_style != UnderlineStyle::None && cell.ch != ' ' {
-                    list.line_quads[row].push(LineQuad {
+                    push_line_run(
+                        &mut list.line_quads[row],
                         row,
                         col,
-                        width_cells: cell.width().max(1),
-                        kind: LineKind::Under,
-                        style: underline_style,
-                        color: underline_color_for_cell(
+                        cell.width().max(1),
+                        LineKind::Under,
+                        underline_style,
+                        underline_color_for_cell(
                             fg,
                             bg,
                             bold,
@@ -732,18 +829,20 @@ impl DisplayListBuilder {
                             is_link_hover,
                             contrast_cache,
                         ),
-                    });
+                        metrics,
+                    );
                 }
             }
 
             if cell.attrs.strikethrough() && cell.ch != ' ' {
-                list.line_quads[row].push(LineQuad {
+                push_line_run(
+                    &mut list.line_quads[row],
                     row,
                     col,
-                    width_cells: cell.width().max(1),
-                    kind: LineKind::Strike,
-                    style: UnderlineStyle::Single,
-                    color: resolve_fg_glyphon(
+                    cell.width().max(1),
+                    LineKind::Strike,
+                    UnderlineStyle::Single,
+                    resolve_fg_glyphon(
                         fg,
                         cell.attrs.dim(),
                         bold,
@@ -753,17 +852,19 @@ impl DisplayListBuilder {
                         skip_contrast,
                         contrast_cache,
                     ),
-                });
+                    metrics,
+                );
             }
 
             if cell.attrs.overline() && cell.ch != ' ' {
-                list.line_quads[row].push(LineQuad {
+                push_line_run(
+                    &mut list.line_quads[row],
                     row,
                     col,
-                    width_cells: cell.width().max(1),
-                    kind: LineKind::Over,
-                    style: UnderlineStyle::Single,
-                    color: resolve_fg_glyphon(
+                    cell.width().max(1),
+                    LineKind::Over,
+                    UnderlineStyle::Single,
+                    resolve_fg_glyphon(
                         fg,
                         cell.attrs.dim(),
                         bold,
@@ -773,7 +874,8 @@ impl DisplayListBuilder {
                         skip_contrast,
                         contrast_cache,
                     ),
-                });
+                    metrics,
+                );
             }
 
             // SGR 5 (blink): oculta el glifo de texto en la fase "off".
@@ -1039,6 +1141,7 @@ mod tests {
             font_config.size as f32,
             font_config.line_height,
             font_config.glyph_offset,
+            1.0,
         )
     }
 
@@ -1068,6 +1171,7 @@ mod tests {
             family,
             &DamageSnapshot::Full,
             false,
+            true,
             true,
             true,
             false,
@@ -1111,6 +1215,50 @@ mod tests {
             false,
             true,
             blink_on,
+            true,
+            false,
+            &mut None,
+            &mut None,
+            &mut contrast_cache,
+            &mut strings,
+            &mut run_shape_cache,
+        );
+        list
+    }
+
+    /// Como `build_full_blink` pero controla tambien el foco de ventana.
+    #[allow(clippy::too_many_arguments)]
+    fn build_full_focus(
+        term: &Term,
+        metrics: &CellMetrics,
+        theme: &ThemeConfig,
+        row_sources: &[&[Cell]],
+        cols: usize,
+        rows: usize,
+        family: &str,
+        blink_on: bool,
+        window_focused: bool,
+    ) -> DisplayList {
+        let palette = test_palette(theme);
+        let mut list = DisplayList::default();
+        let mut contrast_cache = ContrastCache::default();
+        let mut strings = GlyphStrings::new();
+        let mut run_shape_cache = crate::renderer::RunShapeCache::new();
+        DisplayListBuilder::build(
+            &mut list,
+            term,
+            metrics,
+            &palette,
+            theme.dim_alpha,
+            row_sources,
+            cols,
+            rows,
+            family,
+            &DamageSnapshot::Full,
+            false,
+            true,
+            blink_on,
+            window_focused,
             false,
             &mut None,
             &mut None,
@@ -1151,6 +1299,7 @@ mod tests {
             &DamageSnapshot::Full,
             false,
             builtin_box_drawing,
+            true,
             true,
             false,
             &mut None,
@@ -1699,6 +1848,7 @@ mod tests {
             false,
             true,
             true,
+            true,
             false,
             &mut None,
             &mut None,
@@ -1726,6 +1876,7 @@ mod tests {
             &family,
             &snap,
             false,
+            true,
             true,
             true,
             false,
@@ -2048,6 +2199,133 @@ mod tests {
         );
     }
 
+    #[test]
+    fn curly_underline_run_emite_un_solo_quad_con_altura_visible() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let word = "error";
+        let mut row = vec![Cell::default(); word.len()];
+        for (i, ch) in word.chars().enumerate() {
+            row[i].ch = ch;
+            row[i].attrs.set_underline_style(UnderlineStyle::Curly);
+        }
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let mut term = Term::default();
+        term.cursor_visible = false;
+
+        let list = build_full(
+            &term,
+            &metrics,
+            &theme,
+            &row_sources,
+            word.len(),
+            1,
+            &family,
+        );
+        let unders: Vec<_> = list
+            .line_quads_flat()
+            .filter(|q| q.kind == LineKind::Under && q.style == UnderlineStyle::Curly)
+            .collect();
+        assert_eq!(
+            unders.len(),
+            1,
+            "run continuo debe fusionarse en un LineQuad"
+        );
+        assert_eq!(unders[0].col, 0);
+        assert_eq!(unders[0].width_cells, word.len() as u8);
+
+        let cg = super::super::decorations::line_quad(
+            unders[0].row,
+            unders[0].col,
+            unders[0].width_cells,
+            unders[0].kind,
+            unders[0].style,
+            &metrics,
+            unders[0].color,
+        );
+        assert!(
+            cg.height >= 3.0,
+            "altura curly del LineQuad debe ser >= 3, got {}",
+            cg.height
+        );
+    }
+
+    #[test]
+    fn cursor_block_sin_foco_es_contorno_sin_parpadeo() {
+        let theme = ThemeConfig::default();
+        let metrics = test_metrics();
+        let family = FontConfig::default().family;
+        let mut row = vec![Cell::default(); 3];
+        row[1].ch = 'X';
+        let row_sources: Vec<&[Cell]> = vec![row.as_slice()];
+        let mut term = Term::new();
+        term.cursor.move_to(0, 1);
+        term.cursor_visible = true;
+        term.cursor_style = CursorStyle::Block;
+        term.cursor_blink_enabled = true;
+
+        let focused = build_full_focus(
+            &term,
+            &metrics,
+            &theme,
+            &row_sources,
+            3,
+            1,
+            &family,
+            true,
+            true,
+        );
+        let unfocused_on = build_full_focus(
+            &term,
+            &metrics,
+            &theme,
+            &row_sources,
+            3,
+            1,
+            &family,
+            true,
+            false,
+        );
+        let unfocused_off = build_full_focus(
+            &term,
+            &metrics,
+            &theme,
+            &row_sources,
+            3,
+            1,
+            &family,
+            false,
+            false,
+        );
+
+        assert!(
+            focused.bg_quads_flat().any(|q| q.row == 0 && q.col == 1),
+            "con foco: bloque solido"
+        );
+        assert!(
+            focused.cursor_outlines_flat().next().is_none(),
+            "con foco: sin contorno"
+        );
+        assert!(
+            !unfocused_on
+                .bg_quads_flat()
+                .any(|q| q.row == 0 && q.col == 1),
+            "sin foco: sin relleno de bloque"
+        );
+        assert!(
+            unfocused_on
+                .cursor_outlines_flat()
+                .any(|&(r, c)| r == 0 && c == 1),
+            "sin foco: contorno"
+        );
+        assert_eq!(
+            unfocused_on.cursor_outlines_flat().count(),
+            unfocused_off.cursor_outlines_flat().count(),
+            "sin foco el contorno no depende de la fase de parpadeo"
+        );
+    }
+
     /// Cursor block sobre una celda con SGR 5 (blink): ambos ocultos en fase
     /// off; el glifo de texto blink y el bg del cursor se suprimen.
     #[test]
@@ -2177,6 +2455,7 @@ mod tests {
             false,
             true,
             true,
+            true,
             false,
             &mut None,
             &mut None,
@@ -2206,6 +2485,7 @@ mod tests {
             14.0,
             1.0,
             crate::config::GlyphOffset { x: 0.0, y: 0.0 },
+            1.0,
         );
         let mut swash_cache = glyphon::SwashCache::new();
         let term = Term::default();
@@ -2238,6 +2518,7 @@ mod tests {
                 &family,
                 &DamageSnapshot::Full,
                 false,
+                true,
                 true,
                 true,
                 true,

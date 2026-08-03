@@ -316,6 +316,10 @@ pub struct Renderer {
     font_size: f32,
     /// Factor de escala DPI de la ventana (1.0 = 96 DPI).
     scale_factor: f32,
+    /// True mientras la ventana tiene el foco del SO.
+    window_focused: bool,
+    /// El foco cambio desde el ultimo frame: invalidar la fila del cursor.
+    window_focus_dirty: bool,
     /// Padding horizontal configurado (puntos logicos).
     padding_x: u16,
     /// Padding vertical configurado (puntos logicos).
@@ -554,6 +558,7 @@ impl Renderer {
                 x: glyph_offset.x * scale_factor,
                 y: glyph_offset.y * scale_factor,
             },
+            scale_factor,
         );
         let cell_w = cell_metrics.cell_w;
         let cell_h = cell_metrics.cell_h;
@@ -635,6 +640,8 @@ impl Renderer {
             icon_availability: std::collections::HashMap::new(),
             font_size,
             scale_factor,
+            window_focused: true,
+            window_focus_dirty: false,
             padding_x: 0,
             padding_y: 0,
             cell_metrics,
@@ -676,6 +683,7 @@ impl Renderer {
                 x: self.glyph_offset.x * self.scale_factor,
                 y: self.glyph_offset.y * self.scale_factor,
             },
+            self.scale_factor,
         );
         self.cell_metrics.padding_x = pad_x;
         self.cell_metrics.padding_y = pad_y;
@@ -738,6 +746,15 @@ impl Renderer {
         }
         self.reset_aux_buffers();
         (self.cell_w, self.cell_h)
+    }
+
+    /// Actualiza el foco de ventana. Sin foco el cursor pasa a contorno y
+    /// deja de parpadear; el cambio invalida solo la fila del cursor.
+    pub fn set_window_focused(&mut self, focused: bool) {
+        if self.window_focused != focused {
+            self.window_focused = focused;
+            self.window_focus_dirty = true;
+        }
     }
 
     /// Aplica cambios de fuente desde config (familia, metricas o fallback).
@@ -1319,6 +1336,8 @@ impl Renderer {
             self.config.height,
             default_fg_color,
             &extra_areas,
+            self.cell_metrics.cell_w,
+            self.scale_factor,
         )?;
         let prepare_us = t_prepare.elapsed().as_secs_f64() * 1_000_000.0;
 
@@ -1409,6 +1428,7 @@ impl Renderer {
             row_cache,
             &DamageSnapshot::Cells(Vec::new()),
             &mut pane_glyphs,
+            self.window_focused,
         )?;
         self.handle_glyph_cache_saturation();
         out.extend(pane_glyphs);
@@ -1529,7 +1549,7 @@ impl Renderer {
                 let new_cursor = term
                     .cursor_visible
                     .then_some((term.cursor.row, term.cursor.col));
-                if self.prev_cursor_pos != new_cursor {
+                if self.prev_cursor_pos != new_cursor || self.window_focus_dirty {
                     for pos in [self.prev_cursor_pos, new_cursor].into_iter().flatten() {
                         if pos.0 < rows_count {
                             damage.mark_row_dirty(pos.0, cols_count);
@@ -1537,6 +1557,7 @@ impl Renderer {
                     }
                 }
                 self.prev_cursor_pos = new_cursor;
+                self.window_focus_dirty = false;
             }
         }
 
@@ -1644,6 +1665,7 @@ impl Renderer {
             show_scrollback,
             self.builtin_box_drawing,
             blink_on,
+            self.window_focused,
             self.ligatures,
             &mut font_system,
             &mut swash_cache,
@@ -1667,6 +1689,7 @@ impl Renderer {
             row_cache,
             &damage,
             &mut pane_glyphs,
+            self.window_focused,
         )?;
         self.handle_glyph_cache_saturation();
         out.extend(pane_glyphs);
@@ -1782,6 +1805,8 @@ impl Renderer {
             self.config.height,
             default_fg,
             &extra_areas,
+            self.cell_metrics.cell_w,
+            self.scale_factor,
         )?;
         let prepare_us = t_prepare.elapsed().as_secs_f64() * 1_000_000.0;
 
@@ -1892,6 +1917,8 @@ impl Renderer {
             self.config.height,
             default_fg,
             &[consent_area],
+            self.cell_metrics.cell_w,
+            self.scale_factor,
         )?;
         let prepare_us = t_prepare.elapsed().as_secs_f64() * 1_000_000.0;
 
@@ -3222,8 +3249,8 @@ mod tests {
         let mut fs = terminal_fallback::create_font_system();
         let fam = FontConfig::default().family;
         let offset = GlyphOffset { x: 0.0, y: 0.0 };
-        let small = CellMetrics::measure(&mut fs, &fam, 12.0, 1.0, offset);
-        let big = CellMetrics::measure(&mut fs, &fam, 24.0, 1.0, offset);
+        let small = CellMetrics::measure(&mut fs, &fam, 12.0, 1.0, offset, 1.0);
+        let big = CellMetrics::measure(&mut fs, &fam, 24.0, 1.0, offset, 1.0);
         assert!(big.cell_w > small.cell_w);
         assert!(big.cell_h > small.cell_h);
     }

@@ -3785,6 +3785,21 @@ impl ApplicationHandler<UserEvent> for App {
                 self.set_occluded(hidden);
             }
             WindowEvent::Focused(focused) => {
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.set_window_focused(focused);
+                }
+                self.blink_focus.set_window_focused(focused);
+                // Invalidar el pane enfocado para que el cursor cambie de
+                // forma (bloque ↔ contorno) en el siguiente frame.
+                if let Some(idx) = self.session_by_id(self.tabs[self.focused].focused()) {
+                    self.sessions[idx].session.dirty = true;
+                    if let Ok(mut guard) = self.sessions[idx].session.term.try_lock() {
+                        guard.mark_dirty();
+                    }
+                }
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
+                }
                 let Ok(guard) = self.focused_term().try_lock() else {
                     self.watchdog.note_term_lock_busy();
                     return;

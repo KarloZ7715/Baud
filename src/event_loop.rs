@@ -85,12 +85,14 @@ const DRAIN_TIME_BUDGET: Duration = Duration::from_millis(4);
 #[derive(Debug)]
 pub struct BlinkFocus {
     current: Mutex<SessionId>,
+    window_focused: AtomicBool,
 }
 
 impl BlinkFocus {
     pub fn new(id: SessionId) -> Arc<Self> {
         Arc::new(Self {
             current: Mutex::new(id),
+            window_focused: AtomicBool::new(true),
         })
     }
 
@@ -100,8 +102,13 @@ impl BlinkFocus {
         }
     }
 
+    pub fn set_window_focused(&self, focused: bool) {
+        self.window_focused.store(focused, Ordering::Relaxed);
+    }
+
     pub fn is_active(&self, id: SessionId) -> bool {
-        self.current.lock().is_ok_and(|guard| *guard == id)
+        self.window_focused.load(Ordering::Relaxed)
+            && self.current.lock().is_ok_and(|guard| *guard == id)
     }
 }
 
