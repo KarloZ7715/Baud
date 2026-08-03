@@ -869,6 +869,20 @@ impl App {
         &self.focused_session().term
     }
 
+    /// Toma el `Term` enfocado recuperando el guard si el mutex está
+    /// envenenado. Un panic bajo el guard (p. ej. al construir el frame) lo
+    /// envenena, y a partir de ahí un `expect` convertiría cada scroll en la
+    /// muerte del proceso. El estado puede quedar raro un frame; morir es peor.
+    fn lock_focused_term(&self) -> std::sync::MutexGuard<'_, Term> {
+        match self.focused_term().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("term mutex envenenado, recuperando guard");
+                poisoned.into_inner()
+            }
+        }
+    }
+
     fn cursor_visible_cell(&self) -> (usize, usize) {
         self.focused_term()
             .lock()
@@ -2351,7 +2365,7 @@ impl App {
     }
 
     fn scroll_lines(&mut self, n: isize) {
-        let mut guard = self.focused_term().lock().expect("term mutex poisoned");
+        let mut guard = self.lock_focused_term();
         if n > 0 {
             if !guard.alt_screen {
                 let max_offset = guard.scrollback_len();
@@ -2366,7 +2380,7 @@ impl App {
     }
 
     fn scroll_page(&mut self, dir: isize) {
-        let mut guard = self.focused_term().lock().expect("term mutex poisoned");
+        let mut guard = self.lock_focused_term();
         let page = guard.grid.rows_count as isize - 1;
         if dir > 0 {
             if !guard.alt_screen {
@@ -2382,7 +2396,7 @@ impl App {
     }
 
     fn scroll_to_bottom(&mut self) {
-        let mut guard = self.focused_term().lock().expect("term mutex poisoned");
+        let mut guard = self.lock_focused_term();
         guard.scrollback_offset = 0;
         guard.mark_dirty();
         drop(guard);
@@ -2390,7 +2404,7 @@ impl App {
     }
 
     fn jump_to_prev_prompt(&mut self) {
-        let mut guard = self.focused_term().lock().expect("term mutex poisoned");
+        let mut guard = self.lock_focused_term();
         guard.jump_to_prev_prompt();
         guard.mark_dirty();
         drop(guard);
@@ -2398,7 +2412,7 @@ impl App {
     }
 
     fn jump_to_next_prompt(&mut self) {
-        let mut guard = self.focused_term().lock().expect("term mutex poisoned");
+        let mut guard = self.lock_focused_term();
         guard.jump_to_next_prompt();
         guard.mark_dirty();
         drop(guard);
@@ -5312,6 +5326,27 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn scroll_sobrevive_a_un_term_envenenado() {
+        let term = Arc::new(Mutex::new(Term::new()));
+
+        // Envenena el mutex igual que lo haria un panic bajo el guard.
+        let poisoner = Arc::clone(&term);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().expect("term mutex");
+            panic!("simula el panic de build_custom_glyphs bajo el guard");
+        })
+        .join();
+        assert!(term.is_poisoned(), "el mutex quedo envenenado");
+
+        let mut app = test_app(Arc::clone(&term));
+        // No debe paniquear: un scroll sobre un Term envenenado degrada, no mata.
+        app.scroll_lines(-1);
+
+        let guard = app.lock_focused_term();
+        assert_eq!(guard.scrollback_offset, 0);
     }
 
     #[test]
