@@ -175,7 +175,26 @@ impl CellRenderer {
         out: &mut Vec<CustomGlyph>,
         window_focused: bool,
     ) -> Result<(), String> {
-        let rows = display_list.bg_quads.len();
+        // Se indexan cuatro campos con el mismo `row_idx`; tomar el numero de
+        // filas de uno solo convierte cualquier desajuste en un panic del hilo
+        // GUI con el Term bloqueado, que lo envenena y mata la sesion. El
+        // minimo pinta una fila de menos durante un frame: el siguiente
+        // rebuild las realinea.
+        let rows = display_list
+            .bg_quads
+            .len()
+            .min(display_list.line_quads.len())
+            .min(display_list.text_glyphs.len())
+            .min(display_list.cursor_bars.len());
+        debug_assert_eq!(
+            rows,
+            display_list.bg_quads.len(),
+            "display list desalineada: bg={} line={} text={} cursor_bars={}",
+            display_list.bg_quads.len(),
+            display_list.line_quads.len(),
+            display_list.text_glyphs.len(),
+            display_list.cursor_bars.len(),
+        );
         let force_full = row_cache.len() != rows;
         if force_full {
             row_cache.clear();
@@ -1585,6 +1604,54 @@ mod tests {
 
         assert_eq!(row_cache.len(), 3);
         assert_eq!(row_cache[0][0].color, Some(new_color));
+    }
+
+    /// Una display list con campos de distinta longitud no debe paniquear: el
+    /// panic ocurre en el hilo GUI con el `Term` bloqueado, lo envenena, y se
+    /// lleva por delante la sesion entera (ver el log del 2026-08-01 22:02).
+    /// Pintar una fila de menos durante un frame es un fallo proporcionado.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn build_custom_glyphs_no_paniquea_con_filas_desalineadas() {
+        let (mut font_system, _) = test_metrics();
+        let mut swash_cache = glyphon::SwashCache::new();
+        let mut glyph_cache = GlyphCache::new();
+        let mut strings = GlyphStrings::new();
+        let theme = crate::config::ThemeConfig::default();
+        let palette = Palette::from_theme(&theme);
+        let metrics = row_cache_test_metrics();
+        let mut contrast_cache = ContrastCache::default();
+
+        let mut list = build_two_row_list(glyphon::Color::rgb(255, 0, 0));
+        // bg_quads con una fila mas que el resto: exactamente la forma del panic
+        // "index out of bounds: the len is 35 but the index is 35".
+        list.bg_quads.push(Vec::new());
+        assert!(list.bg_quads.len() > list.text_glyphs.len());
+
+        let mut row_cache = Vec::new();
+        let mut out = Vec::new();
+
+        CellRenderer::build_custom_glyphs(
+            &list,
+            &metrics,
+            &palette,
+            theme.dim_alpha,
+            &mut glyph_cache,
+            &mut strings,
+            &mut font_system,
+            &mut swash_cache,
+            &mut contrast_cache,
+            &mut row_cache,
+            &DamageSnapshot::Full,
+            &mut out,
+        )
+        .expect("build no debe fallar con filas desalineadas");
+
+        assert_eq!(
+            row_cache.len(),
+            list.text_glyphs.len(),
+            "se procesan las filas que existen en TODOS los campos"
+        );
     }
 
     /// `CustomGlyph.top` viene horneado en pixeles (a diferencia de
