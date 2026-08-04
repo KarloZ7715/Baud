@@ -1644,6 +1644,7 @@ mod tests {
             &mut row_cache,
             &DamageSnapshot::Full,
             &mut out,
+            true,
         )
         .expect("build no debe fallar con filas desalineadas");
 
