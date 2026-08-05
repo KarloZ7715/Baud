@@ -62,15 +62,24 @@ DECRQM (`CSI Ps $p` / `CSI ? Ps $p`) answers all modes listed above, plus IRM (m
 | OSC | Purpose | Status |
 | --- | --- | --- |
 | 0, 1, 2 | Set icon name and/or window title | Supported |
-| 4 | Palette color set/query | Supported |
+| 4 | Palette color set and query | Supported — accepts chained `index;spec` pairs; a query answers the active color, falling back to the theme |
 | 7 | Report current working directory (`file://` URI) | Supported |
 | 8 | Hyperlinks | Supported — see [Notifications and URLs](../features/notifications-and-urls.md) |
 | 9 | Desktop notification | Supported (opt-in) — see [Notifications and URLs](../features/notifications-and-urls.md) |
-| 10, 11, 12 | Foreground/background/cursor color set/query | Supported |
+| 10, 11, 12 | Foreground/background/cursor color set and query | Supported — a query always answers, falling back to the theme; extra parameters advance the dynamic color |
 | 52 | Clipboard read/write | Supported — see [Selection and clipboard](../features/selection-and-clipboard.md) |
+| 104 | Reset palette colors | Supported — resets every index when given no parameters |
+| 110, 111, 112 | Reset foreground/background/cursor color | Supported |
 | 133 | Semantic prompts (shell integration) | Supported — see [Shell integration](../features/shell-integration.md) |
 | 1337 | iTerm2 terminal feature reporting | Partially supported — only the `Capabilities` subcommand; the other iTerm2 extensions are ignored |
 | 777 | `notify` (rxvt-style desktop notification) | Supported (opt-in), other 777 subcommands are not |
+
+Colors set by a full-screen application are undone when it leaves the alternate screen, even if
+it never sends the matching reset sequence. Colors set from the primary screen — a palette script
+sourced from your shell profile, for instance — persist for the whole session.
+
+Color specifications follow xterm: `rgb:R/G/B` with one to four hex digits per channel, and the
+legacy `#RGB`, `#RRGGBB`, `#RRRGGGBBB` and `#RRRRGGGGBBBB` forms.
 
 Every other OSC number is parsed and ignored rather than erroring.
 
