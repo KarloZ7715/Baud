@@ -518,6 +518,16 @@ pub struct LinkRange {
     pub end_col: usize,
 }
 
+/// Features que Baud anuncia en `OSC 1337 ; Capabilities`. La presencia
+/// significa soporte y la ausencia, ausencia: quedarse corto sólo renuncia
+/// a una optimización de la aplicación, mientras que anunciar de más la
+/// hace fallar.
+///
+/// `T2` color RGB, `Cw` portapapeles OSC 52, `M` ratón, `U` Unicode básico,
+/// `B` bracketed paste, `Gs` tachado, `Go` overline, `Sy` actualización
+/// sincronizada, `H` hyperlinks OSC 8, `No` notificaciones OSC 9.
+const OSC1337_CAPABILITIES: &str = "T2CwMUBGsGoSyHNo";
+
 /// Estado completo del terminal virtual.
 pub struct Term {
     /// Grid de caracteres (pantalla primaria).
@@ -2971,6 +2981,17 @@ impl vte::Perform for Term {
                     self.emit_notification(&title, &body);
                 }
             }
+            1337 => {
+                // Sólo `Capabilities`. El resto del espacio de OSC 1337 son
+                // extensiones propietarias que Baud no implementa; se ignoran
+                // en silencio, que es lo que espera el protocolo.
+                if params.get(1).is_some_and(|p| *p == b"Capabilities") {
+                    let st = Self::osc_st(bell_terminated);
+                    let resp = format!("\x1b]1337;Capabilities={OSC1337_CAPABILITIES}");
+                    self.respond(resp.as_bytes());
+                    self.respond(st);
+                }
+            }
             _ => tracing::debug!("OSC {} no implementado", osc_num),
         }
     }
@@ -3998,6 +4019,34 @@ mod tests {
             term.take_pty_response(),
             b"\x1bP1+r524742=382f382f38\x1b\\".to_vec()
         );
+    }
+
+    #[test]
+    fn osc_1337_capabilities_responde_las_features() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]1337;Capabilities\x1b\\");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1b]1337;Capabilities=T2CwMUBGsGoSyHNo\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc_1337_capabilities_respeta_el_terminador_bel() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]1337;Capabilities\x07");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1b]1337;Capabilities=T2CwMUBGsGoSyHNo\x07".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc_1337_ignora_los_subcomandos_no_soportados() {
+        // Subcomando File u otros: sin respuesta, no un error.
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]1337;File=inline=1\x1b\\");
+        assert!(term.take_pty_response().is_empty());
     }
 
     #[test]
