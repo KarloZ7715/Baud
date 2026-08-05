@@ -57,9 +57,15 @@ impl Default for ProcessConfig {
 mod tests {
     use super::*;
 
+    // SHELL es global al proceso: sin este lock, correr estos dos tests en
+    // paralelo hace que uno observe el valor que el otro acaba de fijar.
+    #[cfg(unix)]
+    static SHELL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[cfg(unix)]
     #[test]
     fn test_process_config_default_usa_shell_env() {
+        let _guard = SHELL_ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::set_var("SHELL", "/usr/bin/zsh");
         }
@@ -73,6 +79,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_process_config_default_resuelve_shell() {
+        let _guard = SHELL_ENV_LOCK.lock().unwrap();
         unsafe {
             std::env::remove_var("SHELL");
         }
