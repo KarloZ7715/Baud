@@ -3121,6 +3121,30 @@ impl vte::Perform for Term {
                     self.respond(st);
                 }
             }
+            104 => {
+                // Sin parámetros (o con el parámetro vacío) resetea los 256
+                // índices; con parámetros, sólo los listados.
+                if params.len() == 1 || params[1].is_empty() {
+                    self.runtime_palette = [None; 256];
+                } else {
+                    for param in &params[1..] {
+                        if let Some(idx) = std::str::from_utf8(param)
+                            .ok()
+                            .and_then(|s| s.parse::<u16>().ok())
+                            .filter(|n| *n < 256)
+                        {
+                            self.runtime_palette[idx as usize] = None;
+                        }
+                    }
+                }
+                self.mark_colors_changed();
+            }
+            110..=112 => {
+                // Resetear borra el override, no escribe el default: así el
+                // color vuelve a seguir al tema si éste cambia después.
+                *self.color_override_mut(osc_num - 100) = None;
+                self.mark_colors_changed();
+            }
             _ => tracing::debug!("OSC {} no implementado", osc_num),
         }
     }
@@ -4048,6 +4072,76 @@ mod tests {
         feed(&mut term, b"\x1b]4;999;#ff0000\x07");
         assert_eq!(term.runtime_palette, antes);
         assert!(term.take_pty_response().is_empty());
+    }
+
+    #[test]
+    fn osc_111_devuelve_el_fondo_al_tema() {
+        // Copilot fija OSC 11 al entrar; el reset tiene que deshacerlo.
+        let mut term = Term::new();
+        term.default_colors.background = (0x0a, 0x0a, 0x0a);
+        feed(&mut term, b"\x1b]11;#0D1117\x07");
+        assert_eq!(term.bg_override, Some((0x0d, 0x11, 0x17)));
+        feed(&mut term, b"\x1b]111\x07");
+        assert_eq!(term.bg_override, None);
+        feed(&mut term, b"\x1b]11;?\x07");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1b]11;rgb:0a0a/0a0a/0a0a\x07".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc_110_y_112_resetean_fg_y_cursor() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]10;#111111\x07");
+        feed(&mut term, b"\x1b]12;#222222\x07");
+        feed(&mut term, b"\x1b]110\x07");
+        feed(&mut term, b"\x1b]112\x07");
+        assert_eq!(term.fg_override, None);
+        assert_eq!(term.cursor_color_override, None);
+    }
+
+    #[test]
+    fn osc_112_vuelve_al_cursor_del_usuario_no_al_del_tema() {
+        // Reset significa "deshaz lo que hizo la aplicacion", no "olvida la
+        // preferencia del usuario".
+        let mut term = Term::new();
+        term.default_colors.cursor = (0xd9, 0x77, 0x57);
+        term.config_cursor_color = Some((0xff, 0xff, 0xff));
+        feed(&mut term, b"\x1b]12;#222222\x07");
+        feed(&mut term, b"\x1b]112\x07");
+        assert_eq!(term.config_cursor_color, Some((0xff, 0xff, 0xff)));
+        feed(&mut term, b"\x1b]12;?\x07");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1b]12;rgb:ffff/ffff/ffff\x07".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc_104_sin_parametros_resetea_toda_la_paleta() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]4;1;#ff0000;200;#00ff00\x07");
+        feed(&mut term, b"\x1b]104\x07");
+        assert!(term.runtime_palette.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn osc_104_con_indices_resetea_solo_esos() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]4;1;#ff0000;2;#00ff00\x07");
+        feed(&mut term, b"\x1b]104;1\x07");
+        assert_eq!(term.runtime_palette[1], None);
+        assert_eq!(term.runtime_palette[2], Some((0x00, 0xff, 0x00)));
+    }
+
+    #[test]
+    fn osc_reset_marca_el_frame_sucio() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]11;#0D1117\x07");
+        let _ = term.take_dirty();
+        feed(&mut term, b"\x1b]111\x07");
+        assert!(term.take_dirty(), "un reset de color invalida el frame");
     }
 
     #[test]
