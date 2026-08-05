@@ -1153,13 +1153,28 @@ impl Term {
         self.dcs_payload.clear();
     }
 
-    /// Resuelve capacidades terminfo anunciadas via XTGETTCAP.
-    /// Bool afirmativa sin `=`; string/numerica con valor hex ASCII.
+    /// Capacidades que Baud reporta por `XTGETTCAP`.
+    ///
+    /// Regla: sólo entra aquí lo que está implementado de verdad. Anunciar una
+    /// capacidad ausente hace que la aplicación la use y falle de una forma
+    /// mucho más difícil de diagnosticar que si no se anuncia.
     fn xtgettcap_value(name: &str) -> Option<XtgettcapReply> {
         match name {
+            // Color directo: SGR 38/48 con `;2;r;g;b`.
             "RGB" => Some(XtgettcapReply::String("8/8/8")),
             "Tc" => Some(XtgettcapReply::Boolean),
             "colors" | "Co" => Some(XtgettcapReply::String("256")),
+            "setrgbf" => Some(XtgettcapReply::String("\x1b[38;2;%p1%d;%p2%d;%p3%dm")),
+            "setrgbb" => Some(XtgettcapReply::String("\x1b[48;2;%p1%d;%p2%d;%p3%dm")),
+            // Portapapeles por OSC 52.
+            "Ms" => Some(XtgettcapReply::String("\x1b]52;%p1%s;%p2%s\x07")),
+            // Actualizacion sincronizada (modo privado 2026).
+            "Sync" => Some(XtgettcapReply::String("\x1b[?2026%?%p1%{1}%-%tl%eh%;")),
+            // Subrayados con estilo (`SGR 4:1` a `4:5`).
+            "smulx" => Some(XtgettcapReply::String("\x1b[4:%p1%dm")),
+            "Su" => Some(XtgettcapReply::Boolean),
+            // Nombre de terminal: el mismo `TERM` que se exporta al PTY.
+            "TN" => Some(XtgettcapReply::String("xterm-256color")),
             _ => None,
         }
     }
@@ -3917,6 +3932,72 @@ mod tests {
         );
         feed(&mut term, b"\x1bP+q\x1b\\");
         assert_eq!(term.take_pty_response(), b"\x1bP0+r\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_responde_ms_para_osc52() {
+        // Hex 4d73 == "Ms" (clipboard vía OSC 52).
+        let mut term = Term::new();
+        feed(&mut term, b"\x1bP+q4d73\x1b\\");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1bP1+r4d73=1b5d35323b25703125733b257032257307\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn xtgettcap_responde_sync_y_smulx() {
+        let mut term = Term::new();
+        // 53796e63 == "Sync"
+        feed(&mut term, b"\x1bP+q53796e63\x1b\\");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1bP1+r53796e63=1b5b3f32303236253f257031257b317d252d25746c256568253b\x1b\\".to_vec()
+        );
+        // 736d756c78 == "smulx"
+        feed(&mut term, b"\x1bP+q736d756c78\x1b\\");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1bP1+r736d756c78=1b5b343a25703125646d\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn xtgettcap_su_es_booleana() {
+        let mut term = Term::new();
+        // 5375 == "Su"
+        feed(&mut term, b"\x1bP+q5375\x1b\\");
+        assert_eq!(term.take_pty_response(), b"\x1bP1+r5375\x1b\\".to_vec());
+    }
+
+    #[test]
+    fn xtgettcap_tn_reporta_el_term_exportado() {
+        let mut term = Term::new();
+        // 544e == "TN"
+        feed(&mut term, b"\x1bP+q544e\x1b\\");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1bP1+r544e=787465726d2d323536636f6c6f72\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn xtgettcap_sigue_diciendo_que_no_a_lo_que_no_tiene() {
+        let mut term = Term::new();
+        // 626365 == "bce"
+        feed(&mut term, b"\x1bP+q626365\x1b\\");
+        assert_eq!(term.take_pty_response(), b"\x1bP0+r626365\x1b\\".to_vec());
+    }
+
+    #[test]
+    fn xtgettcap_no_cambia_las_capacidades_previas() {
+        let mut term = Term::new();
+        // 524742 == "RGB"
+        feed(&mut term, b"\x1bP+q524742\x1b\\");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1bP1+r524742=382f382f38\x1b\\".to_vec()
+        );
     }
 
     #[test]
