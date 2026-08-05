@@ -528,6 +528,20 @@ pub struct LinkRange {
 /// sincronizada, `H` hyperlinks OSC 8, `No` notificaciones OSC 9.
 const OSC1337_CAPABILITIES: &str = "T2CwMUBGsGoSyHNo";
 
+/// Overrides de color vigentes al entrar en alt screen.
+///
+/// Se restauran al salir para que una TUI de pantalla completa que cambia la
+/// paleta y no manda el reset (grok, copilot) no deje el terminal cambiado.
+/// Los cambios hechos desde la pantalla primaria no pasan por aquí y
+/// persisten, que es lo que espera un `base16-shell`.
+#[derive(Debug, Clone)]
+struct ColorSnapshot {
+    palette: [Option<(u8, u8, u8)>; 256],
+    foreground: Option<(u8, u8, u8)>,
+    background: Option<(u8, u8, u8)>,
+    cursor: Option<(u8, u8, u8)>,
+}
+
 /// Estado completo del terminal virtual.
 pub struct Term {
     /// Grid de caracteres (pantalla primaria).
@@ -600,6 +614,10 @@ pub struct Term {
     /// consulta OSC sin override y a lo que vuelve un reset. Lo siembra
     /// `Config::apply_to_term`.
     pub default_colors: crate::color::DefaultColors,
+    /// Foto de los colores tomada al entrar en alt screen. `None` fuera de
+    /// alt screen. Va en `Box` porque la paleta ocupa 1 KiB y `Term` se
+    /// clona en varios caminos.
+    alt_screen_colors: Option<Box<ColorSnapshot>>,
     /// `[cursor].color` del usuario, si lo hay. Se guarda aparte de
     /// `default_colors.cursor` porque es un nivel de precedencia propio entre
     /// el `OSC 12` de la aplicación y el color del tema.
@@ -763,6 +781,7 @@ impl Term {
             bg_override: None,
             cursor_color_override: None,
             default_colors: crate::color::DefaultColors::default(),
+            alt_screen_colors: None,
             config_cursor_color: None,
             mouse_reporting: MouseReporting::default(),
             copy_mode: None,
@@ -1445,6 +1464,16 @@ impl Term {
 
     /// Entra a alt screen. Guarda el cursor primario, limpia la pantalla alt.
     pub fn enter_alt_screen(&mut self) {
+        // Sólo la primera entrada fotografía: un `CSI ?1049h` repetido dentro
+        // de la misma TUI no puede pisar la foto con sus propios cambios.
+        if !self.alt_screen {
+            self.alt_screen_colors = Some(Box::new(ColorSnapshot {
+                palette: self.runtime_palette,
+                foreground: self.fg_override,
+                background: self.bg_override,
+                cursor: self.cursor_color_override,
+            }));
+        }
         let rows = self.cursor.rows_count;
         let cols = self.cursor.cols_count;
         self.alt_grid = Grid::new_sized(rows, cols);
@@ -1463,6 +1492,12 @@ impl Term {
             self.cursor.move_to(row, col);
         }
         self.pending_wrap = false;
+        if let Some(snapshot) = self.alt_screen_colors.take() {
+            self.runtime_palette = snapshot.palette;
+            self.fg_override = snapshot.foreground;
+            self.bg_override = snapshot.background;
+            self.cursor_color_override = snapshot.cursor;
+        }
         // Invalidar el frame cacheado del renderer: el grid activo cambio, asi
         // que la display list anterior (del alt screen) no puede reusarse.
         self.mark_dirty();
@@ -4142,6 +4177,55 @@ mod tests {
         let _ = term.take_dirty();
         feed(&mut term, b"\x1b]111\x07");
         assert!(term.take_dirty(), "un reset de color invalida el frame");
+    }
+
+    #[test]
+    fn salir_de_alt_screen_deshace_los_colores_de_la_tui() {
+        // Reproduce lo que hace grok: entra en alt screen, pinta el cursor de
+        // otro color y sale sin mandar OSC 112.
+        let mut term = Term::new();
+        term.default_colors.cursor = (0xff, 0xff, 0xff);
+        feed(&mut term, b"\x1b[?1049h");
+        feed(&mut term, b"\x1b]12;rgb:c8/c8/c8\x07");
+        assert_eq!(term.cursor_color_override, Some((200, 200, 200)));
+        feed(&mut term, b"\x1b[?1049l");
+        assert_eq!(term.cursor_color_override, None);
+    }
+
+    #[test]
+    fn salir_de_alt_screen_deshace_fondo_y_paleta() {
+        // Reproduce lo que hace copilot con OSC 11.
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?1049h");
+        feed(&mut term, b"\x1b]11;#0D1117\x07");
+        feed(&mut term, b"\x1b]4;1;#ff0000\x07");
+        feed(&mut term, b"\x1b[?1049l");
+        assert_eq!(term.bg_override, None);
+        assert_eq!(term.runtime_palette[1], None);
+    }
+
+    #[test]
+    fn los_colores_de_la_pantalla_primaria_sobreviven_a_una_tui() {
+        // Un base16-shell en el .zshrc fija la paleta antes de que arranque
+        // ninguna TUI: salir de alt screen no puede borrarlo.
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]4;1;#abcdef\x07");
+        feed(&mut term, b"\x1b[?1049h");
+        feed(&mut term, b"\x1b[?1049l");
+        assert_eq!(term.runtime_palette[1], Some((0xab, 0xcd, 0xef)));
+    }
+
+    #[test]
+    fn entrar_dos_veces_en_alt_screen_no_pierde_la_foto() {
+        // `CSI ?1049h` repetido no debe re-fotografiar sobre los colores que la
+        // propia TUI ya cambio.
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]11;#abcdef\x07");
+        feed(&mut term, b"\x1b[?1049h");
+        feed(&mut term, b"\x1b]11;#000000\x07");
+        feed(&mut term, b"\x1b[?1049h");
+        feed(&mut term, b"\x1b[?1049l");
+        assert_eq!(term.bg_override, Some((0xab, 0xcd, 0xef)));
     }
 
     #[test]
