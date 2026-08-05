@@ -6,7 +6,7 @@ Full documentation is published at <https://karloz7715.github.io/Baud/>.
 
 ## [Unreleased]
 
-## [0.0.9](https://github.com/KarloZ7715/Baud/compare/v0.0.8...v0.0.9) - 2026-08-05
+## [0.1.0](https://github.com/KarloZ7715/Baud/compare/v0.0.8...v0.1.0) - 2026-08-05
 
 ### Added
 
