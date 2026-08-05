@@ -1063,6 +1063,7 @@ impl Renderer {
         let palette = Palette {
             theme,
             overrides: &overrides,
+            defaults: crate::color::DefaultColors::from_theme(theme),
             bold_is_bright: bold_is_bright || theme.bold_is_bright,
         };
         let (fg_r, fg_g, fg_b) = palette.rgb(Color::Default, false);
@@ -1454,6 +1455,7 @@ impl Renderer {
         let palette = Palette {
             theme,
             overrides: &overrides,
+            defaults: crate::color::DefaultColors::from_theme(theme),
             bold_is_bright: bold_is_bright || theme.bold_is_bright,
         };
         let mut damage = term.take_active_grid_damage();

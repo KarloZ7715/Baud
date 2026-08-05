@@ -174,6 +174,7 @@ pub fn build_sample_custom_glyphs(
     let palette = Palette {
         theme,
         overrides: &overrides,
+        defaults: crate::color::DefaultColors::from_theme(theme),
         bold_is_bright: bold_is_bright || theme.bold_is_bright,
     };
 
