@@ -850,7 +850,12 @@ impl Term {
                 7 => self.attrs.reverse = true,
                 8 => self.attrs.invisible = true,
                 9 => self.attrs.strikethrough = true,
-                22 => self.attrs.bold = false,
+                22 => {
+                    // ECMA-48 define 22 como "normal intensity": cancela a la
+                    // vez la negrita (1) y el atenuado (2).
+                    self.attrs.bold = false;
+                    self.attrs.dim = false;
+                }
                 23 => self.attrs.italic = false,
                 24 => {
                     self.attrs.underline = false;
@@ -6443,5 +6448,41 @@ mod tests {
         assert_eq!(Term::parse_color_spec(b"#zzz"), None);
         // No-ASCII: no debe entrar en panico al cortar el slice.
         assert_eq!(Term::parse_color_spec("#áéí".as_bytes()), None);
+    }
+
+    #[test]
+    fn sgr_22_cancela_el_atenuado() {
+        // ECMA-48: 22 es "normal intensity", cancela 1 y 2.
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[2m");
+        assert!(term.attrs.dim);
+        feed(&mut term, b"\x1b[22m");
+        assert!(!term.attrs.dim, "22 tiene que apagar el atenuado");
+        assert!(!term.attrs.bold);
+    }
+
+    #[test]
+    fn sgr_22_cancela_negrita_y_atenuado_a_la_vez() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[1;2m");
+        assert!(term.attrs.bold && term.attrs.dim);
+        feed(&mut term, b"\x1b[22m");
+        assert!(!term.attrs.bold && !term.attrs.dim);
+    }
+
+    #[test]
+    fn texto_tras_un_bloque_atenuado_no_se_queda_atenuado() {
+        // El patron real: una TUI escribe una linea secundaria atenuada y vuelve
+        // a intensidad normal sin pasar por SGR 0.
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[2mtenue\x1b[22mnormal");
+        assert!(
+            term.grid.rows[0][0].attrs.dim(),
+            "la 't' de 'tenue' va atenuada"
+        );
+        assert!(
+            !term.grid.rows[0][5].attrs.dim(),
+            "la 'n' de 'normal' no puede seguir atenuada"
+        );
     }
 }

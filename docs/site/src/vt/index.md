@@ -30,6 +30,7 @@ What Baud's ANSI/VT parser accepts, so an application developer can predict its 
 | Attribute | Codes | Status |
 | --- | --- | --- |
 | Reset, bold, dim, italic | 0, 1, 2, 3 | Supported |
+| Attribute off | 22 (normal intensity, cancels both bold and dim), 23, 24, 25, 27, 28, 29, 55 | Supported |
 | Underline (single, double, curly, dotted, dashed) | 4, `4:1`–`4:5` | Supported |
 | Blink, reverse, invisible, strikethrough, overline | 5/6, 7, 8, 9, 53 | Supported |
 | 16-color and bright foreground/background | 30–37, 40–47, 90–97, 100–107 | Supported |
