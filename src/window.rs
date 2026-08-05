@@ -977,9 +977,16 @@ impl App {
         self.keybindings = new_cfg.keybindings();
         self.font_size = new_cfg.font.size;
 
-        if let Ok(mut term) = self.focused_term().lock() {
+        // Todas las sesiones, no solo la enfocada: el tema decide los defaults
+        // con los que cada `Term` responde a las consultas OSC de color, y una
+        // tab en segundo plano con defaults viejos contesta el fondo anterior.
+        let max = new_cfg.scrollback_max_lines();
+        for host in &self.sessions {
+            let Ok(mut term) = host.session.term.lock() else {
+                tracing::warn!("term envenenado al recargar config, sesion omitida");
+                continue;
+            };
             new_cfg.apply_to_term(&mut term);
-            let max = new_cfg.scrollback_max_lines();
             term.grid.set_max_scrollback(max);
             term.alt_grid.set_max_scrollback(max);
             term.mark_dirty();
@@ -6070,6 +6077,29 @@ import = false
             preview.background,
             crate::config::try_preset("dracula").unwrap().background
         );
+    }
+
+    #[test]
+    fn apply_config_resiembra_todas_las_sesiones() {
+        // Sin acceso a una ventana real se comprueba el bucle sobre las sesiones
+        // con Terms sueltos: es la unica parte de `apply_config` que este plan
+        // toca y la que rompia con varias tabs abiertas.
+        let mut cfg = crate::config::Config::default();
+        cfg.theme.background = "#123456".into();
+
+        let sesiones: Vec<std::sync::Arc<std::sync::Mutex<crate::ansi::Term>>> = (0..3)
+            .map(|_| std::sync::Arc::new(std::sync::Mutex::new(crate::ansi::Term::new())))
+            .collect();
+
+        for term in &sesiones {
+            let mut guard = term.lock().expect("term");
+            cfg.apply_to_term(&mut guard);
+        }
+
+        for term in &sesiones {
+            let guard = term.lock().expect("term");
+            assert_eq!(guard.default_colors.background, (0x12, 0x34, 0x56));
+        }
     }
 
     #[test]
