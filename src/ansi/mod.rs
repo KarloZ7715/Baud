@@ -596,6 +596,14 @@ pub struct Term {
     pub fg_override: Option<(u8, u8, u8)>,
     pub bg_override: Option<(u8, u8, u8)>,
     pub cursor_color_override: Option<(u8, u8, u8)>,
+    /// Colores base de la sesión, tomados del tema: lo que se responde a una
+    /// consulta OSC sin override y a lo que vuelve un reset. Lo siembra
+    /// `Config::apply_to_term`.
+    pub default_colors: crate::color::DefaultColors,
+    /// `[cursor].color` del usuario, si lo hay. Se guarda aparte de
+    /// `default_colors.cursor` porque es un nivel de precedencia propio entre
+    /// el `OSC 12` de la aplicación y el color del tema.
+    pub config_cursor_color: Option<(u8, u8, u8)>,
     pub mouse_reporting: MouseReporting,
     pub copy_mode: Option<CopyModeState>,
     pub search: Option<SearchState>,
@@ -754,6 +762,8 @@ impl Term {
             fg_override: None,
             bg_override: None,
             cursor_color_override: None,
+            default_colors: crate::color::DefaultColors::default(),
+            config_cursor_color: None,
             mouse_reporting: MouseReporting::default(),
             copy_mode: None,
             search: None,

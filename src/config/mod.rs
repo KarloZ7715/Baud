@@ -1473,12 +1473,12 @@ impl Config {
                 CursorStyle::Block
             }
         };
-        if let Some(ref color) = self.cursor.color {
-            let (r, g, b) = parse_hex(color);
-            term.cursor_color_override = Some((r, g, b));
-        } else {
-            term.cursor_color_override = None;
-        }
+        // Los defaults del `Term` salen del tema activo. `[cursor].color` va a
+        // su propio campo, no a `cursor_color_override`: el override es solo
+        // para lo que fija la aplicacion via OSC, y un OSC 112 tiene que
+        // volver a la preferencia del usuario, no borrarla.
+        term.default_colors = crate::color::DefaultColors::from_theme(&self.theme);
+        term.config_cursor_color = self.cursor.color.as_deref().map(parse_hex);
         term.cursor_blink_enabled = self.cursor.blink;
         term.blink_interval_ms = self.cursor.blink_interval_ms;
     }
@@ -1875,7 +1875,8 @@ style = "underline"
         cfg.apply_to_term(&mut term);
         assert!(!term.allow_osc52_read);
         assert_eq!(term.cursor_style, CursorStyle::Underline);
-        assert_eq!(term.cursor_color_override, Some((0xaa, 0xbb, 0xcc)));
+        assert_eq!(term.cursor_color_override, None);
+        assert_eq!(term.config_cursor_color, Some((0xaa, 0xbb, 0xcc)));
     }
 
     #[test]
@@ -2493,15 +2494,61 @@ import = "/ruta/que/no/existe/foot.ini"
     }
 
     #[test]
-    fn apply_to_term_limpia_color_cursor_si_ausente() {
+    fn apply_to_term_no_toca_el_override_de_cursor_de_la_app() {
+        // Un OSC 12 de la aplicacion no se pierde al recargar la config.
         use crate::ansi::{CursorStyle, Term};
 
+        let mut cfg = Config::default();
+        cfg.cursor.color = None;
         let mut term = Term::new();
         term.cursor_color_override = Some((1, 2, 3));
-        let cfg: Config = toml::from_str("[cursor]\nstyle = \"bar\"\n").unwrap();
         cfg.apply_to_term(&mut term);
-        assert_eq!(term.cursor_style, CursorStyle::Bar);
+        assert_eq!(term.cursor_style, CursorStyle::Block);
+        assert_eq!(term.cursor_color_override, Some((1, 2, 3)));
+    }
+
+    #[test]
+    fn apply_to_term_siembra_default_colors_desde_el_tema() {
+        let mut cfg = Config::default();
+        cfg.theme.background = "#0a0a0a".into();
+        cfg.theme.foreground = "#ececec".into();
+        cfg.theme.cursor = "#d97757".into();
+        cfg.theme.red = "#e85d5d".into();
+        cfg.cursor.color = None;
+        let mut term = crate::ansi::Term::new();
+        cfg.apply_to_term(&mut term);
+
+        assert_eq!(term.default_colors.background, (0x0a, 0x0a, 0x0a));
+        assert_eq!(term.default_colors.foreground, (0xec, 0xec, 0xec));
+        assert_eq!(term.default_colors.cursor, (0xd9, 0x77, 0x57));
+        assert_eq!(term.default_colors.ansi[1], (0xe8, 0x5d, 0x5d));
+    }
+
+    #[test]
+    fn apply_to_term_guarda_cursor_color_en_su_propio_nivel() {
+        // `[cursor].color` es preferencia del usuario, no un cambio hecho por la
+        // aplicacion: no puede vivir en `cursor_color_override` (un OSC 112 lo
+        // borraria) ni fundirse con el color del tema (la vista previa del theme
+        // picker dejaria de previsualizar el cursor).
+        let mut cfg = Config::default();
+        cfg.theme.cursor = "#d97757".into();
+        cfg.cursor.color = Some("#ffffff".into());
+        let mut term = crate::ansi::Term::new();
+        cfg.apply_to_term(&mut term);
+
+        assert_eq!(term.default_colors.cursor, (0xd9, 0x77, 0x57));
+        assert_eq!(term.config_cursor_color, Some((0xff, 0xff, 0xff)));
         assert_eq!(term.cursor_color_override, None);
+    }
+
+    #[test]
+    fn apply_to_term_sin_cursor_color_deja_el_nivel_vacio() {
+        let mut cfg = Config::default();
+        cfg.cursor.color = None;
+        let mut term = crate::ansi::Term::new();
+        term.config_cursor_color = Some((1, 1, 1));
+        cfg.apply_to_term(&mut term);
+        assert_eq!(term.config_cursor_color, None);
     }
 
     #[test]

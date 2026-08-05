@@ -2827,6 +2827,13 @@ pub(crate) fn selection_fg_glyphon(theme: &ThemeConfig) -> glyphon::Color {
     glyphon::Color::rgb(r, g, b)
 }
 
+/// Puente de test: `src/color/mod.rs` compara su resolución de la paleta 256
+/// contra ésta para que las dos no se separen.
+#[cfg(test)]
+pub(crate) fn ansi_256_to_rgb_for_test(index: u8, theme: &ThemeConfig) -> (u8, u8, u8) {
+    ansi_256_to_rgb(index, theme)
+}
+
 /// Mapea un color indexado 0-255 a RGB segun el estandar ISO-8613-3.
 ///
 /// Los indices 0-15 usan los colores ANSI del tema; 16-231 usan un cubo 6x6x6;
