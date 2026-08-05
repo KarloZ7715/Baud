@@ -68,6 +68,7 @@ DECRQM (`CSI Ps $p` / `CSI ? Ps $p`) answers all modes listed above, plus IRM (m
 | 10, 11, 12 | Foreground/background/cursor color set/query | Supported |
 | 52 | Clipboard read/write | Supported — see [Selection and clipboard](../features/selection-and-clipboard.md) |
 | 133 | Semantic prompts (shell integration) | Supported — see [Shell integration](../features/shell-integration.md) |
+| 1337 | iTerm2 terminal feature reporting | Partially supported — only the `Capabilities` subcommand; the other iTerm2 extensions are ignored |
 | 777 | `notify` (rxvt-style desktop notification) | Supported (opt-in), other 777 subcommands are not |
 
 Every other OSC number is parsed and ignored rather than erroring.
@@ -92,7 +93,13 @@ Every other OSC number is parsed and ignored rather than erroring.
 | CSI 5 n | Device status report (always reports OK) | Supported |
 | CSI 6 n / CSI ? 6 n | Cursor position report | Supported |
 | CSI Ps SP q | DECSCUSR, set cursor style | Supported |
-| DCS + q (XTGETTCAP) | Answers `RGB`, `Tc`, and `colors`/`Co` only | Partially supported |
+| DCS + q (XTGETTCAP) | Answers `RGB`, `Tc`, `colors`/`Co`, `setrgbf`, `setrgbb`, `Ms`, `Sync`, `smulx`, `Su` and `TN` | Supported |
+
+Primary Device Attributes answers `CSI ?62;22c`: a VT220 with ANSI colour. Baud reports nothing
+beyond that on purpose. The other DA1 parameters stand for sixel graphics, selective erase,
+user-defined keys, national replacement character sets, the locator, windowing and rectangular
+editing — none of which Baud implements. Claiming them would make applications reach for
+features that are not there, which fails in a far more confusing way than not claiming them.
 
 See [TERM and terminfo](term-and-terminfo.md) for what Baud reports as its terminal type and why.
 
