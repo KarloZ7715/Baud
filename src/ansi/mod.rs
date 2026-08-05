@@ -3079,6 +3079,28 @@ impl vte::Perform for Term {
                     self.respond(st);
                 }
             }
+            66 => {
+                // Protocolo de dimensionado de texto: `OSC 66 ; meta ; TEXTO`.
+                // El texto va dentro del escape, asi que ignorar el OSC no lo
+                // deja a tamaño normal: lo borra. Baud no dibuja texto
+                // escalado, pero si imprime el contenido.
+                //
+                // El texto puede llevar `;`, que vte trocea en parametros: hay
+                // que volver a unirlo, igual que con las URIs de OSC 8.
+                const MAX_TEXTO: usize = 4096;
+                let Some(primero) = params.get(2) else {
+                    return;
+                };
+                let mut texto = String::from_utf8_lossy(primero).into_owned();
+                for extra in params.iter().skip(3) {
+                    texto.push(';');
+                    texto.push_str(&String::from_utf8_lossy(extra));
+                }
+                for ch in texto.chars().take(MAX_TEXTO) {
+                    self.print(ch);
+                }
+                self.clear_pending_grapheme();
+            }
             _ => tracing::debug!("OSC {} no implementado", osc_num),
         }
     }
@@ -3103,6 +3125,16 @@ mod tests {
     fn feed(term: &mut Term, data: &[u8]) {
         let mut parser = vte::Parser::new();
         parser.advance(term, data);
+    }
+
+    /// Lee la fila 0 del grid activo como String, sin espacios de cola.
+    fn fila0(term: &Term) -> String {
+        let fila = term.grid.rows[0].as_slice();
+        fila.iter()
+            .map(|c| c.ch)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
     }
 
     #[test]
@@ -6574,5 +6606,41 @@ mod tests {
             Color::Indexed(208),
             "una secuencia truncada no debe fijar un color a medias"
         );
+    }
+
+    #[test]
+    fn osc_66_imprime_su_texto() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]66;w=1;a\x1b\\");
+        assert_eq!(fila0(&term), "a");
+    }
+
+    #[test]
+    fn osc_66_con_escalado_imprime_a_tamano_normal() {
+        // `s=2` no se soporta; el texto tiene que salir igual, no perderse.
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]66;s=2;hola\x1b\\");
+        assert_eq!(fila0(&term), "hola");
+    }
+
+    #[test]
+    fn osc_66_conserva_los_punto_y_coma_del_texto() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]66;w=0;a;b\x1b\\");
+        assert_eq!(fila0(&term), "a;b");
+    }
+
+    #[test]
+    fn osc_66_sin_texto_no_hace_nada() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]66;w=1\x1b\\");
+        assert_eq!(fila0(&term), "");
+    }
+
+    #[test]
+    fn osc_66_avanza_el_cursor() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]66;w=0;abc\x1b\\");
+        assert_eq!(term.cursor.col, 3);
     }
 }
