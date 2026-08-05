@@ -2973,24 +2973,33 @@ impl vte::Perform for Term {
                 }
             }
             4 => {
-                let idx = params
-                    .get(1)
-                    .and_then(|p| std::str::from_utf8(p).ok())
-                    .and_then(|s| s.parse::<usize>().ok());
-                let spec = params.get(2).copied().unwrap_or(b"");
-                if let Some(i) = idx {
+                // `OSC 4` acepta pares índice/color encadenados:
+                // `4;1;spec;2;spec`. Un índice fuera de 0..=255 o una spec
+                // ilegible sólo descarta ese par.
+                for chunk in params[1..].chunks(2) {
+                    let Some(idx) = chunk
+                        .first()
+                        .and_then(|p| std::str::from_utf8(p).ok())
+                        .and_then(|s| s.parse::<u16>().ok())
+                        .filter(|n| *n < 256)
+                        .map(|n| n as u8)
+                    else {
+                        continue;
+                    };
+                    let Some(spec) = chunk.get(1).copied() else {
+                        continue;
+                    };
                     if spec == b"?" {
-                        if let Some(rgb) = self.runtime_palette[i] {
-                            let body = Self::rgb_to_osc16(rgb);
-                            let st = Self::osc_st(bell_terminated);
-                            let resp = format!("\x1b]4;{i};{body}");
-                            self.respond(resp.as_bytes());
-                            self.respond(st);
-                        }
+                        let rgb = self.runtime_palette[idx as usize]
+                            .unwrap_or_else(|| self.default_colors.indexed(idx));
+                        let body = Self::rgb_to_osc16(rgb);
+                        let st = Self::osc_st(bell_terminated);
+                        let resp = format!("\x1b]4;{idx};{body}");
+                        self.respond(resp.as_bytes());
+                        self.respond(st);
                     } else if let Some(rgb) = Self::parse_color_spec(spec) {
-                        if i < 256 {
-                            self.runtime_palette[i] = Some(rgb);
-                        }
+                        self.runtime_palette[idx as usize] = Some(rgb);
+                        self.mark_colors_changed();
                     }
                 }
             }
@@ -4000,6 +4009,45 @@ mod tests {
         let _ = term.take_dirty();
         feed(&mut term, b"\x1b]11;#0D1117\x07");
         assert!(term.take_dirty(), "un cambio de color invalida el frame");
+    }
+
+    #[test]
+    fn osc_4_responde_el_color_de_la_paleta_sin_override() {
+        let mut term = Term::new();
+        term.default_colors.ansi[1] = (0xe8, 0x5d, 0x5d);
+        feed(&mut term, b"\x1b]4;1;?\x1b\\");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1b]4;1;rgb:e8e8/5d5d/5d5d\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc_4_responde_indices_altos_sin_tema() {
+        // 16..255 no dependen del tema: cubo 6x6x6 y rampa de grises.
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]4;231;?\x1b\\");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1b]4;231;rgb:ffff/ffff/ffff\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc_4_acepta_varios_pares() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]4;1;#ff0000;2;#00ff00\x07");
+        assert_eq!(term.runtime_palette[1], Some((0xff, 0x00, 0x00)));
+        assert_eq!(term.runtime_palette[2], Some((0x00, 0xff, 0x00)));
+    }
+
+    #[test]
+    fn osc_4_ignora_indices_fuera_de_rango() {
+        let mut term = Term::new();
+        let antes = term.runtime_palette;
+        feed(&mut term, b"\x1b]4;999;#ff0000\x07");
+        assert_eq!(term.runtime_palette, antes);
+        assert!(term.take_pty_response().is_empty());
     }
 
     #[test]
