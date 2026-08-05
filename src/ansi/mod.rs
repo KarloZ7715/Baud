@@ -795,6 +795,29 @@ impl Term {
         row.min(self.scroll_region.1)
     }
 
+    /// Lee un color de un parametro SGR con subparametros separados por dos
+    /// puntos: `38:5:n`, `38:2:r:g:b` y la forma de la ITU T.416
+    /// `38:2:<espacio de color>:r:g:b`, donde el identificador de espacio se
+    /// ignora.
+    ///
+    /// El truncado a `u8` es el mismo que hace la rama de punto y coma: las
+    /// dos formas tienen que comportarse igual ante un valor fuera de rango.
+    fn color_from_subparams(p: &[u16]) -> Option<Color> {
+        match p.get(1).copied()? {
+            5 => Some(Color::Indexed(p.get(2).copied()? as u8)),
+            2 => {
+                // Seis campos significan que el tercero es el identificador de
+                // espacio de color; con cinco, el RGB empieza ya ahi.
+                let base = if p.len() >= 6 { 3 } else { 2 };
+                let r = p.get(base).copied()? as u8;
+                let g = p.get(base + 1).copied()? as u8;
+                let b = p.get(base + 2).copied()? as u8;
+                Some(Color::Rgb(r, g, b))
+            }
+            _ => None,
+        }
+    }
+
     /// Aplica SGR leyendo subparametros agrupados de vte (p.ej. 4:3, 58;2;...).
     fn apply_sgr(&mut self, params: &vte::Params) {
         let slices: Vec<&[u16]> = params.iter().collect();
@@ -833,6 +856,21 @@ impl Term {
                         self.attrs.underline_style = UnderlineStyle::Dashed;
                     }
                     _ => {}
+                }
+                i += 1;
+                continue;
+            }
+            if p.len() >= 2 && matches!(p[0], 38 | 48 | 58) {
+                // Forma con dos puntos: el selector y el color viven como
+                // subparametros del mismo parametro, no como parametros
+                // sueltos. La forma con punto y coma llega con `p.len() == 1`
+                // y no entra aqui.
+                if let Some(color) = Self::color_from_subparams(p) {
+                    match p[0] {
+                        38 => self.attrs.fg = color,
+                        48 => self.attrs.bg = color,
+                        _ => self.attrs.underline_color = color,
+                    }
                 }
                 i += 1;
                 continue;
@@ -6483,6 +6521,58 @@ mod tests {
         assert!(
             !term.grid.rows[0][5].attrs.dim(),
             "la 'n' de 'normal' no puede seguir atenuada"
+        );
+    }
+
+    #[test]
+    fn sgr_38_con_dos_puntos_fija_truecolor() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[38:2::217:119:87m");
+        assert_eq!(term.attrs.fg, Color::Rgb(217, 119, 87));
+    }
+
+    #[test]
+    fn sgr_38_con_dos_puntos_sin_espacio_de_color() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[38:2:217:119:87m");
+        assert_eq!(term.attrs.fg, Color::Rgb(217, 119, 87));
+    }
+
+    #[test]
+    fn sgr_48_y_58_con_dos_puntos() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[48:2::1:2:3m");
+        assert_eq!(term.attrs.bg, Color::Rgb(1, 2, 3));
+        feed(&mut term, b"\x1b[58:2::4:5:6m");
+        assert_eq!(term.attrs.underline_color, Color::Rgb(4, 5, 6));
+    }
+
+    #[test]
+    fn sgr_38_con_dos_puntos_indexado() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[38:5:208m");
+        assert_eq!(term.attrs.fg, Color::Indexed(208));
+    }
+
+    #[test]
+    fn sgr_con_punto_y_coma_sigue_funcionando() {
+        // La rama nueva no puede interceptar la forma clasica.
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[38;2;217;119;87m");
+        assert_eq!(term.attrs.fg, Color::Rgb(217, 119, 87));
+        feed(&mut term, b"\x1b[38;5;208m");
+        assert_eq!(term.attrs.fg, Color::Indexed(208));
+    }
+
+    #[test]
+    fn sgr_con_dos_puntos_incompleto_no_cambia_el_color() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[38;5;208m");
+        feed(&mut term, b"\x1b[38:2::1m");
+        assert_eq!(
+            term.attrs.fg,
+            Color::Indexed(208),
+            "una secuencia truncada no debe fijar un color a medias"
         );
     }
 }

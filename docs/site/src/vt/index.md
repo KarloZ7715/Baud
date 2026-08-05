@@ -34,7 +34,7 @@ What Baud's ANSI/VT parser accepts, so an application developer can predict its 
 | Underline (single, double, curly, dotted, dashed) | 4, `4:1`–`4:5` | Supported |
 | Blink, reverse, invisible, strikethrough, overline | 5/6, 7, 8, 9, 53 | Supported |
 | 16-color and bright foreground/background | 30–37, 40–47, 90–97, 100–107 | Supported |
-| 256-color and truecolor foreground/background/underline | 38, 48, 58 (`;5;n` or `;2;r;g;b`) | Supported |
+| 256-color and truecolor foreground/background/underline | 38, 48, 58 — semicolon form (`;5;n`, `;2;r;g;b`) and colon form (`:5:n`, `:2:r:g:b`, `:2::r:g:b`) | Supported |
 | Default foreground/background/underline color | 39, 49, 59 | Supported |
 
 ## DEC private modes (`CSI ? Pm h`/`l`)
