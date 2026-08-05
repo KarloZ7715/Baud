@@ -6,6 +6,105 @@ Full documentation is published at <https://karloz7715.github.io/Baud/>.
 
 ## [Unreleased]
 
+## [0.1.0](https://github.com/KarloZ7715/Baud/compare/v0.0.8...v0.1.0) - 2026-08-05
+
+### Added
+
+- *(windows)* GUI subsystem, parent console attach and file log
+- *(diagnostics)* reload log level and route panics to the log file
+- *(notifications)* send desktop notifications via notify-rust
+- *(config)* add render.vsync option
+- *(config)* add DecorationsKind enum with backward-compatible bool parsing
+- *(window,renderer)* implement custom title bar, DPI scaling and interactions
+- *(ansi)* add PackedColor for compact Cell storage
+- *(ansi)* add AttrFlags, PackedAttrs and underline color table
+- *(diagnostics)* add latency probe for key-to-present
+- *(config)* auto-detect monitor refresh for max_fps
+- *(diagnostics)* log surface format at startup
+- *(renderer)* add font.text_contrast mask curve
+- *(themes)* add light variant for each preset family
+- *(theme)* raise default minimum_contrast to 1.5
+- *(config)* add light/dark theme model with mode, dark, light
+- *(config)* resolve system color scheme via winit and xdg portal
+- *(theme-picker)* group presets by polarity and write to dark/light
+- *(renderer)* draw window buttons as vector masks
+- *(renderer)* fuse active tab with grid in variant C
+- *(renderer)* match active tab opacity with grid
+- *(tab-bar)* resolve tab title from cwd and process
+- *(tab-bar)* add activity dot for background sessions
+- *(tab-bar)* detect foreground process for tab titles on unix
+- *(tab-bar)* show process icon in tab titles when the font supports it
+- *(tab-bar)* animate tab and window button hover backgrounds
+- *(tab-bar)* merge foreground process titles, icons and hover fades
+- *(renderer)* outline unfocused cursor and merge decoration line runs
+- *(renderer)* expand process icon map for tab titles
+- *(ansi)* report the terminfo capabilities Baud actually has
+- *(ansi)* answer the OSC 1337 capabilities query
+- *(ansi)* give Term the session default colors
+- *(ansi)* accept colon-separated extended color parameters
+- *(ansi)* always answer OSC 10/11/12 color queries
+- *(ansi)* always answer OSC 4 queries and accept color pairs
+- *(ansi)* implement OSC 104/110/111/112 color resets
+
+### Fixed
+
+- *(windows)* embed app icon in exe and fix MSI external cab dependency
+- *(windows)* open URLs via ShellExecuteW
+- *(windows)* initialize COM before showing toast notifications
+- *(windows)* gate COM init helper on cfg(not(test)) too
+- *(renderer)* widen interned family id to u32
+- *(updater)* allow share/man/man1 in release archive validation
+- *(window)* clear stale tab hover when moving to title-bar buttons or resize border
+- *(renderer)* use row count in ensure_rows
+- *(event_loop)* recover poisoned term mutex in drain
+- *(renderer)* catch wgpu configure panic in resize
+- *(renderer)* prefer non-sRGB 8-bit surface format
+- *(renderer)* linearize clear color on sRGB targets
+- *(renderer)* pick glyph color mode by surface
+- *(themes)* restore embedded presets to upstream fidelity
+- *(renderer)* decouple chrome text contrast from user setting
+- *(tab-bar)* contain tab chrome and close scrub within the bar
+- *(renderer)* keep pane dirty when the frame came from cache
+- *(window)* clear pane dirty on present, not on redraw request
+- *(renderer)* repair curly underline and DPI-aware decoration metrics
+- *(renderer)* degrade instead of panicking on misaligned rows
+- *(window)* recover from a poisoned term mutex instead of panicking
+- *(pty)* treat EIO on the master as end of session
+- *(watchdog)* do not report a sleeping event loop as stalled
+- *(renderer)* pass window_focused arg in misaligned-rows test
+- *(ansi)* parse X11 color specs with xterm coverage
+- *(window)* apply reloaded config to every session
+- *(ansi)* let SGR 22 cancel faint as well as bold
+- *(ansi)* restore color overrides when a TUI leaves alt screen
+- *(pty)* serialize shell env tests to avoid a data race
+
+### Performance
+
+- *(renderer)* gate glyph reset on metrics change
+- *(window)* skip resize grid dump unless debug on
+- *(window)* tune wgpu device and surface for latency
+- *(window)* avoid blocking term lock in send_input
+- *(renderer)* make GlyphKey Copy via string interning
+- *(windows)* replace ConPTY polling with overlapped I/O
+- *(grapheme)* add ASCII/Latin-1 fast path
+- *(event_loop)* grow PTY read buffer to 64KiB
+- *(renderer)* make is_wide_continuation O(1)
+- *(renderer)* resolve family id once per build
+- *(renderer)* write text glyphs into caller buffer
+- *(renderer)* index glyph cache by dense id
+- *(renderer)* store display list per row
+- *(renderer)* cache custom glyphs per row
+- *(grid)* drop per-frame clone in GridDamage::take
+- *(grid)* recycle row buffers on scroll to avoid allocations
+- *(grid)* O(1) full-screen scroll via VecDeque
+- *(renderer)* reuse row cache instead of full rebuild on scroll
+- *(grid)* shrink Cell from 44 to 24 bytes
+- *(renderer)* cache ligature shaping and glyph key
+- *(renderer)* incremental scrollback scroll damage
+- *(event_loop)* add time budget to drain pass
+- *(event_loop)* let keyboard echo skip the max_fps throttle
+- *(event_loop)* yield after a drain pass with pending backlog
+
 ## [0.0.8](https://github.com/KarloZ7715/Baud/compare/v0.0.7...v0.0.8) - 2026-07-25
 
 ### Added
