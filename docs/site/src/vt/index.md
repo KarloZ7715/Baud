@@ -68,6 +68,7 @@ DECRQM (`CSI Ps $p` / `CSI ? Ps $p`) answers all modes listed above, plus IRM (m
 | 9 | Desktop notification | Supported (opt-in) — see [Notifications and URLs](../features/notifications-and-urls.md) |
 | 10, 11, 12 | Foreground/background/cursor color set/query | Supported |
 | 52 | Clipboard read/write | Supported — see [Selection and clipboard](../features/selection-and-clipboard.md) |
+| 66 | Text sizing protocol | Partially supported — the text is printed and `w=1`/`w=2` set the cell width of a single grapheme; scaling (`s`, `n`, `d`) and alignment (`v`, `h`) are ignored and the text is drawn at normal size |
 | 133 | Semantic prompts (shell integration) | Supported — see [Shell integration](../features/shell-integration.md) |
 | 1337 | iTerm2 terminal feature reporting | Partially supported — only the `Capabilities` subcommand; the other iTerm2 extensions are ignored |
 | 777 | `notify` (rxvt-style desktop notification) | Supported (opt-in), other 777 subcommands are not |
@@ -106,6 +107,9 @@ See [TERM and terminfo](term-and-terminfo.md) for what Baud reports as its termi
 
 ## Not supported
 
+- **Scaled text (`OSC 66` with `s`, `n` or `d`)** — the text is printed at normal size rather
+  than dropped. Drawing it scaled needs a grid cell that knows it belongs to a multi-cell block,
+  which is a change to the grid model rather than to the parser.
 - **Sixel graphics** — no support yet; tracked internally as follow-up work.
 - **Kitty graphics protocol** — no support yet; tracked internally as follow-up work.
 
