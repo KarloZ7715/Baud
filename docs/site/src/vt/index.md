@@ -68,6 +68,7 @@ DECRQM (`CSI Ps $p` / `CSI ? Ps $p`) answers all modes listed above, plus IRM (m
 | 9 | Desktop notification | Supported (opt-in) — see [Notifications and URLs](../features/notifications-and-urls.md) |
 | 10, 11, 12 | Foreground/background/cursor color set and query | Supported — a query always answers, falling back to the theme; extra parameters advance the dynamic color |
 | 52 | Clipboard read/write | Supported — see [Selection and clipboard](../features/selection-and-clipboard.md) |
+| 66 | Text sizing protocol | Partially supported — the text is printed and `w=1`/`w=2` set the cell width of a single grapheme; scaling (`s`, `n`, `d`) and alignment (`v`, `h`) are ignored and the text is drawn at normal size |
 | 104 | Reset palette colors | Supported — resets every index when given no parameters |
 | 110, 111, 112 | Reset foreground/background/cursor color | Supported |
 | 133 | Semantic prompts (shell integration) | Supported — see [Shell integration](../features/shell-integration.md) |
@@ -115,6 +116,9 @@ See [TERM and terminfo](term-and-terminfo.md) for what Baud reports as its termi
 
 ## Not supported
 
+- **Scaled text (`OSC 66` with `s`, `n` or `d`)** — the text is printed at normal size rather
+  than dropped. Drawing it scaled needs a grid cell that knows it belongs to a multi-cell block,
+  which is a change to the grid model rather than to the parser.
 - **Sixel graphics** — no support yet; tracked internally as follow-up work.
 - **Kitty graphics protocol** — no support yet; tracked internally as follow-up work.
 
