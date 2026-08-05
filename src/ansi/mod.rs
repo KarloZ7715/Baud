@@ -577,6 +577,10 @@ pub struct Term {
     pub grapheme_extras: Vec<String>,
     /// Buffer del grafema en construccion (UAX #29).
     pending_grapheme: String,
+    /// Ancho en celdas impuesto por un `OSC 66 ; w=N` en curso. Vive sólo
+    /// mientras se imprime el texto de ese escape; `print` lo consume en lugar
+    /// del ancho que calcula `unicode_width`.
+    forced_cell_width: Option<u8>,
     /// Celda base del grafema pendiente (`row`, `col`), si ya se escribio.
     last_grapheme_cell: Option<(usize, usize)>,
     current_link: Option<usize>,
@@ -749,6 +753,7 @@ impl Term {
             last_reconciled_trim: 0,
             grapheme_extras: Vec::new(),
             pending_grapheme: String::new(),
+            forced_cell_width: None,
             last_grapheme_cell: None,
             current_link: None,
             hovered_link: None,
@@ -977,6 +982,31 @@ impl Term {
     }
 
     /// Parsea una especificación de color X11, con la cobertura de
+    /// Lee los metadatos de `OSC 66` y devuelve el ancho en celdas que Baud
+    /// puede imponer, o `None` si hay que dejar que el terminal calcule.
+    ///
+    /// Sólo se acepta `w=1` y `w=2`, y sólo sin escalado: con `s`, `n` o `d`
+    /// distintos de 1 el ancho está expresado en celdas escaladas, que Baud no
+    /// dibuja, así que imponerlo desplazaría la línea en vez de alinearla.
+    fn osc66_forced_width(meta: &[u8]) -> Option<u8> {
+        let s = std::str::from_utf8(meta).ok()?;
+        let mut width = None;
+        for campo in s.split(':') {
+            if campo.is_empty() {
+                continue;
+            }
+            let (clave, valor) = campo.split_once('=')?;
+            match clave {
+                "w" => width = valor.parse::<u8>().ok(),
+                "s" | "n" | "d" if valor != "1" => {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        width.filter(|w| matches!(w, 1 | 2))
+    }
+
     /// `xparse_color` de xterm: `rgb:R/G/B` con 1..=4 dígitos hex por canal y
     /// la forma legacy `#RGB` / `#RRGGBB` / `#RRRGGGBBB` / `#RRRRGGGGBBBB`.
     ///
@@ -2326,7 +2356,10 @@ impl vte::Perform for Term {
             return;
         }
 
-        let c_width = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        let c_width = match self.forced_cell_width {
+            Some(w) => w as usize,
+            None => unicode_width::UnicodeWidthChar::width(c).unwrap_or(0),
+        };
         // Codepoints de ancho 0 que no extienden un cluster previo se ignoran.
         if c_width == 0 {
             self.clear_pending_grapheme();
@@ -3096,9 +3129,39 @@ impl vte::Perform for Term {
                     texto.push(';');
                     texto.push_str(&String::from_utf8_lossy(extra));
                 }
+
+                // El ancho sólo se impone sobre un único grafema: es el caso
+                // que documenta el protocolo (`w=2;🐈`) y el único que Baud
+                // puede cumplir sin una celda que sepa de bloques multicelda.
+                let un_solo_grafema = {
+                    let mut chars = texto.chars();
+                    match chars.next() {
+                        None => false,
+                        Some(primero) => {
+                            let mut acum = String::from(primero);
+                            let mut resto_extiende = true;
+                            for c in chars {
+                                if crate::grapheme::extends_last_cluster(&acum, c) {
+                                    acum.push(c);
+                                } else {
+                                    resto_extiende = false;
+                                    break;
+                                }
+                            }
+                            resto_extiende
+                        }
+                    }
+                };
+                let meta = params.get(1).copied().unwrap_or(b"");
+                self.forced_cell_width = if un_solo_grafema {
+                    Self::osc66_forced_width(meta)
+                } else {
+                    None
+                };
                 for ch in texto.chars().take(MAX_TEXTO) {
                     self.print(ch);
                 }
+                self.forced_cell_width = None;
                 self.clear_pending_grapheme();
             }
             _ => tracing::debug!("OSC {} no implementado", osc_num),
@@ -6642,5 +6705,59 @@ mod tests {
         let mut term = Term::new();
         feed(&mut term, b"\x1b]66;w=0;abc\x1b\\");
         assert_eq!(term.cursor.col, 3);
+    }
+
+    #[test]
+    fn osc_66_w2_ocupa_dos_celdas() {
+        let mut term = Term::new();
+        feed(&mut term, "\x1b]66;w=2;a\x1b\\".as_bytes());
+        let fila = term.grid.rows[0].as_slice();
+        assert_eq!(fila[0].ch, 'a');
+        assert_eq!(fila[0].width(), 2, "w=2 impone dos columnas");
+        assert_eq!(fila[1].width(), 0, "la segunda celda es continuacion");
+        assert_eq!(term.cursor.col, 2);
+    }
+
+    #[test]
+    fn osc_66_w1_estrecha_un_caracter_ancho() {
+        // El caso inverso: la app dice que su emoji ocupa una sola columna.
+        let mut term = Term::new();
+        feed(&mut term, "\x1b]66;w=1;\u{1f408}\x1b\\".as_bytes());
+        let fila = term.grid.rows[0].as_slice();
+        assert_eq!(fila[0].width(), 1);
+        assert_eq!(term.cursor.col, 1);
+    }
+
+    #[test]
+    fn osc_66_w2_con_varios_grafemas_usa_el_ancho_normal() {
+        // Fuera del caso que la especificacion documenta: no se impone el ancho.
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]66;w=2;ab\x1b\\");
+        let fila = term.grid.rows[0].as_slice();
+        assert_eq!(fila[0].width(), 1);
+        assert_eq!(fila[1].width(), 1);
+        assert_eq!(term.cursor.col, 2);
+    }
+
+    #[test]
+    fn osc_66_w_con_escalado_no_impone_ancho() {
+        // Con `s`, `n` o `d` el ancho esta en celdas escaladas, que Baud no pinta.
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]66;s=2:w=2;a\x1b\\");
+        assert_eq!(term.grid.rows[0].as_slice()[0].width(), 1);
+    }
+
+    #[test]
+    fn osc_66_no_deja_el_ancho_impuesto_pegado() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]66;w=2;a\x1b\\");
+        feed(&mut term, b"b");
+        let fila = term.grid.rows[0].as_slice();
+        assert_eq!(fila[2].ch, 'b');
+        assert_eq!(
+            fila[2].width(),
+            1,
+            "el ancho impuesto no sobrevive al escape"
+        );
     }
 }
