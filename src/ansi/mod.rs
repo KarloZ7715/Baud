@@ -1179,6 +1179,33 @@ impl Term {
         }
     }
 
+    /// Color efectivo de un color dinámico (OSC 10/11/12): el override que
+    /// haya fijado la aplicación, y si no el default de la sesión.
+    ///
+    /// Con opacidad de ventana < 1 se responde igualmente el color opaco del
+    /// tema: la aplicación sólo quiere saber si el fondo es claro u oscuro
+    /// para elegir paleta, y es lo que responden alacritty y kitty.
+    fn effective_dynamic_color(&self, osc: u16) -> (u8, u8, u8) {
+        match osc {
+            10 => self.fg_override.unwrap_or(self.default_colors.foreground),
+            11 => self.bg_override.unwrap_or(self.default_colors.background),
+            // El cursor tiene tres niveles: OSC de la aplicación,
+            // `[cursor].color` del usuario y color del tema.
+            12 => self
+                .cursor_color_override
+                .or(self.config_cursor_color)
+                .unwrap_or(self.default_colors.cursor),
+            _ => self.default_colors.foreground,
+        }
+    }
+
+    /// Un cambio de color afecta a cada celda ya pintada: hay que invalidar el
+    /// frame cacheado del renderer y marcar todo el grid como dañado.
+    fn mark_colors_changed(&mut self) {
+        self.mark_dirty();
+        self.active_grid_mut().damage.mark_all();
+    }
+
     fn respond_osc_color_query(&mut self, osc: u16, rgb: (u8, u8, u8), bell_terminated: bool) {
         let body = Self::rgb_to_osc16(rgb);
         let st = Self::osc_st(bell_terminated);
@@ -2988,13 +3015,19 @@ impl vte::Perform for Term {
                 }
             }
             10..=12 => {
-                let spec = params.get(1).copied().unwrap_or(b"");
-                if spec == b"?" {
-                    if let Some(rgb) = *self.color_override_mut(osc_num) {
-                        self.respond_osc_color_query(osc_num, rgb, bell_terminated);
+                // Cada parámetro extra avanza el color dinámico:
+                // `OSC 10;fg;bg` fija foreground y background de una vez.
+                for (code, spec) in (osc_num..).zip(params.iter().skip(1)) {
+                    if code > 12 {
+                        break;
                     }
-                } else if let Some(rgb) = Self::parse_color_spec(spec) {
-                    *self.color_override_mut(osc_num) = Some(rgb);
+                    if *spec == b"?" {
+                        let rgb = self.effective_dynamic_color(code);
+                        self.respond_osc_color_query(code, rgb, bell_terminated);
+                    } else if let Some(rgb) = Self::parse_color_spec(spec) {
+                        *self.color_override_mut(code) = Some(rgb);
+                        self.mark_colors_changed();
+                    }
                 }
             }
             52 => {
@@ -3897,6 +3930,76 @@ mod tests {
                 .collect::<String>(),
             "https://example.com"
         );
+    }
+
+    #[test]
+    fn osc_11_responde_el_fondo_del_tema_sin_override() {
+        // Es la consulta que hacen codex, copilot y opencode al arrancar.
+        let mut term = Term::new();
+        term.default_colors.background = (0x0a, 0x0a, 0x0a);
+        feed(&mut term, b"\x1b]11;?\x07");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1b]11;rgb:0a0a/0a0a/0a0a\x07".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc_10_y_12_responden_sin_override() {
+        let mut term = Term::new();
+        term.default_colors.foreground = (0xec, 0xec, 0xec);
+        term.default_colors.cursor = (0xff, 0xff, 0xff);
+        feed(&mut term, b"\x1b]10;?\x1b\\");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1b]10;rgb:ecec/ecec/ecec\x1b\\".to_vec()
+        );
+        feed(&mut term, b"\x1b]12;?\x1b\\");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1b]12;rgb:ffff/ffff/ffff\x1b\\".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc_12_prefiere_el_cursor_color_del_usuario() {
+        let mut term = Term::new();
+        term.default_colors.cursor = (0xd9, 0x77, 0x57);
+        term.config_cursor_color = Some((0xff, 0xff, 0xff));
+        feed(&mut term, b"\x1b]12;?\x07");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1b]12;rgb:ffff/ffff/ffff\x07".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc_11_responde_el_override_cuando_lo_hay() {
+        let mut term = Term::new();
+        term.default_colors.background = (0x0a, 0x0a, 0x0a);
+        feed(&mut term, b"\x1b]11;#0D1117\x07");
+        feed(&mut term, b"\x1b]11;?\x07");
+        assert_eq!(
+            term.take_pty_response(),
+            b"\x1b]11;rgb:0d0d/1111/1717\x07".to_vec()
+        );
+    }
+
+    #[test]
+    fn osc_10_multiparametro_fija_fg_y_bg() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b]10;#112233;#445566\x07");
+        assert_eq!(term.fg_override, Some((0x11, 0x22, 0x33)));
+        assert_eq!(term.bg_override, Some((0x44, 0x55, 0x66)));
+    }
+
+    #[test]
+    fn osc_de_color_marca_el_frame_sucio() {
+        // Cambiar el fondo repinta cada celda ya dibujada.
+        let mut term = Term::new();
+        let _ = term.take_dirty();
+        feed(&mut term, b"\x1b]11;#0D1117\x07");
+        assert!(term.take_dirty(), "un cambio de color invalida el frame");
     }
 
     #[test]
