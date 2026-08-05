@@ -923,34 +923,68 @@ impl Term {
         }
     }
 
+    /// Parsea una especificación de color X11, con la cobertura de
+    /// `xparse_color` de xterm: `rgb:R/G/B` con 1..=4 dígitos hex por canal y
+    /// la forma legacy `#RGB` / `#RRGGBB` / `#RRRGGGBBB` / `#RRRRGGGGBBBB`.
+    ///
+    /// Las dos familias escalan distinto y así lo hace xterm: `rgb:` escala
+    /// proporcionalmente (`rgb:c8/c8/c8` es gris claro) y `#` trata los
+    /// dígitos como los bits altos (`#f00` es 0xf0, no 0xff).
     fn parse_color_spec(spec: &[u8]) -> Option<(u8, u8, u8)> {
         if spec == b"?" {
             return None;
         }
-        if let Ok(s) = std::str::from_utf8(spec) {
-            if let Some(hex) = s.strip_prefix('#') {
-                if hex.len() == 6 {
-                    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-                    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-                    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-                    return Some((r, g, b));
-                }
-            }
-            if let Some(rgb) = s.strip_prefix("rgb:") {
-                let parts: Vec<&str> = rgb.split('/').collect();
-                if parts.len() == 3 {
-                    let parse_ch = |p: &str| {
-                        let v = u16::from_str_radix(p, 16).ok()?;
-                        Some((v >> 8) as u8)
-                    };
-                    let r = parse_ch(parts[0])?;
-                    let g = parse_ch(parts[1])?;
-                    let b = parse_ch(parts[2])?;
-                    return Some((r, g, b));
-                }
-            }
+        let s = std::str::from_utf8(spec).ok()?;
+        if let Some(hex) = s.strip_prefix('#') {
+            return Self::parse_legacy_color(hex);
+        }
+        if let Some(body) = s.strip_prefix("rgb:") {
+            return Self::parse_rgb_color(body);
         }
         None
+    }
+
+    /// `rgb:R/G/B` con 1..=4 dígitos hex por canal, escalados a 0..=255.
+    fn parse_rgb_color(body: &str) -> Option<(u8, u8, u8)> {
+        let mut parts = body.split('/');
+        let r = Self::scale_hex_channel(parts.next()?)?;
+        let g = Self::scale_hex_channel(parts.next()?)?;
+        let b = Self::scale_hex_channel(parts.next()?)?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Some((r, g, b))
+    }
+
+    /// Escala un canal hex de 1..=4 dígitos al rango completo 0..=255.
+    fn scale_hex_channel(part: &str) -> Option<u8> {
+        if part.is_empty() || part.len() > 4 || !part.is_ascii() {
+            return None;
+        }
+        let value = u32::from_str_radix(part, 16).ok()?;
+        let max = 16u32.pow(part.len() as u32) - 1;
+        Some((255 * value / max) as u8)
+    }
+
+    /// Forma legacy `#`: los dígitos son los bits altos del canal.
+    fn parse_legacy_color(hex: &str) -> Option<(u8, u8, u8)> {
+        // El corte por bytes es seguro sólo si todo es ASCII.
+        if hex.is_empty() || !hex.is_ascii() || !hex.len().is_multiple_of(3) {
+            return None;
+        }
+        let width = hex.len() / 3;
+        if width > 4 {
+            return None;
+        }
+        let channel = |slice: &str| -> Option<u8> {
+            let col = u32::from_str_radix(slice, 16).ok()? << 4;
+            Some((col >> (4 * (slice.len() - 1))) as u8)
+        };
+        Some((
+            channel(&hex[0..width])?,
+            channel(&hex[width..width * 2])?,
+            channel(&hex[width * 2..])?,
+        ))
     }
 
     fn rgb_to_osc16((r, g, b): (u8, u8, u8)) -> String {
@@ -6353,5 +6387,51 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(5));
         term.reset_blink_phase();
         assert!(term.last_blink_reset > before);
+    }
+
+    #[test]
+    fn parse_color_spec_rgb_corto_escala_en_vez_de_truncar() {
+        // Grok emite exactamente esto; con el truncado por `>> 8` salia (0,0,0).
+        assert_eq!(
+            Term::parse_color_spec(b"rgb:c8/c8/c8"),
+            Some((200, 200, 200))
+        );
+        assert_eq!(Term::parse_color_spec(b"rgb:f/0/0"), Some((255, 0, 0)));
+        assert_eq!(
+            Term::parse_color_spec(b"rgb:fff/000/888"),
+            Some((255, 0, 136))
+        );
+    }
+
+    #[test]
+    fn parse_color_spec_rgb_cuatro_digitos_sigue_igual() {
+        assert_eq!(
+            Term::parse_color_spec(b"rgb:d9d9/7777/5757"),
+            Some((0xd9, 0x77, 0x57))
+        );
+    }
+
+    #[test]
+    fn parse_color_spec_hash_legacy_usa_bits_altos() {
+        // Formato legacy de X11: los digitos son los bits altos.
+        assert_eq!(Term::parse_color_spec(b"#f00"), Some((0xf0, 0x00, 0x00)));
+        assert_eq!(Term::parse_color_spec(b"#0D1117"), Some((0x0d, 0x11, 0x17)));
+        assert_eq!(
+            Term::parse_color_spec(b"#d9d977775757"),
+            Some((0xd9, 0x77, 0x57))
+        );
+    }
+
+    #[test]
+    fn parse_color_spec_rechaza_basura() {
+        assert_eq!(Term::parse_color_spec(b"?"), None);
+        assert_eq!(Term::parse_color_spec(b""), None);
+        assert_eq!(Term::parse_color_spec(b"#12345"), None);
+        assert_eq!(Term::parse_color_spec(b"rgb:1/2"), None);
+        assert_eq!(Term::parse_color_spec(b"rgb:1/2/3/4"), None);
+        assert_eq!(Term::parse_color_spec(b"rgb:xyz/00/00"), None);
+        assert_eq!(Term::parse_color_spec(b"#zzz"), None);
+        // No-ASCII: no debe entrar en panico al cortar el slice.
+        assert_eq!(Term::parse_color_spec("#áéí".as_bytes()), None);
     }
 }
