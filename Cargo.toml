@@ -82,6 +82,9 @@ harness = false
 name = "watchdog_overhead"
 harness = false
 
+[patch.crates-io]
+winit = { git = "https://github.com/KarloZ7715/winit", branch = "x11-wm-protocols-check" }
+
 [[bench]]
 name = "pty_hot_path"
 harness = false
