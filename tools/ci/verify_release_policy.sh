@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Verifies the repository policy for automated pre-1.0 release PRs.
+# Verifies the repository policy for automated release PRs: without the
+# release:manual-version label, a release-plz PR may only bump the patch
+# (z) component relative to the latest released tag. The baseline is read
+# from git tags rather than hardcoded, so it tracks x/y bumps automatically.
 
 set -Eeuo pipefail
 
@@ -18,8 +21,20 @@ require_line() {
 }
 
 current_version="$(sed -nE 's/^version = "([^"]+)"$/\1/p' "$manifest" | head -n1)"
-if [[ ! "$current_version" =~ ^0\.0\.[0-9]+$ ]] && [[ "${RELEASE_MANUAL_VERSION:-false}" != "true" ]]; then
-    printf 'Error: automated releases require a 0.0.z version, got %s\n' "$current_version" >&2
+if [[ ! "$current_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf 'Error: version in %s is not a valid x.y.z semver, got %s\n' "$manifest" "$current_version" >&2
+    exit 1
+fi
+
+latest_tag="$(git -C "$repo_root" tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)"
+if [[ -z "$latest_tag" ]]; then
+    printf 'Error: no previous release tag (vX.Y.Z) found to compare against\n' >&2
+    exit 1
+fi
+baseline_version="${latest_tag#v}"
+
+if [[ "${current_version%.*}" != "${baseline_version%.*}" ]] && [[ "${RELEASE_MANUAL_VERSION:-false}" != "true" ]]; then
+    printf 'Error: automated releases may only bump the patch version (baseline %s), got %s\n' "$baseline_version" "$current_version" >&2
     exit 1
 fi
 
