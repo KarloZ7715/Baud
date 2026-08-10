@@ -49,6 +49,9 @@ zbus = "5.18"
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["term", "fs", "signal", "event", "poll", "user"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+x11rb = "0.13"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
