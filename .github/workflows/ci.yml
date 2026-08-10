@@ -79,7 +79,7 @@ jobs:
       - name: Instalar Xvfb y Vulkan por software
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb mesa-vulkan-drivers libvulkan1
+          sudo apt-get install -y xvfb mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 libegl-mesa0
 
       - name: Test de cierre espontaneo en X11
         env:
