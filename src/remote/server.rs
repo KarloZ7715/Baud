@@ -154,7 +154,7 @@ pub fn runtime_dir() -> io::Result<PathBuf> {
     }
 }
 
-/// Busca la instancia mas reciente con token legible.
+/// Busca la instancia viva mas reciente; limpia pares muertos.
 pub fn discover() -> io::Result<Option<(String, String)>> {
     discover_in(&runtime_dir()?)
 }
@@ -183,29 +183,58 @@ pub fn discover_in(dir: &Path) -> io::Result<Option<(String, String)>> {
             .and_then(|m| m.modified())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
     });
-    let Some(latest) = socks.last() else {
-        return Ok(None);
-    };
-    let stem = latest
-        .path()
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let token_path = latest.path().with_file_name(format!("{stem}.token"));
-    let token = std::fs::read_to_string(&token_path)?;
-    let token = token.trim().to_string();
-    if token.is_empty() {
-        return Ok(None);
+    for entry in socks.iter().rev() {
+        let stem = entry
+            .path()
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let token_path = entry.path().with_file_name(format!("{stem}.token"));
+        let token = match std::fs::read_to_string(&token_path) {
+            Ok(t) => t.trim().to_string(),
+            Err(_) => {
+                remove_stale(&entry.path(), &token_path);
+                continue;
+            }
+        };
+        if token.is_empty() {
+            remove_stale(&entry.path(), &token_path);
+            continue;
+        }
+        let target = {
+            #[cfg(unix)]
+            {
+                entry.path().to_string_lossy().into_owned()
+            }
+            #[cfg(windows)]
+            {
+                match std::fs::read_to_string(entry.path()) {
+                    Ok(p) => {
+                        let name = p.trim().to_string();
+                        if name.is_empty() {
+                            remove_stale(&entry.path(), &token_path);
+                            continue;
+                        }
+                        name
+                    }
+                    Err(_) => {
+                        remove_stale(&entry.path(), &token_path);
+                        continue;
+                    }
+                }
+            }
+        };
+        match Client::connect(&target, &token) {
+            Ok(_) => return Ok(Some((target, token))),
+            Err(_) => remove_stale(&entry.path(), &token_path),
+        }
     }
-    #[cfg(unix)]
-    {
-        Ok(Some((latest.path().to_string_lossy().into_owned(), token)))
-    }
-    #[cfg(windows)]
-    {
-        let pipe = std::fs::read_to_string(latest.path())?;
-        Ok(Some((pipe.trim().to_string(), token)))
-    }
+    Ok(None)
+}
+
+fn remove_stale(endpoint_path: &Path, token_path: &Path) {
+    let _ = std::fs::remove_file(endpoint_path);
+    let _ = std::fs::remove_file(token_path);
 }
 
 fn write_endpoint(dir: &Path, pid: u32, token: &str) -> io::Result<Endpoint> {
@@ -614,6 +643,39 @@ mod tests {
             })
             .unwrap();
         assert_eq!(r.text_lines().unwrap(), vec!["stub".to_string()]);
+    }
+
+    #[test]
+    fn discover_salta_sockets_muertos_y_los_limpia() {
+        let dir = tempfile::tempdir().unwrap();
+        // Instancia viva "vieja".
+        let server = spawn_in(dir.path(), stub_handler()).unwrap();
+        // Par stale "mas nuevo": socket sin listener + token.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        #[cfg(unix)]
+        let stale_endpoint = dir.path().join("99999.sock");
+        #[cfg(windows)]
+        let stale_endpoint = dir.path().join("99999.pipe");
+        let stale_token = dir.path().join("99999.token");
+        #[cfg(unix)]
+        {
+            // Un listener creado y dropeado deja el archivo de socket muerto.
+            drop(std::os::unix::net::UnixListener::bind(&stale_endpoint).unwrap());
+        }
+        #[cfg(windows)]
+        {
+            std::fs::write(&stale_endpoint, r"\\.\pipe\baud-dead").unwrap();
+        }
+        std::fs::write(&stale_token, "deadbeef").unwrap();
+
+        let (target, token) = discover_in(dir.path())
+            .unwrap()
+            .expect("debe hallar la viva");
+        assert_eq!(target, server.target());
+        assert_eq!(token, server.token());
+        // El par muerto fue limpiado.
+        assert!(!stale_token.exists());
+        assert!(!stale_endpoint.exists());
     }
 
     #[test]
