@@ -179,20 +179,21 @@ capture_window() {
   # la atenua y el A/B compara peso de trazo con brillo de compositor.
   hyprctl dispatch "hl.dsp.focus({ window = \"address:${address}\" })" >/dev/null
   hyprctl dispatch "hl.dsp.window.alter_zorder({ mode = \"top\", window = \"address:${address}\" })" >/dev/null
-  sleep 0.2
+  hyprctl dispatch "hl.dsp.window.pin({ action = \"enable\", window = \"address:${address}\" })" >/dev/null
+  sleep 0.5
   geom="$(client_geometry "$address")"
   echo "captura $address geom=$geom -> $dest"
   grim -g "$geom" "$dest"
 }
 
-# Espera a que el grid de Baud contenga el patron (socket de remote_control).
-wait_screen() {
+# Pega el specimen cuando la ventana ya tiene tamano, para que no se vaya al scrollback.
+feed_specimen() {
   local pid="$1"
-  local pattern="$2"
-  python3 - "$pid" "$pattern" <<'PY'
+  python3 - "$pid" "Sphinx" "$SPECIMEN" <<'PY'
 import json, os, socket, sys, time
+from pathlib import Path
 
-pid, pattern = sys.argv[1], sys.argv[2]
+pid, pattern, specimen_path = sys.argv[1], sys.argv[2], sys.argv[3]
 runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 sock_path = os.path.join(runtime, "baud", f"{pid}.sock")
 token_path = os.path.join(runtime, "baud", f"{pid}.token")
@@ -206,6 +207,7 @@ else:
     sys.exit(1)
 
 token = open(token_path, encoding="utf-8").read().strip()
+specimen = Path(specimen_path).read_text(encoding="utf-8")
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.settimeout(12)
 sock.connect(sock_path)
@@ -222,16 +224,23 @@ def rpc(req):
 hello = rpc({"id": 1, "method": "hello", "params": {"token": token}})
 if "err" in hello:
     raise SystemExit(f"hello: {hello}")
+sent = rpc({"id": 2, "method": "send_text", "params": {"text": specimen}})
+if "err" in sent:
+    raise SystemExit(f"send_text: {sent}")
 waited = rpc({
-    "id": 2,
+    "id": 3,
     "method": "wait_for",
     "params": {"pattern": pattern, "timeout_ms": 8000},
 })
 if "err" in waited:
-    screen = rpc({"id": 3, "method": "screen_text", "params": {}})
+    screen = rpc({"id": 4, "method": "screen_text", "params": {}})
     sys.stderr.write(f"wait_for fallo: {waited}\n")
     sys.stderr.write(f"pantalla: {screen}\n")
     sys.exit(1)
+screen = rpc({"id": 4, "method": "screen_text", "params": {}})
+lines = screen.get("ok", {}).get("lines", [])
+preview = next((ln for ln in lines if ln.strip()), "")
+print(f"pantalla pid={pid}: {preview[:80]}", file=sys.stderr)
 PY
 }
 
@@ -285,7 +294,7 @@ EOF
     "$BAUD_BIN" \
     --app-id baud-render-ab \
     --title baud-render-ab \
-    -e bash -lc "cat $(printf '%q' "$SPECIMEN"); exec sleep 30" \
+    -e cat \
     >/dev/null 2>"$TMPDIR/baud.err" &
   PIDS+=("$!")
   if ! baud_info="$(wait_client baud-render-ab)"; then
@@ -295,7 +304,7 @@ EOF
   fi
   baud_addr="${baud_info%%$'\t'*}"
   baud_pid="${baud_info##*$'\t'}"
-  if ! wait_screen "$baud_pid" "Sphinx"; then
+  if ! feed_specimen "$baud_pid"; then
     echo "el specimen no aparecio en la pantalla de baud" >&2
     cat "$TMPDIR/baud.err" >&2 || true
     exit 1
