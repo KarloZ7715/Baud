@@ -733,6 +733,10 @@ impl From<RawConfig> for Config {
         // cae a la variante oscura. El runtime re-resuelve (`reconcile_theme`)
         // cuando el portal/winit responde.
         let active = model.resolve(None);
+        let mut font = raw.font;
+        font.size = clamp_font_size_value(font.size);
+        let mut window = raw.window;
+        window.opacity = clamp_opacity(window.opacity);
         Self {
             theme: active.theme,
             theme_preset: active.preset,
@@ -743,8 +747,8 @@ impl From<RawConfig> for Config {
             theme_import_setting: model.import,
             theme_import_label: active.import_label,
             theme_import_watch_paths: active.import_watch_paths,
-            font: raw.font,
-            window: raw.window,
+            font,
+            window,
             selection: raw.selection,
             copy_mode: raw.copy_mode,
             scrollback: raw.scrollback,
@@ -1265,6 +1269,32 @@ fn default_font_family() -> String {
 }
 fn default_font_size() -> u16 {
     12
+}
+
+/// Mismo rango que el zoom de fuente en la ventana.
+const FONT_SIZE_MIN: u16 = 6;
+const FONT_SIZE_MAX: u16 = 72;
+
+fn clamp_font_size_value(v: u16) -> u16 {
+    if (FONT_SIZE_MIN..=FONT_SIZE_MAX).contains(&v) {
+        v
+    } else {
+        let clamped = v.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+        tracing::warn!(
+            "font.size {v} fuera de rango [{FONT_SIZE_MIN}, {FONT_SIZE_MAX}], ajustado a {clamped}"
+        );
+        clamped
+    }
+}
+
+fn clamp_opacity(v: f32) -> f32 {
+    if v.is_finite() && (0.0..=1.0).contains(&v) {
+        v
+    } else {
+        let clamped = if !v.is_finite() || v < 0.0 { 0.0 } else { 1.0 };
+        tracing::warn!("window.opacity {v} fuera de rango [0, 1], ajustado a {clamped}");
+        clamped
+    }
 }
 fn default_glyph_offset() -> GlyphOffset {
     GlyphOffset { x: 0.0, y: 0.0 }
@@ -1821,6 +1851,26 @@ word_delimiters = " ,.;"
         assert_eq!(parse_hex("#ff00000"), (0, 0, 0)); // 8 caracteres
         assert_eq!(parse_hex("ff0000"), (0, 0, 0)); // sin #
         assert_eq!(parse_hex("#-10000"), (0, 0, 0)); // signo negativo
+    }
+
+    #[test]
+    fn valores_numericos_absurdos_se_clampean_sin_panic() {
+        let cases = [
+            ("[font]\nsize = 0\n", 6, 1.0, 10_000),
+            ("[font]\nsize = 9999\n", 72, 1.0, 10_000),
+            ("[window]\nopacity = 7.0\n", 12, 1.0, 10_000),
+            ("[window]\nopacity = -1.0\n", 12, 0.0, 10_000),
+            ("[scrollback]\nlines = 0\n", 12, 1.0, 0),
+        ];
+        for (toml, size, opacity, lines) in cases {
+            let cfg: Config = toml::from_str(toml).expect(toml);
+            assert_eq!(cfg.font.size, size, "size en {toml}");
+            assert!(
+                (cfg.window.opacity - opacity).abs() < f32::EPSILON,
+                "opacity en {toml}"
+            );
+            assert_eq!(cfg.scrollback.lines, lines, "lines en {toml}");
+        }
     }
 
     #[test]

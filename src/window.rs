@@ -4,7 +4,7 @@
 //! El Renderer se inicializa en resumed() y se invoca en redraw_requested().
 //! El Term se comparte con el hilo drain via Arc<Mutex<Term>>.
 
-#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 use std::future::Future;
 use std::pin::Pin;
@@ -834,16 +834,32 @@ impl App {
                 }
             }
             UserEvent::PtyError(id, msg) => {
-                if self.is_focused_session(id) {
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer.set_status(&format!("[Error PTY: {}]", msg));
-                    }
-                    if let Some(window) = &self.window {
-                        window.request_redraw();
-                    }
-                } else if self.is_session_in_active_tab(id) {
-                    if let Some(renderer) = &mut self.renderer {
-                        renderer.set_status(&format!("[Error PTY en pane: {}]", msg));
+                // El hilo lector murio por I/O: la sesion termina, no se congela.
+                tracing::warn!("error de I/O del PTY: {msg}");
+                let session_idx = self.session_by_id(id);
+                let held = session_idx.is_some_and(|i| self.sessions[i].session.hold);
+                let close_on_exit =
+                    session_idx.is_some_and(|i| self.sessions[i].session.close_on_exit);
+
+                if self.is_session_in_active_tab(id) {
+                    if self.is_focused_session(id) {
+                        if held {
+                            if let Some(renderer) = &mut self.renderer {
+                                renderer.set_status("[process ended]");
+                            }
+                        } else if close_on_exit {
+                            self.request_exit(ExitReason::SessionExited(-1));
+                            return;
+                        } else if let Some(renderer) = &mut self.renderer {
+                            renderer.set_status("[process ended]");
+                        }
+                    } else if self.tabs[self.focused].leaves().len() > 1 {
+                        if let Some(renderer) = &mut self.renderer {
+                            renderer.set_status("[process ended]");
+                        }
+                        if !held {
+                            self.close_pane_session(id);
+                        }
                     }
                     if let Some(window) = &self.window {
                         window.request_redraw();
@@ -6041,6 +6057,30 @@ import = false
         app.dispatch_user_event(UserEvent::PtyExited(id, 0));
 
         assert_eq!(app.pending_exit, Some(ExitReason::SessionExited(0)));
+    }
+
+    #[test]
+    fn pty_error_con_close_on_exit_cierra_app() {
+        let mut app = test_app(Arc::new(Mutex::new(Term::new())));
+        let id = app.sessions[0].session.id;
+        app.sessions[0].session.close_on_exit = true;
+
+        app.dispatch_user_event(UserEvent::PtyError(id, "broken pipe".into()));
+
+        assert_eq!(app.pending_exit, Some(ExitReason::SessionExited(-1)));
+    }
+
+    #[test]
+    fn pty_error_con_hold_no_cierra_app() {
+        let mut app = test_app(Arc::new(Mutex::new(Term::new())));
+        let id = app.sessions[0].session.id;
+        app.sessions[0].session.hold = true;
+        app.sessions[0].session.close_on_exit = true;
+
+        app.dispatch_user_event(UserEvent::PtyError(id, "broken pipe".into()));
+
+        assert!(app.pending_exit.is_none());
+        assert_eq!(app.sessions.len(), 1);
     }
 
     #[test]

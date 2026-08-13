@@ -1,6 +1,6 @@
 //! Modulo de render GPU del grid dinamico.
 
-#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 mod blink;
 mod builtin;
@@ -232,6 +232,25 @@ impl AcquireFailureState {
     }
 }
 
+/// Decision ante fallos consecutivos de adquisicion de surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GpuAction {
+    Retry,
+    Fallback,
+}
+
+const GPU_FAILURE_LIMIT: u32 = 3;
+
+/// Tras `GPU_FAILURE_LIMIT` fallos seguidos se deja de reconfigurar:
+/// no hay rasterizador de reserva, pero la sesion no se aborta.
+pub(crate) fn gpu_failure_action(consecutive: u32) -> GpuAction {
+    if consecutive >= GPU_FAILURE_LIMIT {
+        GpuAction::Fallback
+    } else {
+        GpuAction::Retry
+    }
+}
+
 /// Renderer GPU del terminal virtual.
 ///
 /// Mantiene los recursos wgpu y glyphon necesarios para pintar el grid dinamico.
@@ -288,6 +307,8 @@ pub struct Renderer {
     frame_count: u64,
     /// Fallos de adquisición del swapchain desde el arranque.
     acquire_failures: AcquireFailureState,
+    /// Lost/Outdated seguidos; se resetea al adquirir con exito.
+    consecutive_gpu_failures: u32,
     /// Panes que este frame se pintaron desde la caché porque el `Term`
     /// estaba tomado por el hilo drain. Su contenido nuevo NO se pinto, así
     /// que el llamador debe conservar el dirty y pedir otro redraw.
@@ -636,6 +657,7 @@ impl Renderer {
             status_needs_present: false,
             frame_count: 0,
             acquire_failures: AcquireFailureState::default(),
+            consecutive_gpu_failures: 0,
             stale_panes: Vec::new(),
             prev_selection_bounds: None,
             prev_scrollback_offset: 0,
@@ -949,7 +971,10 @@ impl Renderer {
         let get_frame_us = t_frame_start.elapsed().as_secs_f64() * 1_000_000.0;
         let frame = match acquired {
             wgpu::CurrentSurfaceTexture::Success(tex)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => tex,
+            | wgpu::CurrentSurfaceTexture::Suboptimal(tex) => {
+                self.consecutive_gpu_failures = 0;
+                tex
+            }
             wgpu::CurrentSurfaceTexture::Timeout => {
                 self.acquire_failures.note("Timeout", get_frame_us);
                 return Ok(Vec::new());
@@ -960,7 +985,18 @@ impl Renderer {
             }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.acquire_failures.note("Outdated/Lost", get_frame_us);
-                self.surface.configure(&self.device, &self.config);
+                self.consecutive_gpu_failures = self.consecutive_gpu_failures.saturating_add(1);
+                match gpu_failure_action(self.consecutive_gpu_failures) {
+                    GpuAction::Retry => {
+                        self.surface.configure(&self.device, &self.config);
+                    }
+                    GpuAction::Fallback => {
+                        tracing::warn!(
+                            "swapchain: {} fallos seguidos, se omite reconfigurar",
+                            self.consecutive_gpu_failures
+                        );
+                    }
+                }
                 return Ok(Vec::new());
             }
             wgpu::CurrentSurfaceTexture::Validation => {
@@ -1055,13 +1091,9 @@ impl Renderer {
         t0: Instant,
         get_frame_us: f64,
     ) -> Result<Vec<SessionId>, String> {
-        // El llamador arma panes desde las hojas del tab activo.
-        #[allow(clippy::expect_used)]
-        let focused = panes
-            .iter()
-            .find(|p| p.focused)
-            .or_else(|| panes.first())
-            .expect("render requiere al menos un pane");
+        let Some(focused) = panes.iter().find(|p| p.focused).or_else(|| panes.first()) else {
+            return Ok(Vec::new());
+        };
 
         let overrides = focused
             .term
@@ -3674,6 +3706,15 @@ mod tests {
         let s = truncate_to_display_width("✓ mensaje largo", 5);
         assert!(unicode_width::UnicodeWidthStr::width(s.as_str()) <= 5);
         assert!(s.ends_with('…'));
+    }
+
+    #[test]
+    fn gpu_failure_action_reintenta_hasta_el_limite() {
+        assert_eq!(gpu_failure_action(0), GpuAction::Retry);
+        assert_eq!(gpu_failure_action(1), GpuAction::Retry);
+        assert_eq!(gpu_failure_action(2), GpuAction::Retry);
+        assert_eq!(gpu_failure_action(3), GpuAction::Fallback);
+        assert_eq!(gpu_failure_action(4), GpuAction::Fallback);
     }
 
     #[test]

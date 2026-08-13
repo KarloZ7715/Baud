@@ -4,7 +4,7 @@
 //! El Term se comparte entre el hilo drain y la GUI via Arc<Mutex<Term>>.
 //! El hilo drain envía UserEvent::RedrawNeeded al GUI vía EventLoopProxy.
 
-#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 use std::collections::VecDeque;
 use std::io::ErrorKind;

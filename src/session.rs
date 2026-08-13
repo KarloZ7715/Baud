@@ -1,6 +1,6 @@
 //! Una sesion = una terminal (PTY + Term + canal de input).
 
-#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};

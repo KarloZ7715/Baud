@@ -1,6 +1,6 @@
 //! Parser y estado del terminal virtual.
 
-#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 use std::time::Instant;
 
