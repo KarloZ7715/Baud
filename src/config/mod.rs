@@ -740,6 +740,7 @@ impl From<RawConfig> for Config {
         let active = model.resolve(None);
         let mut font = raw.font;
         font.size = clamp_font_size_value(font.size);
+        font.text_contrast = clamp_text_contrast(font.text_contrast);
         let mut window = raw.window;
         window.opacity = clamp_opacity(window.opacity);
         Self {
@@ -1302,6 +1303,25 @@ fn clamp_opacity(v: f32) -> f32 {
         clamped
     }
 }
+
+const TEXT_CONTRAST_MIN: f32 = 0.0;
+const TEXT_CONTRAST_MAX: f32 = 1.0;
+
+fn clamp_text_contrast(v: f32) -> f32 {
+    if v.is_finite() && (TEXT_CONTRAST_MIN..=TEXT_CONTRAST_MAX).contains(&v) {
+        v
+    } else {
+        let clamped = if !v.is_finite() || v < TEXT_CONTRAST_MIN {
+            TEXT_CONTRAST_MIN
+        } else {
+            TEXT_CONTRAST_MAX
+        };
+        tracing::warn!(
+            "font.text_contrast {v} fuera de rango [{TEXT_CONTRAST_MIN}, {TEXT_CONTRAST_MAX}], ajustado a {clamped}"
+        );
+        clamped
+    }
+}
 fn default_glyph_offset() -> GlyphOffset {
     GlyphOffset { x: 0.0, y: 0.0 }
 }
@@ -1701,6 +1721,7 @@ mod tests {
         assert_eq!(roundtripped.theme, original.theme);
         assert_eq!(roundtripped.font.family, original.font.family);
         assert_eq!(roundtripped.font.size, original.font.size);
+        assert_eq!(roundtripped.font.text_contrast, original.font.text_contrast);
         assert_eq!(roundtripped.window.opacity, original.window.opacity);
         assert_eq!(roundtripped.window.width, original.window.width);
         assert_eq!(
@@ -2095,6 +2116,31 @@ height = 800
         let toml = "[font]\nligatures = true\n";
         let cfg: Config = toml::from_str(toml).unwrap();
         assert!(cfg.font.ligatures);
+    }
+
+    #[test]
+    fn text_contrast_se_acota_al_rango() {
+        assert_eq!(clamp_text_contrast(-1.0), TEXT_CONTRAST_MIN);
+        assert_eq!(clamp_text_contrast(2.0), TEXT_CONTRAST_MAX);
+        assert_eq!(clamp_text_contrast(f32::NAN), TEXT_CONTRAST_MIN);
+        assert!((clamp_text_contrast(0.4) - 0.4).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn text_contrast_parse_y_roundtrip() {
+        let cfg: Config = toml::from_str("[font]\ntext_contrast = 0.4\n").unwrap();
+        assert!((cfg.font.text_contrast - 0.4).abs() < f32::EPSILON);
+        let serialized = toml::to_string(&cfg).unwrap();
+        let again: Config = toml::from_str(&serialized).unwrap();
+        assert!((again.font.text_contrast - 0.4).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn text_contrast_fuera_de_rango_se_acota_al_parsear() {
+        let hi: Config = toml::from_str("[font]\ntext_contrast = 9.0\n").unwrap();
+        assert_eq!(hi.font.text_contrast, TEXT_CONTRAST_MAX);
+        let lo: Config = toml::from_str("[font]\ntext_contrast = -0.5\n").unwrap();
+        assert_eq!(lo.font.text_contrast, TEXT_CONTRAST_MIN);
     }
 
     #[test]
