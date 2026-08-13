@@ -1,0 +1,32 @@
+[0mSphinx of black quartz, judge my vow
+[1mSphinx of black quartz, judge my vow[0m
+[3mSphinx of black quartz, judge my vow[0m
+
+l1I|  o0O  rn/m
+
+┌─┬───┬─┐  ╭─────╮
+│ │   │ │  │ box │
+├─┼───┼─┤  ╰─────╯
+│ │   │ │  ▶ ★ 
+└─┴───┴─┘
+
+fn rasterize(alpha: u8, lut: &[u8; 256]) -> u8 {
+    lut[alpha as usize]
+}
+pub fn contrast_curve(k: f32, a: f32) -> f32 {
+    a.powf(1.0 / (1.0 + k).max(0.01))
+}
+let keys = ["alpha", "beta", "gamma"];
+assert_eq!(keys.len(), 3);
+for (i, name) in keys.iter().enumerate() {
+    println!("{i}: {name} -> {i * 2}");
+}
+
+[7mSphinx of black quartz, judge my vow
+[1mSphinx of black quartz, judge my vow[0m[7m
+[3mSphinx of black quartz, judge my vow[0m[7m
+
+l1I|  o0O  rn/m
+fn rasterize(alpha: u8, lut: &[u8; 256]) -> u8 {
+    lut[alpha as usize]
+}[0m
