@@ -7,6 +7,7 @@ git_tag_name = "v{{ version }}"
 pr_branch_prefix = "release-plz-"
 release_commits = "^(feat|fix|perf|security)(\\([^)]+\\))?:"
 features_always_increment_minor = false
+semver_check = false
 
 [changelog]
 header = """# Changelog
