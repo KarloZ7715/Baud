@@ -505,6 +505,8 @@ mod tests {
         let app = test_app(Arc::new(Mutex::new(Term::new())));
         let r = done(resolve_request(&app, &Request::send_key("ctrl+c")));
         assert_eq!(r.bytes_to_write().unwrap(), b"\x03");
+        let r = done(resolve_request(&app, &Request::send_key("ctrl+d")));
+        assert_eq!(r.bytes_to_write().unwrap(), b"\x04");
     }
 
     #[test]

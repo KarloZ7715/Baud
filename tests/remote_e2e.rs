@@ -1,7 +1,8 @@
 //! Control remoto de una instancia viva de Baud bajo Xvfb.
 //!
 //! Arranca `baud` con `remote_control = true` y `-e /bin/sh`, inyecta un echo
-//! por el socket y afirma que la pantalla contiene el marcador. Se ejecuta
+//! por el socket y afirma que la pantalla contiene el marcador. Cierra la
+//! sesion con `exit` (no `ctrl+d`: ver el comentario junto a `send_text`).
 //! con `BAUD_X11_E2E=1` (job `x11 e2e`) y `#[ignore]` para no correrlo en
 //! `cargo test` sin display.
 
@@ -181,9 +182,12 @@ fn control_socket_echo_y_cierre() {
         "la pantalla no contiene BAUD_OK:\n{text}\n{}",
         harness.diagnostics()
     );
+    // `ctrl+d` (0x04) no cierra /bin/sh de Debian/Ubuntu: el esclavo del PTY
+    // queda sin ICANON tras cfmakeraw, y esa shell no trata 0x04 como EOF.
+    // `exit` sí termina bash y dash; close_on_exit (lanzado con -e) cierra Baud.
     client
-        .call(Request::send_key("ctrl+d"))
-        .expect("send_key ctrl+d");
+        .call(Request::send_text("exit\n"))
+        .expect("send_text exit");
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -192,7 +196,7 @@ fn control_socket_echo_y_cierre() {
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Ok(None) => panic!("baud no termino tras ctrl+d\n{}", harness.diagnostics()),
+            Ok(None) => panic!("baud no termino tras exit\n{}", harness.diagnostics()),
             Err(e) => panic!("try_wait: {e}"),
         }
     }
