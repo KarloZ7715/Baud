@@ -88,7 +88,7 @@ fn build_filter(config_level: Option<&str>) -> EnvFilter {
 /// con fallback a `data_local_dir()` (Windows: `%LOCALAPPDATA%\baud\logs\`).
 /// Deliberadamente *local*, no roaming: `dirs::data_dir()` en Windows apunta
 /// a `%APPDATA%`, que se sincroniza entre equipos de un dominio.
-fn log_dir() -> PathBuf {
+pub(crate) fn log_dir() -> PathBuf {
     dirs::state_dir()
         .or_else(dirs::data_local_dir)
         .unwrap_or_else(|| PathBuf::from("."))

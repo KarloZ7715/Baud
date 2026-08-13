@@ -21,6 +21,7 @@ pub mod input;
 pub mod installation;
 pub mod layout;
 pub mod pty;
+pub mod remote;
 pub mod renderer;
 pub mod search;
 pub mod search_overlay;

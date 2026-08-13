@@ -83,6 +83,11 @@ pub enum UserEvent {
     ConfigReloadFailed(String),
     /// El sistema cambió de modo claro/oscuro (portal XDG o winit).
     SystemColorScheme(ColorScheme),
+    /// Peticion del socket de control remoto; la respuesta vuelve por `tx`.
+    Remote(
+        crate::remote::Request,
+        std::sync::mpsc::Sender<crate::remote::Response>,
+    ),
 }
 
 fn winit_to_key(k: &Key) -> Option<KKey> {
@@ -381,6 +386,8 @@ pub struct App {
     proxy: Option<EventLoopProxy<UserEvent>>,
     /// Cerrar la ultima tab debe salir de la app en el proximo about_to_wait.
     pending_exit: Option<ExitReason>,
+    /// Esperas `wait_for` del control remoto pendientes de patron o timeout.
+    pending_waits: Vec<crate::remote::PendingWait>,
     /// Sesiones cerradas cuyos hilos se unen al salir de la app.
     detached_hosts: Vec<SessionHost>,
     /// Tab bajo el cursor en la barra (indice de sesion).
@@ -623,6 +630,7 @@ impl App {
             preedit_cursor: None,
             proxy,
             pending_exit: None,
+            pending_waits: Vec::new(),
             detached_hosts: Vec::new(),
             tab_hover: None,
             tab_hover_display: None,
@@ -681,7 +689,7 @@ impl App {
         self.detached_hosts.clear();
     }
 
-    fn focused_session(&self) -> &Session {
+    pub(crate) fn focused_session(&self) -> &Session {
         let id = self.tabs[self.focused].focused();
         // Toda hoja de tab tiene SessionHost; el id enfocado sale de ahi.
         #[allow(clippy::expect_used)]
@@ -943,10 +951,95 @@ impl App {
                 self.system_scheme_source = SchemeSource::Portal;
                 self.reconcile_theme();
             }
+            UserEvent::Remote(req, tx) => self.handle_remote(req, tx),
+        }
+        self.poll_remote_waits();
+    }
+
+    pub(crate) fn sessions(&self) -> &[SessionHost] {
+        &self.sessions
+    }
+
+    pub(crate) fn tabs(&self) -> &[TabLayout] {
+        &self.tabs
+    }
+
+    pub(crate) fn focused_tab(&self) -> usize {
+        self.focused
+    }
+
+    pub(crate) fn config(&self) -> &Config {
+        &self.config
+    }
+
+    fn handle_remote(
+        &mut self,
+        req: crate::remote::Request,
+        tx: std::sync::mpsc::Sender<crate::remote::Response>,
+    ) {
+        match crate::remote::resolve_request(self, &req) {
+            crate::remote::ResolveOutcome::Done(mut resp) => {
+                if let Some((sid, bytes)) = resp.take_write() {
+                    self.write_remote_input(sid, bytes);
+                }
+                let _ = tx.send(resp);
+            }
+            crate::remote::ResolveOutcome::Wait {
+                id,
+                session,
+                pattern,
+                timeout_ms,
+            } => {
+                self.pending_waits.push(crate::remote::pending_from_wait(
+                    id, session, pattern, timeout_ms, tx,
+                ));
+            }
         }
     }
 
-    fn session_by_id(&self, id: SessionId) -> Option<usize> {
+    fn write_remote_input(&self, session_id: u64, bytes: Vec<u8>) {
+        let Some(idx) = self.session_by_id(crate::session::SessionId(session_id)) else {
+            return;
+        };
+        let session = &self.sessions[idx].session;
+        if session.hold {
+            return;
+        }
+        session.input_reset_pending.store(true, Ordering::Release);
+        if let Ok(mut guard) = session.term.try_lock() {
+            guard.apply_input_reset();
+            session.input_reset_pending.store(false, Ordering::Release);
+        }
+        session.echo_pending.store(true, Ordering::Release);
+        let _ = session.pty_tx.send(PtyCommand::Input(bytes));
+    }
+
+    fn poll_remote_waits(&mut self) {
+        if self.pending_waits.is_empty() {
+            return;
+        }
+        let now = Instant::now();
+        let mut i = 0;
+        while i < self.pending_waits.len() {
+            let expired = now >= self.pending_waits[i].deadline;
+            let session = self.pending_waits[i].session;
+            let pattern = self.pending_waits[i].pattern.clone();
+            let matched = crate::remote::screen_contains(self, session, &pattern);
+            if expired || matched {
+                let wait = self.pending_waits.swap_remove(i);
+                let resp = if matched {
+                    crate::remote::Response::ok(wait.id, serde_json::json!({ "matched": true }))
+                } else {
+                    crate::remote::Response::err(wait.id, "timeout", "wait_for timed out")
+                };
+                let _ = wait.tx.send(resp);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    pub(crate) fn session_by_id(&self, id: SessionId) -> Option<usize> {
         self.sessions.iter().position(|h| h.session.id == id)
     }
 
@@ -3539,6 +3632,13 @@ impl App {
                 });
             }
         }
+        self.poll_remote_waits();
+        if let Some(deadline) = self.pending_waits.iter().map(|w| w.deadline).min() {
+            wake_at = Some(match wake_at {
+                Some(existing) => existing.min(deadline),
+                None => deadline,
+            });
+        }
         if let Some(deadline) = wake_at {
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
@@ -5264,6 +5364,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::ConfigReloaded(_) => "UserEvent::ConfigReloaded",
             UserEvent::ConfigReloadFailed(_) => "UserEvent::ConfigReloadFailed",
             UserEvent::SystemColorScheme(_) => "UserEvent::SystemColorScheme",
+            UserEvent::Remote(_, _) => "UserEvent::Remote",
         };
         let _guard = self.watchdog.enter(phase);
         self.dispatch_user_event(event);

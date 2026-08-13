@@ -2074,6 +2074,29 @@ impl Term {
         s
     }
 
+    /// Texto de la pantalla visible mas `extra_scrollback` lineas por encima.
+    /// En alt screen el scrollback del primario no cuenta.
+    pub fn visible_text_lines(&self, extra_scrollback: usize) -> Vec<String> {
+        let active = self.active_grid();
+        let sb_len = if self.alt_screen {
+            0
+        } else {
+            self.grid.scrollback.len()
+        };
+        let extra = extra_scrollback.min(sb_len);
+        let start = sb_len.saturating_sub(extra);
+        let end = sb_len.saturating_add(active.rows_count);
+        let mut rows = Vec::with_capacity(end.saturating_sub(start));
+        for logical_row in start..end {
+            if let Some(cells) = self.row_cells_at_logical(logical_row) {
+                rows.push(Self::cells_to_row_text(&cells));
+            } else {
+                rows.push(String::new());
+            }
+        }
+        rows
+    }
+
     /// Scrollback + grid como texto por fila logica.
     pub fn rows_as_text(&self) -> Vec<String> {
         let active = self.active_grid();
