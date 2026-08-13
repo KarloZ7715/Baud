@@ -34,6 +34,14 @@ impl Request {
         }
     }
 
+    pub fn send_text(text: &str) -> Self {
+        Self {
+            id: 1,
+            method: "send_text".into(),
+            params: serde_json::json!({ "text": text }),
+        }
+    }
+
     pub fn send_key(chord: &str) -> Self {
         Self {
             id: 1,

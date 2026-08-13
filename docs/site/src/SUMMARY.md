@@ -20,6 +20,7 @@
   - [Notifications and URLs](features/notifications-and-urls.md)
   - [Fonts and rendering](features/fonts-and-rendering.md)
   - [Diagnostics](features/diagnostics.md)
+  - [Remote control](features/remote-control.md)
   - [Updates](features/updates.md)
 - [Terminal API (VT)](vt/index.md)
   - [TERM and terminfo](vt/term-and-terminfo.md)
