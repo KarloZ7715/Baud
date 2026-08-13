@@ -6,6 +6,22 @@ Full documentation is published at <https://karloz7715.github.io/Baud/>.
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/KarloZ7715/Baud/compare/v0.1.0...v0.2.0) - 2026-08-13
+
+### Added
+
+- *(diagnostics)* log exit reason on every app exit
+- *(diagnostics)* log exit path for WM close and title bar button
+
+### Fixed
+
+- *(x11)* ignore ClientMessages that are not WM_PROTOCOLS
+- *(ci)* derive release policy baseline from latest git tag
+- *(watchdog)* nombrar la fase resumed en vez de reportarla como idle
+- *(renderer)* position title bar button icons inside the surface
+- *(renderer)* align title bar buttons with content padding
+- *(windows)* join the PTY reader before dropping ConPTY on close
+
 ## [0.1.0](https://github.com/KarloZ7715/Baud/compare/v0.0.8...v0.1.0) - 2026-08-05
 
 ### Added
