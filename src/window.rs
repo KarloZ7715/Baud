@@ -1292,10 +1292,11 @@ impl App {
         {
             return None;
         }
-        let (pad_x, _) = renderer.content_padding();
+        let (pad_x, pad_y) = renderer.content_padding();
         Some(crate::renderer::compute_title_bar_layout(
             self.window_width,
             pad_x,
+            pad_y,
             renderer.cell_h(),
             self.scale_factor as f32,
         ))

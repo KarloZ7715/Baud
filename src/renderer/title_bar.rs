@@ -88,6 +88,7 @@ pub fn title_button_size_px(scale_factor: f32) -> (f32, f32) {
 pub fn compute_title_bar_layout(
     surface_w: f32,
     pad_x: f32,
+    pad_y: f32,
     cell_h: f32,
     scale_factor: f32,
 ) -> TitleBarLayout {
@@ -98,7 +99,9 @@ pub fn compute_title_bar_layout(
     let tab_area_x = pad_x;
     let tab_area_width = (buttons_x - pad_x - btn_w * 0.5).max(0.0);
 
-    let top = (bar_h - btn_h) * 0.5;
+    // El track de la barra se ancla en padding_y: los botones deben hacer lo
+    // mismo para quedar centrados en el track visible, no en la altura logica.
+    let top = pad_y + (bar_h - btn_h) * 0.5;
     let buttons = vec![
         TitleButton {
             kind: TitleButtonKind::Minimize,
@@ -274,7 +277,7 @@ mod tests {
 
     #[test]
     fn buttons_fit_inside_surface() {
-        let layout = compute_title_bar_layout(800.0, 8.0, 20.0, 1.0);
+        let layout = compute_title_bar_layout(800.0, 8.0, 0.0, 20.0, 1.0);
         assert!(layout.tab_area_width > 0.0);
         assert_eq!(layout.buttons.len(), 3);
         let last = layout.buttons.last().unwrap();
@@ -282,8 +285,16 @@ mod tests {
     }
 
     #[test]
+    fn buttons_centered_include_padding_y() {
+        let sin_pad = compute_title_bar_layout(800.0, 8.0, 0.0, 20.0, 1.0);
+        let con_pad = compute_title_bar_layout(800.0, 8.0, 8.0, 20.0, 1.0);
+        let diff = con_pad.buttons[0].top - sin_pad.buttons[0].top;
+        assert_eq!(diff, 8.0, "el padding vertical debe desplazar los botones");
+    }
+
+    #[test]
     fn hit_test_detects_button() {
-        let layout = compute_title_bar_layout(800.0, 8.0, 20.0, 1.0);
+        let layout = compute_title_bar_layout(800.0, 8.0, 0.0, 20.0, 1.0);
         let close = layout
             .buttons
             .iter()
