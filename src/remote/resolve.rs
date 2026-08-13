@@ -571,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn wait_for_timeout_responde_err() {
+    fn wait_for_timeout_es_resultado_ok() {
         let mut app = test_app(Arc::new(Mutex::new(Term::new())));
         let (tx, rx) = mpsc::channel();
         app.dispatch_user_event(crate::window::UserEvent::Remote(
@@ -579,7 +579,11 @@ mod tests {
             tx,
         ));
         let r = rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        assert!(matches!(r, Response::Err { ref code, .. } if code == "timeout"));
+        let Response::Ok { body, .. } = r else {
+            panic!("timeout debe ser ok")
+        };
+        assert_eq!(body["matched"], false);
+        assert_eq!(body["timed_out"], true);
     }
 
     #[test]

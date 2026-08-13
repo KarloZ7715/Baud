@@ -1033,7 +1033,10 @@ impl App {
                 let resp = if matched {
                     crate::remote::Response::ok(wait.id, serde_json::json!({ "matched": true }))
                 } else {
-                    crate::remote::Response::err(wait.id, "timeout", "wait_for timed out")
+                    crate::remote::Response::ok(
+                        wait.id,
+                        serde_json::json!({ "matched": false, "timed_out": true }),
+                    )
                 };
                 let _ = wait.tx.send(resp);
             } else {
