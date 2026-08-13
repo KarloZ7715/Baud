@@ -236,9 +236,9 @@ Type: `integer`. Default: `12`.
 
 ### font.text_contrast {#config-font-text_contrast}
 
-Strength of the contrast curve baked into the glyph mask at rasterization time (0.0 to 1.0, default 0.0 = no curve). On dark themes it thickens strokes and on light themes it thins them, following the theme's polarity. The mask is shared across all cell colors, so the curve cannot adapt to each cell's specific fg/bg pair.
+Strength of the contrast curve baked into the glyph mask at rasterization time (0.0 to 1.0, default 0.6). On dark themes it thickens strokes and on light themes it thins them, following the theme's polarity. `0.0` disables the curve. The mask is shared across all cell colors, so the curve cannot adapt to each cell's specific fg/bg pair.
 
-Type: `float`. Default: `0.0`.
+Type: `float`. Default: `0.6`.
 
 ## Window {#config-section-window}
 

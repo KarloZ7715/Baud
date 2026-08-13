@@ -824,7 +824,8 @@ pub struct FontConfig {
     /// el trazo y en claros lo adelgaza, segun la polaridad del tema. La
     /// mascara es compartida por todos los colores de celda, asi que la
     /// curva no puede depender del par fg/bg concreto de cada celda.
-    #[serde(default)]
+    /// Default 0.6: peso de trazos a 11px sobre atlas en escala de grises.
+    #[serde(default = "default_text_contrast")]
     pub text_contrast: f32,
     /// Familias de fallback en orden de preferencia (emoji, CJK, símbolos).
     #[serde(default)]
@@ -1102,7 +1103,7 @@ impl Default for FontConfig {
             line_height: default_line_height(),
             builtin_box_drawing: true,
             ligatures: false,
-            text_contrast: 0.0,
+            text_contrast: default_text_contrast(),
             fallback: Vec::new(),
         }
     }
@@ -1327,6 +1328,10 @@ fn default_glyph_offset() -> GlyphOffset {
 }
 fn default_line_height() -> f32 {
     1.0
+}
+
+fn default_text_contrast() -> f32 {
+    0.6
 }
 fn default_opacity() -> f32 {
     1.0
@@ -1694,6 +1699,7 @@ mod tests {
         // Fuente
         assert_eq!(config.font.family, "FiraCode Nerd Font Mono");
         assert_eq!(config.font.size, 12);
+        assert!((config.font.text_contrast - 0.6).abs() < f32::EPSILON);
 
         // Ventana
         assert_eq!(config.window.opacity, 1.0);
@@ -2141,6 +2147,13 @@ height = 800
         assert_eq!(hi.font.text_contrast, TEXT_CONTRAST_MAX);
         let lo: Config = toml::from_str("[font]\ntext_contrast = -0.5\n").unwrap();
         assert_eq!(lo.font.text_contrast, TEXT_CONTRAST_MIN);
+    }
+
+    #[test]
+    fn text_contrast_default_es_calibrado() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!((cfg.font.text_contrast - default_text_contrast()).abs() < f32::EPSILON);
+        assert!((FontConfig::default().text_contrast - 0.6).abs() < f32::EPSILON);
     }
 
     #[test]

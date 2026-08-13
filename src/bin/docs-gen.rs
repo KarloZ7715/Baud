@@ -257,11 +257,27 @@ fn table_cell_code(content: &str) -> String {
     code_span(&content.replace('|', "\\|"))
 }
 
+fn compact_json_number(n: &serde_json::Number) -> String {
+    if n.as_i64().is_some() || n.as_u64().is_some() {
+        return n.to_string();
+    }
+    let f = n.as_f64().expect("number");
+    // serde_json expande f32 inexactos (0.6 -> 0.6000000238); 6 decimales
+    // bastan para los defaults de config y recortan el ruido binario.
+    let s = format!("{f:.6}");
+    let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+    if trimmed.contains('.') {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}.0")
+    }
+}
+
 fn value_default(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => code_span(&format!("{s:?}")),
         serde_json::Value::Bool(b) => code_span(&b.to_string()),
-        serde_json::Value::Number(n) => code_span(&n.to_string()),
+        serde_json::Value::Number(n) => code_span(&compact_json_number(n)),
         serde_json::Value::Array(items) => {
             let rendered = items
                 .iter()
@@ -510,9 +526,7 @@ fn toml_literal(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(s) => Some(toml_edit::Value::from(s.as_str()).to_string()),
         serde_json::Value::Bool(b) => Some(toml_edit::Value::from(*b).to_string()),
-        serde_json::Value::Number(n) if n.is_f64() => {
-            Some(toml_edit::Value::from(n.as_f64().expect("is_f64")).to_string())
-        }
+        serde_json::Value::Number(n) if n.is_f64() => Some(compact_json_number(n)),
         serde_json::Value::Number(n) => {
             Some(toml_edit::Value::from(n.as_i64().expect("entero fuera de rango")).to_string())
         }
