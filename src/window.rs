@@ -250,6 +250,45 @@ impl SessionHost {
     }
 }
 
+/// Un cierre por debajo de este uptime es anomalo para una terminal: ninguna
+/// sesion legitima dura tan poco. Por debajo de este umbral el motivo se
+/// registra en WARN, que es el nivel minimo que `ReporterLayer` reenvia.
+const EARLY_EXIT_WARN: Duration = Duration::from_secs(5);
+
+/// Por que termina Baud. Es un dato y no un booleano para que ningun camino de
+/// cierre nuevo pueda existir sin declarar su motivo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExitReason {
+    /// El gestor de ventanas pidio cerrar (WM_DELETE_WINDOW o equivalente).
+    CloseRequested,
+    /// Boton de cerrar de la barra de titulo propia.
+    TitleBarButton,
+    /// La sesion del PTY termino con `close_on_exit` activo. Lleva el codigo.
+    SessionExited(i32),
+    /// Se cerro la ultima pestana abierta.
+    LastTabClosed,
+}
+
+impl ExitReason {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ExitReason::CloseRequested => "close_requested",
+            ExitReason::TitleBarButton => "title_bar_button",
+            ExitReason::SessionExited(_) => "session_exited",
+            ExitReason::LastTabClosed => "last_tab_closed",
+        }
+    }
+}
+
+/// Nivel con el que se registra un cierre. Separado de `request_exit` porque
+/// los macros de `tracing` exigen un nivel constante y esto si es comprobable.
+fn exit_log_level(uptime: Option<Duration>) -> tracing::Level {
+    match uptime {
+        Some(d) if d >= EARLY_EXIT_WARN => tracing::Level::INFO,
+        _ => tracing::Level::WARN,
+    }
+}
+
 /// Estado de la aplicación GUI.
 pub struct App {
     window: Option<Arc<Window>>,
@@ -311,7 +350,7 @@ pub struct App {
     /// Proxy al event loop para spawn de sesiones adicionales.
     proxy: Option<EventLoopProxy<UserEvent>>,
     /// Cerrar la ultima tab debe salir de la app en el proximo about_to_wait.
-    pending_exit: bool,
+    pending_exit: Option<ExitReason>,
     /// Sesiones cerradas cuyos hilos se unen al salir de la app.
     detached_hosts: Vec<SessionHost>,
     /// Tab bajo el cursor en la barra (indice de sesion).
@@ -363,8 +402,11 @@ pub struct App {
     /// app_id de Wayland / instancia de WM_CLASS en X11; solo se lee en unix.
     #[cfg_attr(windows, allow(dead_code))]
     app_id: Option<String>,
-    /// Marca de tiempo al entrar a `resumed()`; se consume al loguear el primer frame.
+    /// Marca de tiempo al entrar a `resumed()`. No se consume: es la base del
+    /// uptime que `request_exit` usa para decidir el nivel del log de cierre.
     startup_instant: Option<Instant>,
+    /// El log del primer frame solo debe salir una vez por proceso.
+    first_frame_logged: bool,
     /// Factor de escala DPI de la ventana (1.0 = 96 DPI).
     scale_factor: f64,
     /// Refresco del monitor en Hz; None si no se pudo resolver.
@@ -550,7 +592,7 @@ impl App {
             preedit: String::new(),
             preedit_cursor: None,
             proxy,
-            pending_exit: false,
+            pending_exit: None,
             detached_hosts: Vec::new(),
             tab_hover: None,
             tab_hover_display: None,
@@ -576,6 +618,7 @@ impl App {
             initial_title,
             app_id,
             startup_instant: None,
+            first_frame_logged: false,
             scale_factor: 1.0,
             monitor_refresh_hz: None,
             pending_echo: None,
@@ -733,7 +776,7 @@ impl App {
                                 ));
                             }
                         } else if close_on_exit {
-                            self.pending_exit = true;
+                            self.request_exit(ExitReason::SessionExited(code));
                             return;
                         } else if let Some(renderer) = &mut self.renderer {
                             renderer.set_status(&format!("[Proceso terminado: codigo {}]", code));
@@ -857,6 +900,40 @@ impl App {
 
     fn session_by_id(&self, id: SessionId) -> Option<usize> {
         self.sessions.iter().position(|h| h.session.id == id)
+    }
+
+    /// Registra el motivo del cierre y lo deja anotado. Llamarlo desde todos
+    /// los caminos que terminan la aplicacion, sin excepcion: sin esto el log
+    /// se corta en seco y no hay forma de saber quien cerro la ventana.
+    fn request_exit(&mut self, reason: ExitReason) {
+        let uptime = self.startup_instant.map(|t| t.elapsed());
+        let uptime_ms = uptime.map(|d| d.as_millis() as u64).unwrap_or(0);
+        let code = match &reason {
+            ExitReason::SessionExited(code) => *code,
+            _ => 0,
+        };
+        if exit_log_level(uptime) == tracing::Level::WARN {
+            tracing::warn!(
+                target: "baud::exit",
+                reason = reason.as_str(),
+                exit_code = code,
+                uptime_ms,
+                backend = ?self.display_quirks.backend,
+                family = ?self.display_quirks.family,
+                "baud termina a los pocos segundos de arrancar"
+            );
+        } else {
+            tracing::info!(
+                target: "baud::exit",
+                reason = reason.as_str(),
+                exit_code = code,
+                uptime_ms,
+                backend = ?self.display_quirks.backend,
+                family = ?self.display_quirks.family,
+                "baud termina"
+            );
+        }
+        self.pending_exit = Some(reason);
     }
 
     fn is_focused_session(&self, id: SessionId) -> bool {
@@ -1523,7 +1600,7 @@ impl App {
             for host in &self.sessions {
                 let _ = host.session.pty_tx.send(PtyCommand::Shutdown);
             }
-            self.pending_exit = true;
+            self.request_exit(ExitReason::LastTabClosed);
             return;
         }
         let leaf_ids = self.tabs[index].leaves();
@@ -3328,7 +3405,7 @@ impl App {
     }
 
     fn about_to_wait_inner(&mut self, event_loop: &ActiveEventLoop) {
-        if self.pending_exit {
+        if self.pending_exit.is_some() {
             event_loop.exit();
             return;
         }
@@ -4131,13 +4208,14 @@ impl ApplicationHandler<UserEvent> for App {
                         // Ok(_) tambien lo devuelven los early-return de render()
                         // que no llegan a dibujar (Timeout/Occluded/Outdated/Lost);
                         // frame_count solo sube en los paths que si presentan.
-                        if renderer.frame_count() > frame_count_before {
-                            if let Some(t_start) = self.startup_instant.take() {
+                        if renderer.frame_count() > frame_count_before && !self.first_frame_logged {
+                            if let Some(t_start) = self.startup_instant {
                                 tracing::info!(
                                     "startup: time-to-first-frame {}ms",
                                     t_start.elapsed().as_millis()
                                 );
                             }
+                            self.first_frame_logged = true;
                         }
                         let stale = renderer.take_stale_panes();
                         let (kept, settled): (Vec<_>, Vec<_>) = updated
@@ -5865,6 +5943,37 @@ import = false
     }
 
     #[test]
+    fn cierre_temprano_se_registra_como_warn() {
+        // Un cierre en los primeros segundos es la firma de un arranque
+        // fallido: sube a WARN para que el reporter lo recoja.
+        assert_eq!(
+            exit_log_level(Some(Duration::from_millis(1500))),
+            tracing::Level::WARN
+        );
+    }
+
+    #[test]
+    fn cierre_normal_se_registra_como_info() {
+        assert_eq!(
+            exit_log_level(Some(Duration::from_secs(600))),
+            tracing::Level::INFO
+        );
+    }
+
+    #[test]
+    fn cierre_sin_arranque_registrado_se_trata_como_temprano() {
+        // startup_instant es None si nunca se llego a `resumed`: eso ya es anomalo.
+        assert_eq!(exit_log_level(None), tracing::Level::WARN);
+    }
+
+    #[test]
+    fn cerrar_la_ultima_pestana_registra_su_motivo() {
+        let mut app = test_app(Arc::new(Mutex::new(Term::new())));
+        app.close_tab_at(0);
+        assert_eq!(app.pending_exit, Some(ExitReason::LastTabClosed));
+    }
+
+    #[test]
     fn pty_exited_con_close_on_exit_cierra_app() {
         let mut app = test_app(Arc::new(Mutex::new(Term::new())));
         let id = app.sessions[0].session.id;
@@ -5872,7 +5981,7 @@ import = false
 
         app.dispatch_user_event(UserEvent::PtyExited(id, 0));
 
-        assert!(app.pending_exit);
+        assert_eq!(app.pending_exit, Some(ExitReason::SessionExited(0)));
     }
 
     #[test]
@@ -5884,7 +5993,7 @@ import = false
 
         app.dispatch_user_event(UserEvent::PtyExited(id, 0));
 
-        assert!(!app.pending_exit);
+        assert!(app.pending_exit.is_none());
     }
 
     #[test]
