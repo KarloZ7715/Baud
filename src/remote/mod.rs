@@ -16,7 +16,7 @@ use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize, Serializer};
 
 /// Peticion del protocolo v1: una linea JSON.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub id: u64,
     pub method: String,
@@ -121,6 +121,21 @@ impl Response {
             Self::Ok { write, .. } => write.take(),
             Self::Err { .. } => None,
         }
+    }
+
+    pub fn from_json_line(line: &str) -> Result<Self, String> {
+        let v: serde_json::Value =
+            serde_json::from_str(line).map_err(|e| format!("invalid json: {e}"))?;
+        let id = v.get("id").and_then(|x| x.as_u64()).unwrap_or(0);
+        if let Some(ok) = v.get("ok") {
+            return Ok(Self::ok(id, ok.clone()));
+        }
+        if let Some(err) = v.get("err") {
+            let code = err.get("code").and_then(|x| x.as_str()).unwrap_or("error");
+            let msg = err.get("msg").and_then(|x| x.as_str()).unwrap_or("");
+            return Ok(Self::err(id, code, msg));
+        }
+        Err("response missing ok or err".into())
     }
 
     pub fn id(&self) -> u64 {

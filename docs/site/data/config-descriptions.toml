@@ -30,6 +30,7 @@ render = "GPU redraw pacing."
 [descriptions]
 allow_osc52_read = "Allows the running program to read the clipboard via OSC 52; disable if you do not trust every program you run interactively."
 bold_is_bright = "Maps SGR bold text to the bright variant of its ANSI color. Equivalent to `[theme].bold_is_bright`, and OR'd with it: either one being true enables the mapping."
+remote_control = "Opens a local control socket so other processes on this machine can read the screen and inject keys. Off by default."
 keys = "User-defined keybinding overrides, mapping a chord string to an action name; see the keybindings reference for the accepted values on both sides. Empty by default."
 
 "theme.foreground" = "Default text color, used wherever a cell has no explicit SGR foreground."

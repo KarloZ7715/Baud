@@ -112,6 +112,9 @@ pub struct Config {
     pub bold_is_bright: bool,
     #[serde(default = "default_true")]
     pub allow_osc52_read: bool,
+    /// Socket local de control (lectura de pantalla e inyeccion de teclas).
+    #[serde(default)]
+    pub remote_control: bool,
     #[serde(default)]
     pub process: ProcessSection,
     #[serde(default)]
@@ -535,6 +538,8 @@ struct RawConfig {
     #[serde(default = "default_true")]
     allow_osc52_read: bool,
     #[serde(default)]
+    remote_control: bool,
+    #[serde(default)]
     process: ProcessSection,
     #[serde(default)]
     notifications: NotificationsConfig,
@@ -755,6 +760,7 @@ impl From<RawConfig> for Config {
             cursor: raw.cursor,
             bold_is_bright: raw.bold_is_bright,
             allow_osc52_read: raw.allow_osc52_read,
+            remote_control: raw.remote_control,
             process: raw.process,
             notifications: raw.notifications,
             panes: raw.panes,
@@ -1705,6 +1711,8 @@ mod tests {
         assert_eq!(roundtripped.cursor.style, original.cursor.style);
         assert_eq!(roundtripped.bold_is_bright, original.bold_is_bright);
         assert_eq!(roundtripped.allow_osc52_read, original.allow_osc52_read);
+        assert!(!original.remote_control);
+        assert_eq!(roundtripped.remote_control, original.remote_control);
         assert_eq!(
             roundtripped.notifications.enabled,
             original.notifications.enabled

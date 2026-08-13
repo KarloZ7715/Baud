@@ -388,6 +388,8 @@ pub struct App {
     pending_exit: Option<ExitReason>,
     /// Esperas `wait_for` del control remoto pendientes de patron o timeout.
     pending_waits: Vec<crate::remote::PendingWait>,
+    /// Listener IPC de control remoto (None si `remote_control` es false).
+    remote_server: Option<crate::remote::server::ServerHandle>,
     /// Sesiones cerradas cuyos hilos se unen al salir de la app.
     detached_hosts: Vec<SessionHost>,
     /// Tab bajo el cursor en la barra (indice de sesion).
@@ -631,6 +633,7 @@ impl App {
             proxy,
             pending_exit: None,
             pending_waits: Vec::new(),
+            remote_server: None,
             detached_hosts: Vec::new(),
             tab_hover: None,
             tab_hover_display: None,
@@ -1081,6 +1084,7 @@ impl App {
     /// debe morir mientras la ventana sigue viva: si el HWND ya no existe,
     /// el backend grafico puede tumbar el proceso al dropear.
     fn begin_event_loop_exit(&mut self, event_loop: &ActiveEventLoop) {
+        self.remote_server.take();
         self.renderer.take();
         event_loop.exit();
     }
@@ -3772,6 +3776,21 @@ impl ApplicationHandler<UserEvent> for App {
             "startup: ventana creada en {}ms",
             t_window.elapsed().as_millis()
         );
+        if self.config.remote_control {
+            if let Some(proxy) = self.proxy.clone() {
+                match crate::remote::server::spawn_with_proxy(proxy) {
+                    Ok(handle) => {
+                        tracing::info!(
+                            target: "baud::remote",
+                            "remote control listening on {}",
+                            handle.target()
+                        );
+                        self.remote_server = Some(handle);
+                    }
+                    Err(e) => tracing::error!("remote control failed to start: {e}"),
+                }
+            }
+        }
 
         // 2. Obtener display handle para wgpu (evita el lifetime de ActiveEventLoop).
         let display_handle = event_loop.owned_display_handle();

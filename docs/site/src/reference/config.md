@@ -28,6 +28,12 @@ User-defined keybinding overrides, mapping a chord string to an action name; see
 
 Type: `table`. Default: `{}`.
 
+### remote_control {#config-remote_control}
+
+Opens a local control socket so other processes on this machine can read the screen and inject keys. Off by default.
+
+Type: `boolean`. Default: `false`.
+
 ## Theme {#config-section-theme}
 
 Sixteen ANSI colors plus cursor, selection, and contrast tuning for the active palette. Baud ships with the claude-dark preset; override any key here, or pick a different one with `theme = "name"`.

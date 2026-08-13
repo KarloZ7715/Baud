@@ -17,6 +17,8 @@ A fully commented `config.toml`, generated from the same defaults as the configu
 # allow_osc52_read = false
 # Maps SGR bold text to the bright variant of its ANSI color. Equivalent to `[theme].bold_is_bright`, and OR'd with it: either one being true enables the mapping.
 # bold_is_bright = false
+# Opens a local control socket so other processes on this machine can read the screen and inject keys. Off by default.
+# remote_control = false
 
 [copy_mode]
 # Enables copy mode, letting its keybinding (Ctrl+Shift+X by default) take effect.
