@@ -162,12 +162,11 @@ impl From<Color> for PackedColor {
                 Self::TAG_RGB,
                 ((r as u32) << 16) | ((g as u32) << 8) | b as u32,
             ),
-            named => {
-                // NAMED cubre todas las variantes nombradas del enum.
-                #[allow(clippy::expect_used)]
-                let idx = Self::named_index(named).expect("Color variante nombrada sin índice");
-                Self::pack(Self::TAG_NAMED, idx)
-            }
+            named => match Self::named_index(named) {
+                Some(idx) => Self::pack(Self::TAG_NAMED, idx),
+                // Variante nueva sin entrada en NAMED: degradar a default.
+                None => Self::pack(Self::TAG_DEFAULT, 0),
+            },
         };
         PackedColor(raw)
     }

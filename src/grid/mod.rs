@@ -321,9 +321,10 @@ impl Grid {
                 // scroll region activa). pop_front/push_back es O(1) real,
                 // sin memmove ni rotate.
                 for _ in 0..n {
-                    // Guard: top==0 && bottom==rows_count-1 implica filas no vacias.
-                    #[allow(clippy::expect_used)]
-                    let saved = self.rows.pop_front().expect("rows_count > 0");
+                    let Some(saved) = self.rows.pop_front() else {
+                        debug_assert!(false, "rows no puede estar vacio con rows_count > 0");
+                        break;
+                    };
                     let blank = self.take_blank_row();
                     self.rows.push_back(blank);
                     if let Some(recycled) = self.push_scrollback_recycling(saved) {
@@ -1009,6 +1010,16 @@ mod tests {
         assert_eq!(grid.rows[0][0].ch, 'a');
         assert_eq!(grid.rows[1][0].ch, 'c');
         assert_eq!(grid.rows[grid.rows_count - 1][0], Cell::default());
+    }
+
+    #[test]
+    fn scroll_up_pantalla_completa_conserva_dimensiones() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 10);
+        for _ in 0..20 {
+            grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        }
+        assert_eq!(grid.rows.len(), grid.rows_count);
+        assert_eq!(grid.rows[0].len(), grid.cols_count);
     }
 
     #[test]
