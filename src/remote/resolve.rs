@@ -131,17 +131,58 @@ fn screen_text(app: &App, req: &Request) -> Response {
         Ok(s) => s,
         Err(r) => return r,
     };
+    let term = match lock_session_term(app, session, req.id) {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let visible_rows = term.active_grid().rows_count;
+    let cols = term.active_grid().cols_count;
+    let scrollback = term.grid.scrollback.len();
+    let total_rows = scrollback + visible_rows;
+    let start_param = req.params.get("start_row").and_then(Value::as_u64);
+    let end_param = req.params.get("end_row").and_then(Value::as_u64);
+    if start_param.is_some() || end_param.is_some() {
+        let start = start_param.unwrap_or(0) as usize;
+        let end = end_param
+            .map(|e| e as usize)
+            .unwrap_or(total_rows.saturating_sub(1));
+        if end < start {
+            return Response::err(req.id, "invalid_params", "end_row must be >= start_row");
+        }
+        let all = term.visible_text_lines(scrollback);
+        let start = start.min(all.len());
+        let end = (end + 1).min(all.len());
+        return Response::ok(
+            req.id,
+            json!({
+                "lines": &all[start..end],
+                "cols": cols,
+                "rows": visible_rows,
+                "total_rows": total_rows,
+                "start_row": start,
+            }),
+        );
+    }
     let extra = req
         .params
         .get("scrollback_lines")
         .and_then(Value::as_u64)
         .unwrap_or(0) as usize;
-    let term = match lock_session_term(app, session, req.id) {
-        Ok(t) => t,
-        Err(r) => return r,
-    };
-    let lines = term.visible_text_lines(extra);
-    Response::ok(req.id, json!({ "lines": lines }))
+    let extra = extra.min(scrollback);
+    let mut lines = term.visible_text_lines(extra);
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    Response::ok(
+        req.id,
+        json!({
+            "lines": lines,
+            "cols": cols,
+            "rows": visible_rows,
+            "total_rows": total_rows,
+            "start_row": total_rows.saturating_sub(visible_rows + extra),
+        }),
+    )
 }
 
 fn screen_detail(app: &App, req: &Request) -> Response {
@@ -554,6 +595,58 @@ mod tests {
         let r = done(resolve_request(&app, &Request::screen_text_default()));
         assert!(r.is_ok());
         assert!(r.text_lines().unwrap().join("\n").contains("hola"));
+    }
+
+    #[test]
+    fn screen_text_recorta_vacias_y_anota_dimensiones() {
+        let app = test_app_con_texto("hola\r\nmundo");
+        let r = done(resolve_request(&app, &Request::screen_text_default()));
+        let Response::Ok { body, .. } = r else {
+            panic!("esperaba ok")
+        };
+        let lines = body["lines"].as_array().unwrap();
+        // Solo las 2 lineas con contenido, no todo el viewport.
+        assert_eq!(lines.len(), 2);
+        assert!(body["cols"].as_u64().unwrap() > 0);
+        assert!(body["rows"].as_u64().unwrap() > 0);
+        assert_eq!(body["total_rows"], body["rows"]); // sin scrollback aun
+        assert_eq!(body["start_row"], 0);
+    }
+
+    #[test]
+    fn screen_text_por_rango_absoluto() {
+        let mut term = Term::new();
+        for i in 0..200 {
+            feed(&mut term, format!("linea {i}\r\n").as_bytes());
+        }
+        let app = test_app(Arc::new(Mutex::new(term)));
+        let req = Request {
+            id: 1,
+            method: "screen_text".into(),
+            params: json!({ "start_row": 10, "end_row": 12 }),
+        };
+        let r = done(resolve_request(&app, &req));
+        let Response::Ok { body, .. } = r else {
+            panic!("esperaba ok")
+        };
+        let lines = body["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].as_str().unwrap().starts_with("linea"));
+        assert_eq!(body["start_row"], 10);
+    }
+
+    #[test]
+    fn screen_text_rango_invertido_es_err() {
+        let app = test_app_con_texto("x");
+        let req = Request {
+            id: 1,
+            method: "screen_text".into(),
+            params: json!({ "start_row": 5, "end_row": 2 }),
+        };
+        assert!(matches!(
+            done(resolve_request(&app, &req)),
+            Response::Err { .. }
+        ));
     }
 
     #[test]
