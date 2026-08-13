@@ -85,7 +85,7 @@ pub fn title_button_size_px(scale_factor: f32) -> (f32, f32) {
 }
 
 /// Calcula el layout de la barra para el ancho de ventana dado.
-pub fn compute_title_bar_layout(
+pub(crate) fn compute_title_bar_layout(
     surface_w: f32,
     pad_x: f32,
     pad_y: f32,

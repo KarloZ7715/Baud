@@ -30,11 +30,12 @@ pub use tab_bar::{
     TAB_CONTENT_GAP_PX, TAB_LABEL_PAD_CELLS,
 };
 pub(crate) use terminal_fallback::create_font_system_with_fallback;
+pub(crate) use title_bar::compute_title_bar_layout;
 pub use title_bar::{
-    build_button_hover, build_title_bar_track, compute_title_bar_layout, hit_test,
-    push_button_icon, title_bar_height_px, title_button_size_px, TitleBarHit, TitleBarLayout,
-    TitleButton, TitleButtonKind, TITLE_BAR_HEIGHT_LOGICAL, TITLE_BUTTON_HEIGHT_LOGICAL,
-    TITLE_BUTTON_WIDTH_LOGICAL, WIN_BUTTON_ICON_SIZE_LOGICAL,
+    build_button_hover, build_title_bar_track, hit_test, push_button_icon, title_bar_height_px,
+    title_button_size_px, TitleBarHit, TitleBarLayout, TitleButton, TitleButtonKind,
+    TITLE_BAR_HEIGHT_LOGICAL, TITLE_BUTTON_HEIGHT_LOGICAL, TITLE_BUTTON_WIDTH_LOGICAL,
+    WIN_BUTTON_ICON_SIZE_LOGICAL,
 };
 
 /// Base de ids reservados para box/block glyphs programaticos (sobre ids de cache).
