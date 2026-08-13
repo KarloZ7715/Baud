@@ -10,7 +10,7 @@ mod resolve;
 pub mod server;
 
 pub use resolve::{
-    pending_from_wait, resolve_request, screen_contains, PendingWait, ResolveOutcome,
+    pending_from_wait, resolve_request, screen_contains, screen_hash, PendingWait, ResolveOutcome,
 };
 
 use serde::ser::SerializeStruct;
@@ -55,6 +55,14 @@ impl Request {
             id: 1,
             method: "wait_for".into(),
             params: serde_json::json!({ "pattern": pattern, "timeout_ms": timeout_ms }),
+        }
+    }
+
+    pub fn wait_idle(idle_ms: u64, timeout_ms: u64) -> Self {
+        Self {
+            id: 1,
+            method: "wait_idle".into(),
+            params: serde_json::json!({ "idle_ms": idle_ms, "timeout_ms": timeout_ms }),
         }
     }
 }

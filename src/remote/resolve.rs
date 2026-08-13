@@ -16,11 +16,16 @@ use crate::window::App;
 
 use super::{Request, Response};
 
-/// Espera `wait_for` que el event loop reevalúa tras output o al vencer.
+/// Espera que el event loop reevalúa tras output, al vencer o al cumplirse la calma.
 pub struct PendingWait {
     pub id: u64,
     pub session: Option<u64>,
-    pub pattern: String,
+    /// Some = wait_for (subcadena); None = wait_idle.
+    pub pattern: Option<String>,
+    /// Some = wait_idle: calma requerida.
+    pub idle: Option<Duration>,
+    pub last_hash: u64,
+    pub last_change: Instant,
     pub deadline: Instant,
     pub tx: std::sync::mpsc::Sender<Response>,
 }
@@ -33,6 +38,8 @@ pub enum ResolveOutcome {
         session: Option<u64>,
         pattern: String,
         timeout_ms: u64,
+        /// Some = wait_idle; None = wait_for.
+        idle_ms: Option<u64>,
     },
 }
 
@@ -55,6 +62,7 @@ pub fn resolve_request(app: &App, req: &Request) -> ResolveOutcome {
         "send_text" => ResolveOutcome::done(send_text(app, req)),
         "send_key" => ResolveOutcome::done(send_key(app, req)),
         "wait_for" => wait_for(app, req),
+        "wait_idle" => wait_idle(app, req),
         "get_config" => ResolveOutcome::done(get_config(app, req.id)),
         "tail_log" => ResolveOutcome::done(tail_log(req)),
         other => ResolveOutcome::done(Response::err(
@@ -72,6 +80,17 @@ pub fn screen_contains(app: &App, session: Option<u64>, pattern: &str) -> bool {
         return false;
     };
     term.visible_text_lines(0).join("\n").contains(pattern)
+}
+
+/// Hash del texto visible de la sesion; cambia si la pantalla cambia.
+pub fn screen_hash(app: &App, session: Option<u64>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let Ok(term) = lock_session_term(app, session, 0) else {
+        return 0;
+    };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    term.visible_text_lines(0).hash(&mut h);
+    h.finish()
 }
 
 fn list_sessions(app: &App, id: u64) -> Response {
@@ -275,6 +294,34 @@ fn wait_for(app: &App, req: &Request) -> ResolveOutcome {
         session,
         pattern: pattern.to_string(),
         timeout_ms,
+        idle_ms: None,
+    }
+}
+
+fn wait_idle(app: &App, req: &Request) -> ResolveOutcome {
+    let session = match optional_session(&req.params, req.id) {
+        Ok(s) => s,
+        Err(r) => return ResolveOutcome::done(r),
+    };
+    if lock_session_term(app, session, req.id).is_err() {
+        return ResolveOutcome::done(Response::err(req.id, "no_session", "session not found"));
+    }
+    let idle_ms = req
+        .params
+        .get("idle_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(500);
+    let timeout_ms = req
+        .params
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(5_000);
+    ResolveOutcome::Wait {
+        id: req.id,
+        session,
+        pattern: String::new(),
+        timeout_ms,
+        idle_ms: Some(idle_ms),
     }
 }
 
@@ -404,19 +451,29 @@ fn color_json(color: Color) -> Value {
     }
 }
 
-/// Construye el `PendingWait` que el event loop guarda cuando el patron aun no esta.
+/// Construye el `PendingWait` que el event loop guarda cuando aun no hay resultado.
 pub fn pending_from_wait(
     id: u64,
     session: Option<u64>,
     pattern: String,
     timeout_ms: u64,
+    idle_ms: Option<u64>,
+    last_hash: u64,
     tx: std::sync::mpsc::Sender<Response>,
 ) -> PendingWait {
+    let now = Instant::now();
     PendingWait {
         id,
         session,
-        pattern,
-        deadline: Instant::now() + Duration::from_millis(timeout_ms),
+        pattern: if idle_ms.is_some() {
+            None
+        } else {
+            Some(pattern)
+        },
+        idle: idle_ms.map(Duration::from_millis),
+        last_hash,
+        last_change: now,
+        deadline: now + Duration::from_millis(timeout_ms),
         tx,
     }
 }
@@ -603,5 +660,42 @@ mod tests {
             ResolveOutcome::Wait { .. } => {}
             ResolveOutcome::Done(_) => panic!("debia quedar pendiente: ya no esta visible"),
         }
+    }
+
+    #[test]
+    fn wait_idle_resuelve_cuando_no_hay_cambios() {
+        let mut app = test_app_con_texto("listo");
+        let (tx, rx) = mpsc::channel();
+        app.dispatch_user_event(crate::window::UserEvent::Remote(
+            Request::wait_idle(1, 5_000), // 1 ms de calma: se cumple enseguida
+            tx,
+        ));
+        std::thread::sleep(Duration::from_millis(10));
+        let id = app.focused_session().id;
+        app.dispatch_user_event(crate::window::UserEvent::RedrawNeeded(id));
+        let r = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let Response::Ok { body, .. } = r else {
+            panic!("esperaba ok")
+        };
+        assert_eq!(body["idle"], true);
+    }
+
+    #[test]
+    fn wait_idle_timeout_si_la_pantalla_no_para() {
+        let term = Arc::new(Mutex::new(Term::new()));
+        let mut app = test_app(Arc::clone(&term));
+        let id = app.focused_session().id;
+        let (tx, rx) = mpsc::channel();
+        app.dispatch_user_event(crate::window::UserEvent::Remote(
+            Request::wait_idle(60_000, 0), // calma inalcanzable, timeout inmediato
+            tx,
+        ));
+        app.dispatch_user_event(crate::window::UserEvent::RedrawNeeded(id));
+        let r = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let Response::Ok { body, .. } = r else {
+            panic!("timeout debe ser ok")
+        };
+        assert_eq!(body["idle"], false);
+        assert_eq!(body["timed_out"], true);
     }
 }

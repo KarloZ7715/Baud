@@ -992,9 +992,15 @@ impl App {
                 session,
                 pattern,
                 timeout_ms,
+                idle_ms,
             } => {
+                let last_hash = if idle_ms.is_some() {
+                    crate::remote::screen_hash(self, session)
+                } else {
+                    0
+                };
                 self.pending_waits.push(crate::remote::pending_from_wait(
-                    id, session, pattern, timeout_ms, tx,
+                    id, session, pattern, timeout_ms, idle_ms, last_hash, tx,
                 ));
             }
         }
@@ -1024,20 +1030,51 @@ impl App {
         let now = Instant::now();
         let mut i = 0;
         while i < self.pending_waits.len() {
-            let expired = now >= self.pending_waits[i].deadline;
             let session = self.pending_waits[i].session;
-            let pattern = self.pending_waits[i].pattern.clone();
-            let matched = crate::remote::screen_contains(self, session, &pattern);
-            if expired || matched {
+            let resp = match self.pending_waits[i].pattern.clone() {
+                Some(pattern) => {
+                    let expired = now >= self.pending_waits[i].deadline;
+                    let matched = crate::remote::screen_contains(self, session, &pattern);
+                    if expired || matched {
+                        Some(if matched {
+                            crate::remote::Response::ok(
+                                self.pending_waits[i].id,
+                                serde_json::json!({ "matched": true }),
+                            )
+                        } else {
+                            crate::remote::Response::ok(
+                                self.pending_waits[i].id,
+                                serde_json::json!({ "matched": false, "timed_out": true }),
+                            )
+                        })
+                    } else {
+                        None
+                    }
+                }
+                None => {
+                    let hash = crate::remote::screen_hash(self, session);
+                    if hash != self.pending_waits[i].last_hash {
+                        self.pending_waits[i].last_hash = hash;
+                        self.pending_waits[i].last_change = now;
+                    }
+                    let idle = self.pending_waits[i].idle.unwrap_or(Duration::ZERO);
+                    if now.duration_since(self.pending_waits[i].last_change) >= idle {
+                        Some(crate::remote::Response::ok(
+                            self.pending_waits[i].id,
+                            serde_json::json!({ "idle": true }),
+                        ))
+                    } else if now >= self.pending_waits[i].deadline {
+                        Some(crate::remote::Response::ok(
+                            self.pending_waits[i].id,
+                            serde_json::json!({ "idle": false, "timed_out": true }),
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some(resp) = resp {
                 let wait = self.pending_waits.swap_remove(i);
-                let resp = if matched {
-                    crate::remote::Response::ok(wait.id, serde_json::json!({ "matched": true }))
-                } else {
-                    crate::remote::Response::ok(
-                        wait.id,
-                        serde_json::json!({ "matched": false, "timed_out": true }),
-                    )
-                };
                 let _ = wait.tx.send(resp);
             } else {
                 i += 1;
@@ -3640,7 +3677,7 @@ impl App {
             }
         }
         self.poll_remote_waits();
-        if let Some(deadline) = self.pending_waits.iter().map(|w| w.deadline).min() {
+        if let Some(deadline) = self.pending_waits.iter().map(remote_wait_wake_at).min() {
             wake_at = Some(match wake_at {
                 Some(existing) => existing.min(deadline),
                 None => deadline,
@@ -3649,6 +3686,13 @@ impl App {
         if let Some(deadline) = wake_at {
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
+    }
+}
+
+fn remote_wait_wake_at(w: &crate::remote::PendingWait) -> Instant {
+    match w.idle {
+        Some(idle) => (w.last_change + idle).min(w.deadline),
+        None => w.deadline,
     }
 }
 
