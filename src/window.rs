@@ -3887,6 +3887,7 @@ impl ApplicationHandler<UserEvent> for App {
         let _phase = self.watchdog.enter(watchdog::window_event_phase(&event));
         match event {
             WindowEvent::CloseRequested => {
+                self.request_exit(ExitReason::CloseRequested);
                 for host in &self.sessions {
                     let _ = host.session.pty_tx.send(PtyCommand::Shutdown);
                 }
@@ -4610,6 +4611,7 @@ impl ApplicationHandler<UserEvent> for App {
                                             window.set_maximized(!window.is_maximized());
                                         }
                                         TitleButtonKind::Close => {
+                                            self.request_exit(ExitReason::TitleBarButton);
                                             for host in &self.sessions {
                                                 let _ =
                                                     host.session.pty_tx.send(PtyCommand::Shutdown);
