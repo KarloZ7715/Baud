@@ -65,14 +65,13 @@ pub fn resolve_request(app: &App, req: &Request) -> ResolveOutcome {
     }
 }
 
-/// True si la pantalla de la sesion (visible + scrollback reciente) contiene `pattern`.
+/// True si la pantalla visible de la sesion contiene `pattern`.
+/// El historial no cuenta: un marcador viejo en el scrollback no debe resolver la espera.
 pub fn screen_contains(app: &App, session: Option<u64>, pattern: &str) -> bool {
     let Ok(term) = lock_session_term(app, session, 0) else {
         return false;
     };
-    term.visible_text_lines(term.grid.scrollback.len())
-        .join("\n")
-        .contains(pattern)
+    term.visible_text_lines(0).join("\n").contains(pattern)
 }
 
 fn list_sessions(app: &App, id: u64) -> Response {
@@ -581,5 +580,24 @@ mod tests {
         ));
         let r = rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert!(matches!(r, Response::Err { ref code, .. } if code == "timeout"));
+    }
+
+    #[test]
+    fn wait_for_no_casa_con_el_scrollback() {
+        // Grid por defecto de Term::new() en tests: empujar el marcador fuera
+        // de la pantalla visible con suficientes saltos de linea.
+        let mut term = Term::new();
+        feed(&mut term, b"MARCADOR_VIEJO");
+        let filas = term.active_grid().rows_count;
+        for _ in 0..(filas + 5) {
+            feed(&mut term, b"\r\n");
+        }
+        let app = test_app(Arc::new(Mutex::new(term)));
+        assert!(!screen_contains(&app, None, "MARCADOR_VIEJO"));
+        // El patron visible si casa.
+        match resolve_request(&app, &Request::wait_for("MARCADOR_VIEJO", 10)) {
+            ResolveOutcome::Wait { .. } => {}
+            ResolveOutcome::Done(_) => panic!("debia quedar pendiente: ya no esta visible"),
+        }
     }
 }
