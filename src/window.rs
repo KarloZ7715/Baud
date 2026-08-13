@@ -248,6 +248,34 @@ impl SessionHost {
             let _ = h.join();
         }
     }
+
+    /// Senala el cierre al hilo PTY. En Windows espera a que el lector
+    /// termine (timeout corto) para no dropear ConPTY con I/O superpuesto
+    /// en vuelo; en el resto de plataformas el Shutdown asincrono basta.
+    fn shutdown_pty(&mut self) {
+        let _ = self.session.pty_tx.send(PtyCommand::Shutdown);
+        #[cfg(windows)]
+        {
+            const JOIN_TIMEOUT: Duration = Duration::from_millis(500);
+            let deadline = Instant::now() + JOIN_TIMEOUT;
+            while self
+                .pty_handle
+                .as_ref()
+                .is_some_and(|handle| !handle.is_finished())
+            {
+                if Instant::now() > deadline {
+                    tracing::warn!(
+                        "hilo lector PTY no termino en {JOIN_TIMEOUT:?}; se continuara el cierre"
+                    );
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if let Some(h) = self.pty_handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
 }
 
 /// Un cierre por debajo de este uptime es anomalo para una terminal: ninguna
@@ -936,6 +964,14 @@ impl App {
         self.pending_exit = Some(reason);
     }
 
+    /// Sale del event loop despues de soltar el renderer. La superficie GPU
+    /// debe morir mientras la ventana sigue viva: si el HWND ya no existe,
+    /// el backend grafico puede tumbar el proceso al dropear.
+    fn begin_event_loop_exit(&mut self, event_loop: &ActiveEventLoop) {
+        self.renderer.take();
+        event_loop.exit();
+    }
+
     fn is_focused_session(&self, id: SessionId) -> bool {
         self.tabs
             .get(self.focused)
@@ -1598,8 +1634,8 @@ impl App {
             return;
         }
         if self.tabs.len() <= 1 {
-            for host in &self.sessions {
-                let _ = host.session.pty_tx.send(PtyCommand::Shutdown);
+            for host in &mut self.sessions {
+                host.shutdown_pty();
             }
             self.request_exit(ExitReason::LastTabClosed);
             return;
@@ -1612,8 +1648,8 @@ impl App {
             .collect();
         indices.sort_unstable_by(|a, b| b.cmp(a));
         for idx in indices {
-            let host = self.sessions.remove(idx);
-            let _ = host.session.pty_tx.send(PtyCommand::Shutdown);
+            let mut host = self.sessions.remove(idx);
+            host.shutdown_pty();
             self.detached_hosts.push(host);
         }
         if self.focused > index {
@@ -1812,8 +1848,8 @@ impl App {
 
     fn remove_pane_session(&mut self, closed_id: SessionId) {
         if let Some(idx) = self.session_by_id(closed_id) {
-            let host = self.sessions.remove(idx);
-            let _ = host.session.pty_tx.send(PtyCommand::Shutdown);
+            let mut host = self.sessions.remove(idx);
+            host.shutdown_pty();
             self.detached_hosts.push(host);
         }
         self.apply_focused_window_title();
@@ -3407,7 +3443,7 @@ impl App {
 
     fn about_to_wait_inner(&mut self, event_loop: &ActiveEventLoop) {
         if self.pending_exit.is_some() {
-            event_loop.exit();
+            self.begin_event_loop_exit(event_loop);
             return;
         }
         self.apply_pending_input_reset();
@@ -3889,12 +3925,10 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             WindowEvent::CloseRequested => {
                 self.request_exit(ExitReason::CloseRequested);
-                for host in &self.sessions {
-                    let _ = host.session.pty_tx.send(PtyCommand::Shutdown);
+                for host in &mut self.sessions {
+                    host.shutdown_pty();
                 }
-                // Salir del event loop. El hilo PTY recibira el Shutdown, hara SIGHUP,
-                // esperara 100ms, y morira. El Pty se dropea con SIGKILL safety net.
-                event_loop.exit();
+                self.begin_event_loop_exit(event_loop);
             }
             WindowEvent::Occluded(hidden) => {
                 self.set_occluded(hidden);
@@ -4613,11 +4647,10 @@ impl ApplicationHandler<UserEvent> for App {
                                         }
                                         TitleButtonKind::Close => {
                                             self.request_exit(ExitReason::TitleBarButton);
-                                            for host in &self.sessions {
-                                                let _ =
-                                                    host.session.pty_tx.send(PtyCommand::Shutdown);
+                                            for host in &mut self.sessions {
+                                                host.shutdown_pty();
                                             }
-                                            event_loop.exit();
+                                            self.begin_event_loop_exit(event_loop);
                                         }
                                     }
                                     return;
@@ -5974,6 +6007,17 @@ import = false
         let mut app = test_app(Arc::new(Mutex::new(Term::new())));
         app.close_tab_at(0);
         assert_eq!(app.pending_exit, Some(ExitReason::LastTabClosed));
+    }
+
+    #[test]
+    fn shutdown_pty_sin_hilos_no_bloquea() {
+        let mut host = SessionHost::test(test_session(Arc::new(Mutex::new(Term::new()))));
+        let start = Instant::now();
+        host.shutdown_pty();
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "shutdown_pty no debe esperar si no hay hilo lector"
+        );
     }
 
     #[test]
