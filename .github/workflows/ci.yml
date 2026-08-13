@@ -167,6 +167,38 @@ jobs:
           }
           exit $codigo
 
+      - name: Activar WER LocalDumps
+        shell: pwsh
+        run: |
+          $key = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps"
+          New-Item -Path $key -Force | Out-Null
+          Set-ItemProperty $key DumpFolder "$env:GITHUB_WORKSPACE\dumps" -Type ExpandString
+          Set-ItemProperty $key DumpType 2 -Type DWord
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\dumps" | Out-Null
+
+      - name: Capturar stderr del test de cierre
+        shell: pwsh
+        run: |
+          cargo test --release --test windows_close_e2e -- --ignored --nocapture 2>&1 | Tee-Object -FilePath windows_close_e2e.stderr.txt
+          $codigo = $LASTEXITCODE
+          $logSrc = Join-Path $env:LOCALAPPDATA "baud\logs"
+          if (Test-Path $logSrc) {
+            New-Item -ItemType Directory -Force -Path baud-logs | Out-Null
+            Copy-Item -Path (Join-Path $logSrc "*") -Destination baud-logs -Recurse -Force
+          }
+          exit $codigo
+
+      - name: Subir artifacts de diagnostico
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-close-e2e-diagnostics
+          path: |
+            dumps/
+            windows_close_e2e.stderr.txt
+            baud-logs/
+          if-no-files-found: ignore
+
   # Job 6: smoke X11 bajo xvfb.
   xvfb-smoke:
     name: xvfb X11 smoke

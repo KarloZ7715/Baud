@@ -74,6 +74,13 @@ winresource = "0.1"
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 
+[[bin]]
+name = "tui_dummy"
+path = "tools/tui_dummy.rs"
+test = false
+bench = false
+doc = false
+
 [[bench]]
 name = "bench"
 harness = false
