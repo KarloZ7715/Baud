@@ -1,3 +1,6 @@
+// Politica cero-crashes: unwrap/expect en runtime critico es lint
+// (ansi, grid, pty, renderer, window, event_loop, session, input).
+// Los invariantes demostrables llevan #[allow] con su justificacion.
 pub mod ansi;
 pub mod base64;
 pub mod cli;

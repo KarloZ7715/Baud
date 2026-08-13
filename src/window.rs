@@ -4,6 +4,8 @@
 //! El Renderer se inicializa en resumed() y se invoca en redraw_requested().
 //! El Term se comparte con el hilo drain via Arc<Mutex<Term>>.
 
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -681,6 +683,8 @@ impl App {
 
     fn focused_session(&self) -> &Session {
         let id = self.tabs[self.focused].focused();
+        // Toda hoja de tab tiene SessionHost; el id enfocado sale de ahi.
+        #[allow(clippy::expect_used)]
         let idx = self
             .session_by_id(id)
             .expect("sesion enfocada debe existir");
@@ -1612,6 +1616,8 @@ impl App {
             Arc::clone(&self.blink_focus),
         );
         self.sessions.push(SessionHost::from_spawned(spawned));
+        // push acaba de insertar el host.
+        #[allow(clippy::expect_used)]
         let new_id = self
             .sessions
             .last()
@@ -2788,6 +2794,8 @@ impl App {
 
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
+                // Este handler solo corre con picker Some.
+                #[allow(clippy::expect_used)]
                 let picker = self.theme_picker.take().expect("picker activo");
                 self.cancel_theme_picker(picker);
             }
@@ -2795,6 +2803,7 @@ impl App {
                 if !picker.can_confirm() {
                     return true;
                 }
+                #[allow(clippy::expect_used)]
                 let picker = self.theme_picker.take().expect("picker activo");
                 self.confirm_theme_picker(picker);
             }
@@ -2808,6 +2817,7 @@ impl App {
                 "j" => picker.move_next(),
                 "k" => picker.move_prev(),
                 "q" => {
+                    #[allow(clippy::expect_used)]
                     let picker = self.theme_picker.take().expect("picker activo");
                     self.cancel_theme_picker(picker);
                 }
@@ -3531,6 +3541,8 @@ impl ApplicationHandler<UserEvent> for App {
         self.watchdog.mark_idle(true);
     }
 
+    // Sin ventana o GPU no hay terminal: abortar en arranque es la politica.
+    #[allow(clippy::expect_used)]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // El arranque bloquea el hilo GUI (join del hilo de fuentes, init de
         // wgpu). Sin esta fase, el watchdog reporta el bloqueo como "idle" y el

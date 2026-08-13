@@ -1,3 +1,7 @@
+//! Parser y estado del terminal virtual.
+
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 use std::time::Instant;
 
 use crate::copy_mode::CopyModeState;
@@ -159,6 +163,8 @@ impl From<Color> for PackedColor {
                 ((r as u32) << 16) | ((g as u32) << 8) | b as u32,
             ),
             named => {
+                // NAMED cubre todas las variantes nombradas del enum.
+                #[allow(clippy::expect_used)]
                 let idx = Self::named_index(named).expect("Color variante nombrada sin índice");
                 Self::pack(Self::TAG_NAMED, idx)
             }

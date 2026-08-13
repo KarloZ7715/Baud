@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 use crate::ansi::{Color, PackedAttrs, Term};
 use std::collections::VecDeque;
 
@@ -319,6 +321,8 @@ impl Grid {
                 // scroll region activa). pop_front/push_back es O(1) real,
                 // sin memmove ni rotate.
                 for _ in 0..n {
+                    // Guard: top==0 && bottom==rows_count-1 implica filas no vacias.
+                    #[allow(clippy::expect_used)]
                     let saved = self.rows.pop_front().expect("rows_count > 0");
                     let blank = self.take_blank_row();
                     self.rows.push_back(blank);

@@ -347,6 +347,8 @@ fn shape_with_style(
         }
     }
 
+    // extract_glyph_layers devuelve None si glyphs esta vacio.
+    #[allow(clippy::expect_used)]
     let mut shaped = base.expect("layers.glyphs no vacio");
     shaped.overlays = overlays;
     shaped

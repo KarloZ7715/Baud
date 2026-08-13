@@ -1,5 +1,7 @@
 //! Modulo de render GPU del grid dinamico.
 
+#![cfg_attr(not(test), warn(clippy::unwrap_used, clippy::expect_used))]
+
 mod blink;
 mod builtin;
 mod cell_renderer;
@@ -594,8 +596,11 @@ impl Renderer {
         for _ in 0..3 {
             title_bar_button_glyphs.push(Vec::new());
         }
-        let title_bar_button_glyphs: [Vec<glyphon::CustomGlyph>; 3] =
-            title_bar_button_glyphs.try_into().expect("3 glyph vecs");
+        let title_bar_button_glyphs: [Vec<glyphon::CustomGlyph>; 3] = {
+            // El bucle empuja exactamente 3 vecs.
+            #[allow(clippy::expect_used)]
+            title_bar_button_glyphs.try_into().expect("3 glyph vecs")
+        };
 
         Self {
             device,
@@ -1050,6 +1055,8 @@ impl Renderer {
         t0: Instant,
         get_frame_us: f64,
     ) -> Result<Vec<SessionId>, String> {
+        // El llamador arma panes desde las hojas del tab activo.
+        #[allow(clippy::expect_used)]
         let focused = panes
             .iter()
             .find(|p| p.focused)
