@@ -198,15 +198,50 @@ fn screen_detail(app: &App, req: &Request) -> Response {
     let rows = grid.rows_count;
     let cols = grid.cols_count;
     let (x, y, w, h) = parse_rect(&req.params, cols, rows);
+    let detail = req
+        .params
+        .get("detail")
+        .and_then(Value::as_str)
+        .unwrap_or("compact");
+    let mut body = json!({
+        "cols": cols,
+        "rows": rows,
+        "cursor": {
+            "row": term.cursor.row,
+            "col": term.cursor.col,
+            "visible": term.cursor_visible,
+        },
+        "modes": {
+            "alt_screen": term.alt_screen,
+            "mouse": term.mouse_reporting.is_active(),
+            "extended_keyboard": term.keyboard_flags != 0,
+            "bracketed_paste": term.bracketed_paste,
+        },
+    });
+    match detail {
+        "compact" => body["lines"] = json!(detail_lines_compact(grid, x, y, w, h)),
+        "full" => body["cells"] = json!(detail_cells(grid, x, y, w, h)),
+        _ => {
+            return Response::err(
+                req.id,
+                "invalid_params",
+                "detail must be 'compact' or 'full'",
+            )
+        }
+    }
+    Response::ok(req.id, body)
+}
+
+fn detail_cells(grid: &crate::grid::Grid, x: usize, y: usize, w: usize, h: usize) -> Vec<Value> {
     let mut cells = Vec::with_capacity(w.saturating_mul(h));
-    for row in y..y.saturating_add(h).min(rows) {
+    for row in y..y.saturating_add(h).min(grid.rows_count) {
         let Some(line) = grid.rows.get(row) else {
             continue;
         };
         for (col, cell) in line
             .iter()
             .enumerate()
-            .take(x.saturating_add(w).min(cols).min(line.len()))
+            .take(x.saturating_add(w).min(grid.cols_count).min(line.len()))
             .skip(x)
         {
             cells.push(json!({
@@ -225,25 +260,95 @@ fn screen_detail(app: &App, req: &Request) -> Response {
             }));
         }
     }
-    Response::ok(
-        req.id,
-        json!({
-            "cols": cols,
-            "rows": rows,
-            "cells": cells,
-            "cursor": {
-                "row": term.cursor.row,
-                "col": term.cursor.col,
-                "visible": term.cursor_visible,
-            },
-            "modes": {
-                "alt_screen": term.alt_screen,
-                "mouse": term.mouse_reporting.is_active(),
-                "extended_keyboard": term.keyboard_flags != 0,
-                "bracketed_paste": term.bracketed_paste,
-            },
-        }),
-    )
+    cells
+}
+
+/// Lista de atributos activos de la celda, para el modo compacto.
+fn attrs_list(cell: &crate::grid::Cell) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if cell.attrs.bold() {
+        out.push("bold");
+    }
+    if cell.attrs.italic() {
+        out.push("italic");
+    }
+    if cell.attrs.underline() {
+        out.push("underline");
+    }
+    if cell.attrs.dim() {
+        out.push("dim");
+    }
+    if cell.attrs.reverse() {
+        out.push("reverse");
+    }
+    if cell.attrs.strikethrough() {
+        out.push("strikethrough");
+    }
+    out
+}
+
+/// Filas como runs de estilo constante; recorta filas finales sin contenido.
+fn detail_lines_compact(
+    grid: &crate::grid::Grid,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+) -> Vec<Value> {
+    let mut lines: Vec<Value> = Vec::new();
+    for row in y..y.saturating_add(h).min(grid.rows_count) {
+        let Some(line) = grid.rows.get(row) else {
+            continue;
+        };
+        let mut runs: Vec<Value> = Vec::new();
+        let mut text = String::new();
+        let mut style: Option<(Value, Value, Vec<&'static str>)> = None;
+        for cell in line
+            .iter()
+            .take(x.saturating_add(w).min(grid.cols_count).min(line.len()))
+            .skip(x)
+        {
+            let s = (
+                color_json(cell.attrs.fg()),
+                color_json(cell.attrs.bg()),
+                attrs_list(cell),
+            );
+            if style.as_ref() != Some(&s) {
+                if let Some((fg, bg, attrs)) = style.take() {
+                    let mut run = json!({ "text": text, "fg": fg, "bg": bg });
+                    if !attrs.is_empty() {
+                        run["attrs"] = json!(attrs);
+                    }
+                    runs.push(run);
+                    text = String::new();
+                }
+                style = Some(s);
+            }
+            text.push(cell.ch);
+        }
+        if let Some((fg, bg, attrs)) = style.take() {
+            let mut run = json!({ "text": text, "fg": fg, "bg": bg });
+            if !attrs.is_empty() {
+                run["attrs"] = json!(attrs);
+            }
+            runs.push(run);
+        }
+        lines.push(json!({ "row": row, "runs": runs }));
+    }
+    // Fila vacia: solo espacios con estilo por defecto.
+    while lines.last().is_some_and(|l| {
+        l["runs"].as_array().is_some_and(|rs| {
+            rs.iter().all(|r| {
+                r["text"].as_str().is_some_and(|t| t.trim().is_empty())
+                    && r["fg"] == json!("default")
+                    && r["bg"] == json!("default")
+                    && r.get("attrs").is_none()
+            })
+        })
+    }) {
+        lines.pop();
+    }
+    lines
 }
 
 fn send_text(app: &App, req: &Request) -> Response {
@@ -722,6 +827,47 @@ mod tests {
         let app = test_app(Arc::new(Mutex::new(Term::new())));
         let r = done(resolve_request(&app, &Request::send_key("mega+tecla")));
         assert!(matches!(r, Response::Err { .. }));
+    }
+
+    #[test]
+    fn screen_detail_compacto_agrupa_runs() {
+        let mut term = Term::new();
+        feed(&mut term, b"aa\x1b[1mBB\x1b[0mcc");
+        let app = test_app(Arc::new(Mutex::new(term)));
+        let req = Request {
+            id: 1,
+            method: "screen_detail".into(),
+            params: json!({}),
+        };
+        let r = done(resolve_request(&app, &req));
+        let Response::Ok { body, .. } = r else {
+            panic!("esperaba ok")
+        };
+        assert!(body.get("cells").is_none(), "compact no debe volcar celdas");
+        let runs = body["lines"][0]["runs"].as_array().unwrap();
+        // aa | BB(bold) | cc (+ posible run de relleno)
+        assert!(runs.len() >= 3);
+        assert!(runs[0]["text"].as_str().unwrap().starts_with("aa"));
+        assert_eq!(runs[1]["text"], "BB");
+        assert_eq!(runs[1]["attrs"][0], "bold");
+        assert!(runs[0].get("attrs").is_none());
+        // Filas vacias finales recortadas.
+        assert_eq!(body["lines"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn screen_detail_full_mantiene_celdas() {
+        let app = test_app_con_texto("x");
+        let req = Request {
+            id: 1,
+            method: "screen_detail".into(),
+            params: json!({ "detail": "full" }),
+        };
+        let r = done(resolve_request(&app, &req));
+        let Response::Ok { body, .. } = r else {
+            panic!("esperaba ok")
+        };
+        assert!(body["cells"].is_array());
     }
 
     #[test]
