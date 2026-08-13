@@ -294,17 +294,22 @@ impl Grid {
     /// Saca una fila en blanco del pool reciclado, o asigna una nueva si el
     /// pool está vacío.
     fn take_blank_row(&mut self) -> Vec<Cell> {
-        let row = self
+        let mut row = self
             .blank_row_pool
             .pop()
             .unwrap_or_else(|| vec![Cell::default(); self.cols_count]);
-        debug_assert_eq!(row.len(), self.cols_count);
+        // El scrollback puede devolver una fila guardada con otro ancho.
+        if row.len() != self.cols_count {
+            row.resize(self.cols_count, Cell::default());
+        }
         row
     }
 
     /// Devuelve una fila ya vaciada al pool reciclado, si hay hueco.
-    fn recycle_blank_row(&mut self, row: Vec<Cell>) {
-        debug_assert_eq!(row.len(), self.cols_count);
+    fn recycle_blank_row(&mut self, mut row: Vec<Cell>) {
+        if row.len() != self.cols_count {
+            row.resize(self.cols_count, Cell::default());
+        }
         if self.blank_row_pool.len() < BLANK_ROW_POOL_CAP {
             self.blank_row_pool.push(row);
         }
@@ -1051,6 +1056,23 @@ mod tests {
         };
         assert_eq!(lines, 3);
         assert_eq!(region, (0, 4));
+    }
+
+    #[test]
+    fn scrollback_reciclado_tras_resize_de_ancho_tiene_el_ancho_nuevo() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 20, 10);
+        for _ in 0..10 {
+            grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        }
+        grid.resize(5, 80);
+        for _ in 0..5 {
+            grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        }
+        assert!(
+            grid.rows.iter().all(|row| row.len() == 80),
+            "una fila reciclada del scrollback conservo el ancho anterior"
+        );
+        grid.clear_line(grid.rows_count - 1, 70, 80);
     }
 
     #[test]
