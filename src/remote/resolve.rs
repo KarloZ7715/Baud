@@ -109,10 +109,21 @@ fn list_sessions(app: &App, id: u64) -> Response {
                         .session_by_id(sid)
                         .map(|i| app.sessions()[i].session.title.clone())
                         .unwrap_or_default();
+                    let (pcols, prows) = app
+                        .session_by_id(sid)
+                        .and_then(|i| {
+                            app.sessions()[i].session.term.lock().ok().map(|t| {
+                                let g = t.active_grid();
+                                (g.cols_count, g.rows_count)
+                            })
+                        })
+                        .unwrap_or((0, 0));
                     json!({
                         "id": sid.0,
                         "title": title,
                         "focused": sid == focused_id,
+                        "cols": pcols,
+                        "rows": prows,
                     })
                 })
                 .collect();
@@ -716,6 +727,23 @@ mod tests {
             ResolveOutcome::Done(r) => r,
             ResolveOutcome::Wait { .. } => panic!("esperaba respuesta inmediata"),
         }
+    }
+
+    #[test]
+    fn list_sessions_incluye_geometria() {
+        let app = test_app_con_texto("x");
+        let req = Request {
+            id: 1,
+            method: "list_sessions".into(),
+            params: json!({}),
+        };
+        let r = done(resolve_request(&app, &req));
+        let Response::Ok { body, .. } = r else {
+            panic!("esperaba ok")
+        };
+        let pane = &body["tabs"][0]["panes"][0];
+        assert!(pane["cols"].as_u64().unwrap() > 0);
+        assert!(pane["rows"].as_u64().unwrap() > 0);
     }
 
     #[test]

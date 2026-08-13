@@ -14,8 +14,20 @@ use super::{Request, Response};
 
 const NO_INSTANCE: &str = "no running baud instance with remote_control enabled";
 
-/// Punto de entrada de `baud mcp [--socket <ruta>]`.
-pub fn run(socket: Option<&str>) -> i32 {
+/// Punto de entrada de `baud mcp [--socket <ruta>] [--list-tools]`.
+pub fn run(socket: Option<&str>, list_tools: bool) -> i32 {
+    if list_tools {
+        match serde_json::to_string_pretty(&tools_list_value()) {
+            Ok(s) => {
+                println!("{s}");
+                return EXIT_OK;
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                return EXIT_ERR;
+            }
+        }
+    }
     match run_inner(socket) {
         Ok(()) => EXIT_OK,
         Err(msg) => {
@@ -436,5 +448,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
+    }
+
+    #[test]
+    fn list_tools_imprime_el_catalogo_sin_instancia() {
+        let v = tools_list_value();
+        let tools = v["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 9);
+        // Serializable de una pieza: es lo que --list-tools escribe a stdout.
+        assert!(serde_json::to_string_pretty(&v)
+            .unwrap()
+            .contains("baud_wait_idle"));
     }
 }
