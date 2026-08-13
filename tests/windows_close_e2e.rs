@@ -3,8 +3,13 @@
 //!
 //! Requiere los binarios compilados; corre solo en CI con `--ignored`.
 
-use std::process::Command;
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
+
+use windows_sys::Win32::Foundation::{HWND, LPARAM};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowTextW, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
+};
 
 #[test]
 #[ignore = "necesita sesion grafica de Windows; corre en CI con --ignored"]
@@ -17,13 +22,13 @@ fn close_while_tui_running_exits_cleanly() {
         .spawn()
         .expect("lanzar baud");
 
-    // Dar tiempo a que la ventana exista y la TUI pinte.
-    std::thread::sleep(Duration::from_secs(4));
+    // wgpu en el runner de CI puede tardar varios segundos en `resumed`.
+    // El HWND correcto es el de titulo "baud"; el primer HWND del PID suele
+    // ser un helper de DXGI/IME que ignora WM_CLOSE.
+    let hwnd = wait_for_baud_window(&mut child, Duration::from_secs(15));
+    unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
 
-    // Cerrar vía WM_CLOSE a la ventana principal del proceso.
-    close_main_window(child.id());
-
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if let Some(status) = child.try_wait().expect("try_wait") {
             assert_eq!(status.code(), Some(0), "baud debe cerrar con codigo 0");
@@ -31,36 +36,71 @@ fn close_while_tui_running_exits_cleanly() {
         }
         if Instant::now() > deadline {
             let _ = child.kill();
-            panic!("baud no termino en 10s tras WM_CLOSE (deadlock en teardown)");
+            panic!("baud no termino en 15s tras WM_CLOSE (deadlock en teardown)");
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 }
 
-fn close_main_window(pid: u32) {
-    use windows_sys::Win32::Foundation::{HWND, LPARAM};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
-    };
+fn wait_for_baud_window(child: &mut Child, timeout: Duration) -> HWND {
+    let pid = child.id();
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(hwnd) = find_baud_window(pid) {
+            return hwnd;
+        }
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            panic!(
+                "baud salio antes de crear la ventana (codigo {:?})",
+                status.code()
+            );
+        }
+        if Instant::now() > deadline {
+            panic!("no se encontro la ventana de baud (pid {pid}) en {timeout:?}");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
 
+fn find_baud_window(pid: u32) -> Option<HWND> {
     struct Ctx {
         pid: u32,
-        sent: bool,
+        hwnd: HWND,
     }
 
     unsafe extern "system" fn cb(hwnd: HWND, lp: LPARAM) -> i32 {
         let ctx = unsafe { &mut *(lp as *mut Ctx) };
         let mut wpid = 0u32;
         unsafe { GetWindowThreadProcessId(hwnd, &mut wpid) };
-        if wpid == ctx.pid {
-            unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
-            ctx.sent = true;
+        if wpid != ctx.pid {
+            return 1;
+        }
+        let title = window_title(hwnd);
+        if title.eq_ignore_ascii_case("baud") {
+            ctx.hwnd = hwnd;
             return 0;
         }
         1
     }
 
-    let mut ctx = Ctx { pid, sent: false };
+    let mut ctx = Ctx {
+        pid,
+        hwnd: std::ptr::null_mut(),
+    };
     unsafe { EnumWindows(Some(cb), &mut ctx as *mut Ctx as LPARAM) };
-    assert!(ctx.sent, "no se encontro la ventana de baud (pid {pid})");
+    if ctx.hwnd.is_null() {
+        None
+    } else {
+        Some(ctx.hwnd)
+    }
+}
+
+fn window_title(hwnd: HWND) -> String {
+    let mut buf = [0u16; 512];
+    let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    if n <= 0 {
+        String::new()
+    } else {
+        String::from_utf16_lossy(&buf[..n as usize])
+    }
 }
