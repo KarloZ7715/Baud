@@ -258,12 +258,27 @@ fn send_text(app: &App, req: &Request) -> Response {
         Ok(id) => id,
         Err(r) => return r,
     };
-    let bytes = crate::input::paste_text(text);
+    let bracketed = req
+        .params
+        .get("bracketed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mode = match lock_session_term(app, session, req.id) {
+        Ok(term) => term.bracketed_paste,
+        Err(r) => return r,
+    };
+    let efectivo = bracketed && mode;
+    let bytes = crate::input::paste_with_bracketing(text, efectivo);
+    let body = json!({
+        "written": bytes.len(),
+        "session": sid.0,
+        "focused": sid == app.focused_session().id,
+        "bracketed": efectivo,
+    });
     if bytes.is_empty() {
-        return Response::ok(req.id, json!({ "written": 0 }));
+        return Response::ok(req.id, body);
     }
-    let n = bytes.len();
-    Response::ok_write(req.id, json!({ "written": n }), sid.0, bytes)
+    Response::ok_write(req.id, body, sid.0, bytes)
 }
 
 fn send_key(app: &App, req: &Request) -> Response {
@@ -301,7 +316,16 @@ fn send_key(app: &App, req: &Request) -> Response {
             format!("chord '{chord}' has no encoding"),
         );
     };
-    Response::ok_write(req.id, json!({ "written": bytes.len() }), sid.0, bytes)
+    Response::ok_write(
+        req.id,
+        json!({
+            "written": bytes.len(),
+            "session": sid.0,
+            "focused": sid == app.focused_session().id,
+        }),
+        sid.0,
+        bytes,
+    )
 }
 
 fn wait_for(app: &App, req: &Request) -> ResolveOutcome {
@@ -647,6 +671,41 @@ mod tests {
             done(resolve_request(&app, &req)),
             Response::Err { .. }
         ));
+    }
+
+    #[test]
+    fn send_text_anota_sesion_y_foco() {
+        let app = test_app(Arc::new(Mutex::new(Term::new())));
+        let r = done(resolve_request(&app, &Request::send_text("ls\n")));
+        let Response::Ok { ref body, .. } = r else {
+            panic!("esperaba ok")
+        };
+        assert_eq!(body["session"], app.focused_session().id.0);
+        assert_eq!(body["focused"], true);
+    }
+
+    #[test]
+    fn send_text_bracketed_solo_si_el_modo_esta_activo() {
+        // Sin modo 2004: sin marcadores aunque se pida.
+        let app = test_app(Arc::new(Mutex::new(Term::new())));
+        let req = Request {
+            id: 1,
+            method: "send_text".into(),
+            params: json!({ "text": "hola", "bracketed": true }),
+        };
+        let r = done(resolve_request(&app, &req));
+        assert_eq!(r.bytes_to_write().unwrap(), b"hola");
+
+        // Con modo 2004 activo: marcadores.
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?2004h");
+        let app = test_app(Arc::new(Mutex::new(term)));
+        let r = done(resolve_request(&app, &req));
+        assert_eq!(r.bytes_to_write().unwrap(), b"\x1b[200~hola\x1b[201~");
+        let Response::Ok { ref body, .. } = r else {
+            panic!()
+        };
+        assert_eq!(body["bracketed"], true);
     }
 
     #[test]
