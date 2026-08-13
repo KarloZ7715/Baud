@@ -3,8 +3,6 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 use std::io::{self, BufRead, Write};
-#[cfg(unix)]
-use std::path::Path;
 
 use serde_json::{json, Value};
 
@@ -72,9 +70,10 @@ fn resolve_endpoint(socket: Option<&str>) -> Result<(String, String), String> {
 }
 
 fn endpoint_from_socket(path: &str) -> Result<(String, String), String> {
-    let p = Path::new(path);
     #[cfg(unix)]
     {
+        use std::path::Path;
+        let p = Path::new(path);
         let stem = p
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())

@@ -226,7 +226,7 @@ fn write_endpoint(dir: &Path, pid: u32, token: &str) -> io::Result<Endpoint> {
     }
     #[cfg(windows)]
     {
-        let short = token.get(..8).unwrap_or(token);
+        let short = if token.len() >= 8 { &token[..8] } else { token };
         let target = format!(r"\\.\pipe\baud-{pid}-{short}");
         let pipe_path = dir.join(format!("{pid}.pipe"));
         std::fs::write(&pipe_path, &target)?;
@@ -571,7 +571,6 @@ fn connect_raw(target: &str) -> io::Result<Client> {
     #[cfg(windows)]
     {
         use std::fs::OpenOptions;
-        use std::os::windows::fs::OpenOptionsExt;
         let file = OpenOptions::new().read(true).write(true).open(target)?;
         let reader_file = file.try_clone()?;
         Ok(Client {
