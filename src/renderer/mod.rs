@@ -2398,10 +2398,13 @@ fn push_title_bar<'a>(
             crate::renderer::build_button_hover(btn, is_close, hover_alpha, theme, glyphs);
         }
         crate::renderer::push_button_icon(btn, btn.kind, maximized, scale_factor, color, glyphs);
+        // Los glyphs de boton llevan coordenadas absolutas (btn.left/top):
+        // el TextArea debe estar en (0,0), como el track, o se duplica el
+        // desplazamiento y el icono queda fuera de la superficie.
         extra_areas.push(glyphon::TextArea {
             buffer: empty_buffer,
-            left: btn.left,
-            top: btn.top,
+            left: 0.0,
+            top: 0.0,
             scale: 1.0,
             bounds: full_bounds,
             default_color: glyphon::Color::rgb(0xff, 0xff, 0xff),
