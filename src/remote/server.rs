@@ -111,7 +111,7 @@ pub fn spawn_in(dir: &Path, handler: Handler) -> io::Result<ServerHandle> {
 
 fn proxy_handler(proxy: &EventLoopProxy<UserEvent>, req: Request) -> Response {
     let id = req.id;
-    let wait_ms = if req.method == "wait_for" {
+    let wait_ms = if req.method == "wait_for" || req.method == "wait_idle" {
         req.params
             .get("timeout_ms")
             .and_then(serde_json::Value::as_u64)
