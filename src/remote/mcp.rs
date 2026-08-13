@@ -105,20 +105,26 @@ pub fn handle_message(client: &mut Client, msg: &Value) -> Option<Value> {
     let id = msg.get("id").cloned()?;
     let params = msg.get("params").cloned().unwrap_or_else(|| json!({}));
     Some(match method {
-        "initialize" => jsonrpc_ok(id, initialize_result()),
+        "initialize" => jsonrpc_ok(id, initialize_result(&params)),
         "tools/list" => jsonrpc_ok(id, tools_list_value()),
         "tools/call" => match tools_call(client, &params) {
             Ok(body) => jsonrpc_ok(id, body),
-            Err(e) => jsonrpc_error(id, -32602, &e),
+            Err(ToolsCallError::InvalidParams(e)) => jsonrpc_error(id, -32602, &e),
+            Err(ToolsCallError::Transport(e)) => jsonrpc_error(id, -32603, &e),
         },
         "ping" => jsonrpc_ok(id, json!({})),
         _ => jsonrpc_error(id, -32601, "Method not found"),
     })
 }
 
-fn initialize_result() -> Value {
+fn initialize_result(params: &Value) -> Value {
+    let version = params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("2024-11-05");
     json!({
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": version,
         "capabilities": { "tools": {} },
         "serverInfo": {
             "name": "baud",
@@ -141,7 +147,9 @@ fn tool_defs() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "session": { "type": "integer", "description": "Session id from baud_list_sessions. Omit for the focused pane." },
-                    "scrollback_lines": { "type": "integer", "description": "Extra history lines above the visible screen. Default 0." }
+                    "scrollback_lines": { "type": "integer", "description": "Extra history lines above the visible screen. Default 0." },
+                    "start_row": { "type": "integer", "description": "Absolute row range into scrollback + screen; 0 is the oldest scrollback line. Overrides scrollback_lines." },
+                    "end_row": { "type": "integer", "description": "Inclusive end of the absolute row range. Overrides scrollback_lines." }
                 }
             }),
         ),
@@ -152,6 +160,7 @@ fn tool_defs() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "session": { "type": "integer", "description": "Session id from baud_list_sessions. Omit for the focused pane." },
+                    "detail": { "type": "string", "description": "compact (default) groups cells into style runs; full dumps every cell." },
                     "rect": {
                         "type": "object",
                         "description": "Optional cell rectangle {x, y, cols, rows}. Default is the full visible grid.",
@@ -172,7 +181,8 @@ fn tool_defs() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "session": { "type": "integer", "description": "Session id from baud_list_sessions. Omit for the focused pane." },
-                    "text": { "type": "string", "description": "Bytes to write." }
+                    "text": { "type": "string", "description": "Bytes to write." },
+                    "bracketed": { "type": "boolean", "description": "Wrap in bracketed-paste markers when the app enabled that mode. Default false." }
                 },
                 "required": ["text"]
             }),
@@ -200,6 +210,18 @@ fn tool_defs() -> Vec<Value> {
                     "timeout_ms": { "type": "integer", "description": "How long to wait. Default 5000." }
                 },
                 "required": ["pattern"]
+            }),
+        ),
+        tool(
+            "baud_wait_idle",
+            "Wait until the visible screen stops changing for idle_ms (default 500), or until timeout_ms (default 5000) elapses. More robust than baud_wait_for when output has no unique marker. Returns idle:false with timed_out:true on timeout.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session": { "type": "integer", "description": "Session id from baud_list_sessions. Omit for the focused pane." },
+                    "idle_ms": { "type": "integer", "description": "How long the screen must stay unchanged. Default 500." },
+                    "timeout_ms": { "type": "integer", "description": "How long to wait overall. Default 5000." }
+                }
             }),
         ),
         tool(
@@ -232,11 +254,16 @@ fn tools_list_value() -> Value {
     json!({ "tools": tool_defs() })
 }
 
-fn tools_call(client: &mut Client, params: &Value) -> Result<Value, String> {
+enum ToolsCallError {
+    InvalidParams(String),
+    Transport(String),
+}
+
+fn tools_call(client: &mut Client, params: &Value) -> Result<Value, ToolsCallError> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
-        .ok_or_else(|| "missing tool name".to_string())?;
+        .ok_or_else(|| ToolsCallError::InvalidParams("missing tool name".into()))?;
     let args = params
         .get("arguments")
         .cloned()
@@ -248,16 +275,23 @@ fn tools_call(client: &mut Client, params: &Value) -> Result<Value, String> {
         "baud_send_text" => "send_text",
         "baud_send_key" => "send_key",
         "baud_wait_for" => "wait_for",
+        "baud_wait_idle" => "wait_idle",
         "baud_get_config" => "get_config",
         "baud_tail_log" => "tail_log",
-        other => return Err(format!("unknown tool '{other}'")),
+        other => {
+            return Err(ToolsCallError::InvalidParams(format!(
+                "unknown tool '{other}'"
+            )))
+        }
     };
     let req = Request {
         id: 1,
         method: method.into(),
         params: args,
     };
-    let resp = client.call(req).map_err(|e| e.to_string())?;
+    let resp = client
+        .call(req)
+        .map_err(|e| ToolsCallError::Transport(e.to_string()))?;
     match resp {
         Response::Ok { body, .. } => {
             let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string());
@@ -266,8 +300,8 @@ fn tools_call(client: &mut Client, params: &Value) -> Result<Value, String> {
                 "isError": false,
             }))
         }
-        Response::Err { msg, .. } => Ok(json!({
-            "content": [{ "type": "text", "text": msg }],
+        Response::Err { code, msg, .. } => Ok(json!({
+            "content": [{ "type": "text", "text": format!("[{code}] {msg}") }],
             "isError": true,
         })),
     }
@@ -321,7 +355,7 @@ mod tests {
         )
         .unwrap();
         let tools = list["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
 
         let call = handle_message(
             &mut client,
@@ -349,5 +383,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reply["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn tools_list_incluye_wait_idle_y_son_nueve() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = spawn_in(dir.path(), stub()).unwrap();
+        let mut client = Client::connect(server.target(), server.token()).unwrap();
+        let list = handle_message(
+            &mut client,
+            &json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        )
+        .unwrap();
+        let tools = list["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 9);
+        assert!(tools.iter().any(|t| t["name"] == "baud_wait_idle"));
+    }
+
+    #[test]
+    fn error_de_capa_1_lleva_el_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = spawn_in(dir.path(), stub()).unwrap();
+        let mut client = Client::connect(server.target(), server.token()).unwrap();
+        // El stub responde err unknown_method a todo lo que no es screen_text.
+        let call = handle_message(
+            &mut client,
+            &json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+                    "params":{"name":"baud_send_key","arguments":{"chord":"x"}}}),
+        )
+        .unwrap();
+        assert_eq!(call["result"]["isError"], true);
+        let text = call["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.starts_with("[unknown_method]"));
+    }
+
+    #[test]
+    fn initialize_ecoa_la_protocol_version_del_cliente() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = spawn_in(dir.path(), stub()).unwrap();
+        let mut client = Client::connect(server.target(), server.token()).unwrap();
+        let init = handle_message(
+            &mut client,
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+                    "params":{"protocolVersion":"2025-06-18"}}),
+        )
+        .unwrap();
+        assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
+        // Sin version del cliente: default.
+        let init = handle_message(
+            &mut client,
+            &json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}),
+        )
+        .unwrap();
+        assert_eq!(init["result"]["protocolVersion"], "2024-11-05");
     }
 }
