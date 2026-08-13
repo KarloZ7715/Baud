@@ -1,6 +1,6 @@
 //! Control remoto de una instancia viva de Baud bajo Xvfb.
 //!
-//! Arranca `baud` con `remote_control = true` y `-e sh`, inyecta un echo
+//! Arranca `baud` con `remote_control = true` y `-e /bin/sh`, inyecta un echo
 //! por el socket y afirma que la pantalla contiene el marcador. Se ejecuta
 //! con `BAUD_X11_E2E=1` (job `x11 e2e`) y `#[ignore]` para no correrlo en
 //! `cargo test` sin display.
@@ -8,19 +8,20 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use baud::remote::server::{self, Client};
-use baud::remote::Request;
+use baud::remote::server::Client;
+use baud::remote::{Request, Response};
 
 const APP_ID: &str = "baud-remote-e2e";
 
 struct Harness {
     child: Child,
-    pid: u32,
+    runtime: PathBuf,
     config_home: PathBuf,
+    state_home: PathBuf,
     stderr_log: PathBuf,
 }
 
@@ -28,17 +29,38 @@ impl Drop for Harness {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if let Ok(dir) = server::runtime_dir() {
-            let _ = fs::remove_file(dir.join(format!("{}.sock", self.pid)));
-            let _ = fs::remove_file(dir.join(format!("{}.token", self.pid)));
-        }
+        let _ = fs::remove_dir_all(&self.runtime);
         let _ = fs::remove_dir_all(&self.config_home);
+        let _ = fs::remove_dir_all(&self.state_home);
     }
 }
 
 impl Harness {
-    fn stderr_tail(&self) -> String {
-        fs::read_to_string(&self.stderr_log).unwrap_or_default()
+    fn diagnostics(&mut self) -> String {
+        let stderr = fs::read_to_string(&self.stderr_log).unwrap_or_default();
+        let mut logs = String::new();
+        let log_dir = self.state_home.join("baud").join("logs");
+        if let Ok(entries) = fs::read_dir(&log_dir) {
+            for entry in entries.flatten() {
+                if let Ok(text) = fs::read_to_string(entry.path()) {
+                    logs.push_str(&text);
+                }
+            }
+        }
+        let runtime = fs::read_dir(self.runtime.join("baud"))
+            .map(|it| {
+                it.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default();
+        let child = match self.child.try_wait() {
+            Ok(Some(status)) => format!("exited {status}"),
+            Ok(None) => "running".into(),
+            Err(e) => format!("try_wait: {e}"),
+        };
+        format!("child={child}\nruntime files: [{runtime}]\nstderr:\n{stderr}\nlogs:\n{logs}")
     }
 }
 
@@ -48,56 +70,71 @@ fn spawn_baud() -> Harness {
         std::process::id(),
         Instant::now().elapsed().as_nanos()
     );
-    let config_home = std::env::temp_dir().join(stamp);
+    let base = std::env::temp_dir().join(stamp);
+    let runtime = base.join("run");
+    let config_home = base.join("config");
+    let state_home = base.join("state");
+    fs::create_dir_all(runtime.join("baud")).expect("runtime dir");
     fs::create_dir_all(config_home.join("baud")).expect("config dir");
+    fs::create_dir_all(state_home.join("baud").join("logs")).expect("state dir");
     fs::write(
         config_home.join("baud").join("config.toml"),
         "remote_control = true\n",
     )
     .expect("config.toml");
-    let stderr_log = config_home.join("stderr.log");
+    let stderr_log = base.join("stderr.log");
     let stderr = fs::File::create(&stderr_log).expect("stderr log");
 
-    // El compositor y D-Bus viven en el XDG_RUNTIME_DIR real; un runtime
-    // aislado hace que la ventana ni llegue a crear el socket de control.
+    // Runtime propio y escribible (en CI /run/user/<uid> a menudo no existe).
+    // Sin WAYLAND para usar X11/Xvfb; DISPLAY lo hereda el job.
     let child = Command::new(env!("CARGO_BIN_EXE_baud"))
-        .args(["--app-id", APP_ID, "-e", "sh"])
+        .args(["--app-id", APP_ID, "-e", "/bin/sh"])
+        .env("XDG_RUNTIME_DIR", &runtime)
         .env("XDG_CONFIG_HOME", &config_home)
+        .env("XDG_STATE_HOME", &state_home)
         .env("BAUD_SKIP_CONSENT_UI", "1")
         .env_remove("WAYLAND_DISPLAY")
         .env_remove("WAYLAND_SOCKET")
-        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr)
         .spawn()
         .expect("no se pudo lanzar el binario de baud");
-    let pid = child.id();
 
     Harness {
         child,
-        pid,
+        runtime,
         config_home,
+        state_home,
         stderr_log,
     }
 }
 
-fn wait_endpoint(pid: u32, timeout: Duration) -> Option<(String, String)> {
-    let dir = server::runtime_dir().ok()?;
-    let sock = dir.join(format!("{pid}.sock"));
-    let token_path = dir.join(format!("{pid}.token"));
+fn wait_endpoint(dir: &Path, timeout: Duration) -> Option<(String, String)> {
+    let baud_dir = dir.join("baud");
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        if sock.exists() {
-            if let Ok(token) = fs::read_to_string(&token_path) {
-                let token = token.trim().to_string();
-                if !token.is_empty() {
-                    return Some((sock.to_string_lossy().into_owned(), token));
-                }
-            }
+        if let Ok(Some(pair)) = baud::remote::server::discover_in(&baud_dir) {
+            return Some(pair);
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     None
+}
+
+/// `resumed()` bloquea en wgpu antes de drenar UserEvent; en llvmpipe eso
+/// puede durar más que el timeout de 5s del socket.
+fn wait_event_loop(client: &mut Client, timeout: Duration) -> Result<Response, String> {
+    let deadline = Instant::now() + timeout;
+    let mut last = String::new();
+    while Instant::now() < deadline {
+        match client.call(Request::screen_text_default()) {
+            Ok(resp) if resp.is_ok() => return Ok(resp),
+            Ok(resp) => last = format!("{resp:?}"),
+            Err(e) => last = e.to_string(),
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Err(last)
 }
 
 #[test]
@@ -109,30 +146,40 @@ fn control_socket_echo_y_cierre() {
     }
 
     let mut harness = spawn_baud();
-    let (target, token) = match wait_endpoint(harness.pid, Duration::from_secs(20)) {
+    let (target, token) = match wait_endpoint(&harness.runtime, Duration::from_secs(20)) {
         Some(pair) => pair,
         None => {
-            let log = harness.stderr_tail();
+            let diag = harness.diagnostics();
             let _ = harness.child.kill();
-            panic!("el socket de control no apareció en 20s. stderr:\n{log}");
+            panic!("el socket de control no apareció en 20s.\n{diag}");
         }
     };
 
     let mut client = Client::connect(&target, &token).expect("hello al socket de control");
+    if let Err(last) = wait_event_loop(&mut client, Duration::from_secs(30)) {
+        let diag = harness.diagnostics();
+        panic!("el event loop no respondió en 30s. last={last}\n{diag}");
+    }
     client
         .call(Request::send_text("echo BAUD_OK\n"))
         .expect("send_text");
     let waited = client
-        .call(Request::wait_for("BAUD_OK", 5_000))
+        .call(Request::wait_for("BAUD_OK", 15_000))
         .expect("wait_for");
-    assert!(waited.is_ok(), "wait_for no vio BAUD_OK: {:?}", waited);
+    assert!(
+        waited.is_ok(),
+        "wait_for no vio BAUD_OK: {:?}\n{}",
+        waited,
+        harness.diagnostics()
+    );
     let screen = client
         .call(Request::screen_text_default())
         .expect("screen_text");
     let text = screen.text_lines().unwrap_or_default().join("\n");
     assert!(
         text.contains("BAUD_OK"),
-        "la pantalla no contiene BAUD_OK:\n{text}"
+        "la pantalla no contiene BAUD_OK:\n{text}\n{}",
+        harness.diagnostics()
     );
     client
         .call(Request::send_key("ctrl+d"))
@@ -145,7 +192,7 @@ fn control_socket_echo_y_cierre() {
             Ok(None) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(100));
             }
-            Ok(None) => panic!("baud no termino tras ctrl+d"),
+            Ok(None) => panic!("baud no termino tras ctrl+d\n{}", harness.diagnostics()),
             Err(e) => panic!("try_wait: {e}"),
         }
     }

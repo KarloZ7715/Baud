@@ -91,7 +91,7 @@ jobs:
         env:
           BAUD_X11_E2E: "1"
           LIBGL_ALWAYS_SOFTWARE: "1"
-        run: xvfb-run -a cargo test --test remote_e2e -- --ignored --nocapture
+        run: xvfb-run -a env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET cargo test --test remote_e2e -- --ignored --nocapture
 
   # Job 3: build de release
   build:
