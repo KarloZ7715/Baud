@@ -560,7 +560,7 @@ fn connect_raw(target: &str) -> io::Result<Client> {
     #[cfg(unix)]
     {
         let stream = std::os::unix::net::UnixStream::connect(target)?;
-        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(60)))?;
         stream.set_write_timeout(Some(Duration::from_secs(10)))?;
         let reader_stream = stream.try_clone()?;
         Ok(Client {

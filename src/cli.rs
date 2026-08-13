@@ -15,7 +15,7 @@ pub const EXIT_ERR: i32 = 1;
 
 /// Texto de ayuda mostrado por `baud help` y ante un comando desconocido.
 pub const HELP_TEXT: &str =
-    "Usage: baud [OPTIONS] [COMMAND]\n\nCommands:\n  update    Update Baud to the latest release\n  version   Print the installed Baud version\n  help      Show this help message\n\nOptions:\n  -e <command> [args...]            Execute command and its arguments in the PTY\n      --working-directory <dir>      Set the initial working directory for the child process\n      --title <text>                 Set the initial window title\n      --app-id <id>                  Set the Wayland app_id / X11 WM_CLASS instance\n      --hold                         Keep the window open after the command exits\n\nAliases:\n  -v, --version    Print the installed Baud version\n  -h, --help       Show this help message\n";
+    "Usage: baud [OPTIONS] [COMMAND]\n\nCommands:\n  update    Update Baud to the latest release\n  version   Print the installed Baud version\n  mcp       Speak MCP over stdio to a running Baud instance\n  help      Show this help message\n\nOptions:\n  -e <command> [args...]            Execute command and its arguments in the PTY\n      --working-directory <dir>      Set the initial working directory for the child process\n      --title <text>                 Set the initial window title\n      --app-id <id>                  Set the Wayland app_id / X11 WM_CLASS instance\n      --hold                         Keep the window open after the command exits\n\n  mcp options:\n      --socket <path>                Control socket (default: newest instance in the runtime dir)\n\nAliases:\n  -v, --version    Print the installed Baud version\n  -h, --help       Show this help message\n";
 
 /// Mensaje de error ante un subcomando o flag no reconocido.
 pub const UNKNOWN_COMMAND: &str = "Error: unknown command. Run `baud help` for usage.\n";
@@ -27,6 +27,8 @@ pub enum CliOutcome {
     Exit(i32),
     /// Lanzar la aplicacion grafica con las opciones de arranque dadas.
     LaunchGui(LaunchOptions),
+    /// Hablar MCP por stdio contra una instancia con remote_control.
+    RunMcp { socket: Option<String> },
 }
 
 /// Opciones de lanzamiento de la GUI obtenidas desde los argumentos.
@@ -55,6 +57,8 @@ pub enum Command {
     Version,
     /// Mostrar la ayuda.
     Help,
+    /// Adaptador MCP por stdio (`baud mcp`).
+    Mcp { socket: Option<String> },
     /// Subcomando o flag no reconocido.
     Unknown,
 }
@@ -81,6 +85,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Command {
         "update" => Command::Update,
         "version" | "-v" | "--version" => Command::Version,
         "help" | "-h" | "--help" => Command::Help,
+        "mcp" => parse_mcp(iter),
         _ => parse_flags(std::iter::once(first).chain(iter)),
     }
 }
@@ -138,6 +143,31 @@ fn parse_flags(mut iter: impl Iterator<Item = OsString>) -> Command {
     Command::LaunchGui(opts)
 }
 
+fn parse_mcp(mut iter: impl Iterator<Item = OsString>) -> Command {
+    let mut socket = None;
+    while let Some(arg) = iter.next() {
+        let Some(flag) = arg.to_str() else {
+            return Command::Unknown;
+        };
+        match flag {
+            "--socket" => {
+                let Some(value) = iter.next().and_then(|s| s.into_string().ok()) else {
+                    return Command::Unknown;
+                };
+                socket = Some(value);
+            }
+            other => {
+                if let Some(value) = other.strip_prefix("--socket=") {
+                    socket = Some(value.to_string());
+                } else {
+                    return Command::Unknown;
+                }
+            }
+        }
+    }
+    Command::Mcp { socket }
+}
+
 /// Ejecuta el comando correspondiente a los argumentos del proceso.
 ///
 /// Devuelve `Ok(CliOutcome::Exit(code))` cuando el comando termina el proceso
@@ -155,6 +185,7 @@ pub fn run() -> Result<CliOutcome, Box<dyn std::error::Error>> {
             Ok(CliOutcome::Exit(EXIT_OK))
         }
         Command::Update => run_update(),
+        Command::Mcp { socket } => Ok(CliOutcome::RunMcp { socket }),
         Command::Unknown => {
             eprint!("{}", UNKNOWN_COMMAND);
             Ok(CliOutcome::Exit(EXIT_ERR))
@@ -269,7 +300,32 @@ mod tests {
         assert!(HELP_TEXT.contains("--working-directory"));
         assert!(HELP_TEXT.contains("--title"));
         assert!(HELP_TEXT.contains("--app-id"));
-        assert!(HELP_TEXT.contains("--hold"));
+        assert!(HELP_TEXT.contains("mcp"));
+        assert!(HELP_TEXT.contains("--socket"));
+    }
+
+    #[test]
+    fn subcomando_mcp_sin_args() {
+        assert_eq!(
+            parse_cmd(vec!["baud", "mcp"]),
+            Command::Mcp { socket: None }
+        );
+    }
+
+    #[test]
+    fn subcomando_mcp_con_socket() {
+        assert_eq!(
+            parse_cmd(vec!["baud", "mcp", "--socket", "/tmp/baud.sock"]),
+            Command::Mcp {
+                socket: Some("/tmp/baud.sock".into())
+            }
+        );
+        assert_eq!(
+            parse_cmd(vec!["baud", "mcp", "--socket=/tmp/b.sock"]),
+            Command::Mcp {
+                socket: Some("/tmp/b.sock".into())
+            }
+        );
     }
 
     #[test]
@@ -385,6 +441,7 @@ mod tests {
             Command::Version => CliOutcome::Exit(EXIT_OK),
             Command::Unknown => CliOutcome::Exit(EXIT_ERR),
             Command::Update => CliOutcome::Exit(EXIT_OK),
+            Command::Mcp { socket } => CliOutcome::RunMcp { socket },
         }
     }
 }

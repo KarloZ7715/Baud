@@ -12,6 +12,7 @@ Usage: baud [OPTIONS] [COMMAND]
 Commands:
   update    Update Baud to the latest release
   version   Print the installed Baud version
+  mcp       Speak MCP over stdio to a running Baud instance
   help      Show this help message
 
 Options:
@@ -20,6 +21,9 @@ Options:
       --title <text>                 Set the initial window title
       --app-id <id>                  Set the Wayland app_id / X11 WM_CLASS instance
       --hold                         Keep the window open after the command exits
+
+  mcp options:
+      --socket <path>                Control socket (default: newest instance in the runtime dir)
 
 Aliases:
   -v, --version    Print the installed Baud version

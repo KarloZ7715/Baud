@@ -31,5 +31,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             Ok(())
         }
+        baud::cli::CliOutcome::RunMcp { socket } => {
+            let code = baud::remote::mcp::run(socket.as_deref());
+            std::process::exit(code)
+        }
     }
 }
