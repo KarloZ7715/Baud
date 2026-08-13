@@ -395,6 +395,21 @@ mod tests {
     }
 
     #[test]
+    fn una_fase_activa_no_se_reporta_como_idle() {
+        // Un bloqueo dentro de un handler debe reportarse con el nombre del
+        // handler. Reportarlo como "idle" fue lo que hizo que el WARN de cada
+        // arranque en frio se aprendiera a ignorar.
+        let wd = EventLoopWatchdog::noop();
+        let _g = wd.enter("resumed");
+        let snap = wd.snapshot();
+        assert_eq!(snap.current_handler, Some("resumed"));
+        assert!(
+            snap.stall_would_warn,
+            "con una fase activa, un stall es un aviso legitimo"
+        );
+    }
+
+    #[test]
     fn idle_no_cuenta_como_bloqueo() {
         let wd = EventLoopWatchdog::noop();
 

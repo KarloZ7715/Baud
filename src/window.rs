@@ -3418,6 +3418,11 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // El arranque bloquea el hilo GUI (join del hilo de fuentes, init de
+        // wgpu). Sin esta fase, el watchdog reporta el bloqueo como "idle" y el
+        // aviso se vuelve ruido en cada arranque en frio.
+        let _phase = self.watchdog.enter("resumed");
+
         // ponytail: solo inicializar una vez.
         if self.window.is_some() {
             return;
