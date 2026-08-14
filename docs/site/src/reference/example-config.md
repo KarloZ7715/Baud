@@ -169,6 +169,8 @@ A fully commented `config.toml`, generated from the same defaults as the configu
 # yellow = "#d4a574"
 
 [window]
+# Wayland app_id and X11 WM_CLASS instance/class. Applied when the window is created. Default "baud". The --app-id CLI flag overrides this value. Changing it requires a restart.
+# app_id = "baud"
 # Window decorations: "system" uses the native title bar, "custom" draws Baud's unified title bar with inline tabs and window controls, and "none" removes decorations entirely. The previous boolean values still work: true maps to "system" and false to "none".
 # decorations = "system"
 # Initial window height in logical pixels. Only applies when `startup` is "windowed".

@@ -916,6 +916,9 @@ pub struct WindowConfig {
     /// Alto inicial en píxeles lógicos. Solo aplica con `startup = "windowed"`.
     #[serde(default = "default_win_height")]
     pub height: u32,
+    /// app_id de Wayland / instancia de WM_CLASS en X11. Requiere reinicio.
+    #[serde(default = "default_window_app_id")]
+    pub app_id: String,
 }
 
 fn default_win_width() -> u32 {
@@ -924,6 +927,25 @@ fn default_win_width() -> u32 {
 
 fn default_win_height() -> u32 {
     600
+}
+
+fn default_window_app_id() -> String {
+    "baud".to_string()
+}
+
+impl WindowConfig {
+    /// CLI no vacia > config no vacia > `"baud"`. Nunca devuelve cadena vacia.
+    pub fn resolve_app_id(&self, cli: Option<&str>) -> String {
+        if let Some(id) = cli.map(str::trim).filter(|s| !s.is_empty()) {
+            return id.to_string();
+        }
+        let from_cfg = self.app_id.trim();
+        if from_cfg.is_empty() {
+            default_window_app_id()
+        } else {
+            from_cfg.to_string()
+        }
+    }
 }
 
 /// Layout de panes (dwindle Hyprland).
@@ -1119,6 +1141,7 @@ impl Default for WindowConfig {
             startup: StartupState::Windowed,
             width: default_win_width(),
             height: default_win_height(),
+            app_id: default_window_app_id(),
         }
     }
 }
@@ -1730,6 +1753,8 @@ mod tests {
         assert_eq!(roundtripped.font.text_contrast, original.font.text_contrast);
         assert_eq!(roundtripped.window.opacity, original.window.opacity);
         assert_eq!(roundtripped.window.width, original.window.width);
+        assert_eq!(roundtripped.window.app_id, original.window.app_id);
+        assert_eq!(original.window.app_id, "baud");
         assert_eq!(
             roundtripped.selection.copy_on_select_target,
             original.selection.copy_on_select_target
@@ -2104,6 +2129,37 @@ height = 800
         // Opacidad plena por defecto: la misma clave gobierna el alpha del
         // compositor en Linux y el material nativo en Windows.
         assert_eq!(cfg.window.opacity, 1.0);
+        assert_eq!(cfg.window.app_id, "baud");
+    }
+
+    #[test]
+    fn window_app_id_default_es_baud() {
+        assert_eq!(Config::default().window.app_id, "baud");
+        let cfg: Config = toml::from_str("[window]\nwidth = 800\n").unwrap();
+        assert_eq!(cfg.window.app_id, "baud");
+    }
+
+    #[test]
+    fn window_app_id_desde_toml() {
+        let cfg: Config = toml::from_str("[window]\napp_id = \"scratchpad\"\n").unwrap();
+        assert_eq!(cfg.window.app_id, "scratchpad");
+    }
+
+    #[test]
+    fn resolve_app_id_prioridad_cli_config_default() {
+        let mut window = WindowConfig::default();
+        assert_eq!(window.resolve_app_id(None), "baud");
+        assert_eq!(window.resolve_app_id(Some("")), "baud");
+        assert_eq!(window.resolve_app_id(Some("  ")), "baud");
+
+        window.app_id = "from-config".into();
+        assert_eq!(window.resolve_app_id(None), "from-config");
+        assert_eq!(window.resolve_app_id(Some("")), "from-config");
+        assert_eq!(window.resolve_app_id(Some("from-cli")), "from-cli");
+
+        window.app_id.clear();
+        assert_eq!(window.resolve_app_id(None), "baud");
+        assert_eq!(window.resolve_app_id(Some("from-cli")), "from-cli");
     }
 
     #[test]

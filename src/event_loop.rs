@@ -845,6 +845,7 @@ pub fn run(opts: LaunchOptions) -> Result<(), Box<dyn std::error::Error>> {
     // Inicializar reporter de errores si el consentimiento ya está aceptado.
     init_reporter_if_accepted(&app_config);
 
+    let resolved_app_id = app_config.window.resolve_app_id(opts.app_id.as_deref());
     let mut app = App::new(
         vec![SessionHost::from_spawned(spawned)],
         app_config,
@@ -854,7 +855,7 @@ pub fn run(opts: LaunchOptions) -> Result<(), Box<dyn std::error::Error>> {
         load_result.source,
         watchdog,
         opts.title,
-        opts.app_id,
+        Some(resolved_app_id),
     );
     app.set_redraw_interval_handle(redraw_interval_nanos);
 

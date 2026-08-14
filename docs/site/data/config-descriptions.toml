@@ -75,6 +75,7 @@ keys = "User-defined keybinding overrides, mapping a chord string to an action n
 "window.startup" = "Initial window state: \"windowed\", \"maximized\", or \"fullscreen\"."
 "window.width" = "Initial window width in logical pixels. Only applies when `startup` is \"windowed\"."
 "window.height" = "Initial window height in logical pixels. Only applies when `startup` is \"windowed\"."
+"window.app_id" = "Wayland app_id and X11 WM_CLASS instance/class. Applied when the window is created. Default \"baud\". The --app-id CLI flag overrides this value. Changing it requires a restart."
 
 "selection.copy_on_select" = "Copies the selection to the clipboard automatically when the left mouse button is released."
 "selection.copy_on_select_target" = "Clipboard destination for copy-on-select: \"primary\", \"clipboard\", or \"both\"."

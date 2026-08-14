@@ -1229,6 +1229,9 @@ impl App {
         if prev.window.width != next.window.width || prev.window.height != next.window.height {
             fields.push("window.width/height");
         }
+        if prev.window.app_id != next.window.app_id {
+            fields.push("window.app_id");
+        }
         if Self::process_section_changed(&prev.process, &next.process) {
             fields.push("process");
         }
