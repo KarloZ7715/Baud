@@ -732,6 +732,42 @@ mod tests {
         assert_eq!(encode_key(Key::Right, ctrl, d), Some(b"\x1b[1;5C".to_vec()));
     }
 
+    /// Fija el encoding legacy de las teclas criticas para TUIs (navegacion,
+    /// F-keys, combinaciones con Alt/Ctrl/Shift). Los bytes son el estandar
+    /// xterm y no se negocian.
+    #[test]
+    fn encoding_legacy_de_teclas_de_tui() {
+        let d = KeyModes::default();
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        let shift = Mods {
+            shift: true,
+            ..Mods::NONE
+        };
+        let alt = Mods {
+            alt: true,
+            ..Mods::NONE
+        };
+
+        let casos: &[(Key, Mods, &[u8])] = &[
+            (Key::Left, ctrl, b"\x1b[1;5D"),
+            (Key::Right, ctrl, b"\x1b[1;5C"),
+            (Key::F(5), shift, b"\x1b[15;2~"),
+            (Key::Enter, alt, b"\x1b\r"),
+            (Key::Backspace, ctrl, b"\x08"),
+            (Key::Tab, shift, b"\x1b[Z"),
+        ];
+        for (key, mods, esperado) in casos {
+            assert_eq!(
+                encode_key(*key, *mods, d).as_deref(),
+                Some(*esperado),
+                "fallo en {key:?}+{mods:?}"
+            );
+        }
+    }
+
     /// Table-driven: recorre la fila "Chords de nueva linea"
     /// Un cambio en esta tabla debe reflejarse tambien en el doc.
     #[test]
