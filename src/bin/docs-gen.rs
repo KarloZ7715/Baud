@@ -752,7 +752,7 @@ mod tests {
         let rows_by_section = build_rows(&descriptions.descriptions).expect("cobertura completa");
         assert!(rows_by_section.contains_key("theme"));
         let total: usize = rows_by_section.values().map(|v| v.len()).sum();
-        assert_eq!(total, 84, "cantidad de claves documentadas inesperada");
+        assert_eq!(total, 85, "cantidad de claves documentadas inesperada");
     }
 
     #[test]
