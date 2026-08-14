@@ -908,6 +908,23 @@ mod tests {
     use nix::poll::{poll, PollFd, PollFlags};
 
     #[test]
+    fn sin_foco_el_blink_deja_de_estar_activo() {
+        let id = SessionId(1);
+        let other = SessionId(2);
+        let focus = BlinkFocus::new(id);
+        assert!(focus.window_focused());
+        assert!(focus.is_active(id));
+        assert!(!focus.is_active(other));
+
+        focus.set_window_focused(false);
+        assert!(!focus.window_focused());
+        assert!(!focus.is_active(id));
+
+        focus.set_window_focused(true);
+        assert!(focus.is_active(id));
+    }
+
+    #[test]
     fn test_coalesce_respeta_tope_bytes() {
         let (tx, rx) = mpsc::channel::<PtyEvent>();
         tx.send(PtyEvent::Output(vec![0u8; 100])).unwrap();
