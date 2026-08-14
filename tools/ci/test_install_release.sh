@@ -267,5 +267,19 @@ fi
 
 echo "PASS: percent escaping"
 
+# ── packaged desktop stays launcher-clean (no backend override) ──
+desktop_src="${repo_root}/packaging/linux/baud.desktop"
+grep -q '^Exec=baud$' "$desktop_src"
+grep -q '^StartupWMClass=baud$' "$desktop_src"
+if grep -q 'WINIT_UNIX_BACKEND' "$desktop_src"; then
+    echo "Error: packaged desktop must not set WINIT_UNIX_BACKEND" >&2
+    exit 1
+fi
+if grep -q -- '--app-id' "$desktop_src"; then
+    echo "Error: packaged desktop must not pass --app-id; code sets the default" >&2
+    exit 1
+fi
+echo "PASS: packaged desktop is launcher-clean"
+
 echo ""
 echo "install.sh release tests passed"

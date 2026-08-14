@@ -3,6 +3,7 @@ Type=Application
 Name=Baud
 Comment=A fast, feature-rich, GPU-accelerated, cross-platform terminal emulator
 Exec=baud
+StartupWMClass=baud
 Icon=baud
 Terminal=false
 Categories=System;TerminalEmulator;
