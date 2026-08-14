@@ -188,7 +188,7 @@ fn tool_defs() -> Vec<Value> {
         ),
         tool(
             "baud_send_text",
-            "Write text to the PTY as a paste without bracketed-paste markers. Use for commands or input. Include a trailing newline if the program should receive Enter.",
+            "Write text to the PTY as a paste without bracketed-paste markers. Use for commands or input. Include a trailing newline if the program should receive Enter. Fire-and-forget: the reply confirms bytes written, not the effect; pair with baud_wait_for, baud_wait_idle, or baud_screen to verify.",
             json!({
                 "type": "object",
                 "properties": {
@@ -201,7 +201,7 @@ fn tool_defs() -> Vec<Value> {
         ),
         tool(
             "baud_send_key",
-            "Encode a key chord (the same grammar as config keybindings, e.g. ctrl+c, enter, alt+up) and write it to the PTY.",
+            "Encode a key chord (the same grammar as config keybindings, e.g. ctrl+c, enter, alt+up) and write it to the PTY. Fire-and-forget: pair with baud_wait_for or baud_screen to verify the effect.",
             json!({
                 "type": "object",
                 "properties": {
@@ -213,7 +213,7 @@ fn tool_defs() -> Vec<Value> {
         ),
         tool(
             "baud_wait_for",
-            "Block until the screen contains a substring, or until timeout_ms elapses. Use after baud_send_text to wait for output.",
+            "Block until the visible screen contains a substring, or until timeout_ms elapses (then matched:false with timed_out:true). Only the visible screen is searched, not scrollback. Beware: the pattern also matches the echoed command line you just typed; use a marker that only appears in the output, or prefer baud_wait_idle.",
             json!({
                 "type": "object",
                 "properties": {
@@ -459,5 +459,13 @@ mod tests {
         assert!(serde_json::to_string_pretty(&v)
             .unwrap()
             .contains("baud_wait_idle"));
+    }
+
+    #[test]
+    fn descripciones_avisan_fire_and_forget_y_eco() {
+        let v = tools_list_value();
+        let text = serde_json::to_string(&v).unwrap();
+        assert!(text.contains("Fire-and-forget"));
+        assert!(text.contains("echoed command"));
     }
 }

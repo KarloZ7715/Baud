@@ -23,12 +23,13 @@ One JSON object per line. A request is `{"id": 1, "method": "screen_text", "para
 | Method | Params | Response |
 | --- | --- | --- |
 | `hello` | `token` | `version`, `pid`. Required first; authenticates the connection. |
-| `list_sessions` | — | Tabs, panes, ids, titles, and which pane has focus. |
-| `screen_text` | `session?`, `scrollback_lines?` | Visible screen as an array of text `lines`. |
-| `screen_detail` | `session?`, `rect?` | Cells with `fg`/`bg`/attributes, plus `cursor` and `modes` (`alt_screen`, `mouse`, `extended_keyboard`, `bracketed_paste`). |
-| `send_text` | `session?`, `text` | Writes `text` to the PTY as a paste without bracketed-paste markers. |
-| `send_key` | `session?`, `chord` | Encodes `chord` with the same grammar as config keybindings (`ctrl+c`, `enter`) and writes it. |
-| `wait_for` | `session?`, `pattern`, `timeout_ms?` | Waits until the screen contains `pattern`, or returns `err` with code `timeout`. |
+| `list_sessions` | — | Tabs, panes, ids, titles, focus, and each pane's `cols`/`rows`. |
+| `screen_text` | `session?`, `scrollback_lines?`, `start_row?`, `end_row?` | `lines` plus `cols`, `rows`, `total_rows` (scrollback + visible), and `start_row` (absolute index, 0 = oldest scrollback line). Without a range, trailing blank lines are trimmed. `start_row`/`end_row` are inclusive absolute indices and override `scrollback_lines`. |
+| `screen_detail` | `session?`, `rect?`, `detail?` | `detail` is `compact` (default: style runs per row) or `full` (one object per cell). Both include `cursor` and `modes` (`alt_screen`, `mouse`, `extended_keyboard`, `bracketed_paste`). |
+| `send_text` | `session?`, `text`, `bracketed?` | Writes `text` to the PTY. Reply is `written`, `session`, `focused`, and `bracketed` (true only if requested and the app enabled that mode). |
+| `send_key` | `session?`, `chord` | Encodes `chord` with the same grammar as config keybindings (`ctrl+c`, `enter`) and writes it. Reply includes `written`, `session`, and `focused`. |
+| `wait_for` | `session?`, `pattern`, `timeout_ms?` | Waits until the **visible** screen contains `pattern`. Match: `{"matched": true}`. Timeout: `{"matched": false, "timed_out": true}` (success, not `err`). Scrollback is not searched. |
+| `wait_idle` | `session?`, `idle_ms?`, `timeout_ms?` | Waits until the visible screen is unchanged for `idle_ms` (default 500). Success: `{"idle": true}`. Timeout: `{"idle": false, "timed_out": true}`. Default `timeout_ms` is 5000. |
 | `get_config` | — | Effective configuration as JSON. Baud has no secrets in config. |
 | `tail_log` | `lines` | Last N lines of today's log file. |
 
@@ -36,7 +37,7 @@ One JSON object per line. A request is `{"id": 1, "method": "screen_text", "para
 
 ## `baud mcp`
 
-`baud mcp` speaks [Model Context Protocol](https://modelcontextprotocol.io/) over stdin/stdout and translates each tool call into the protocol above. With no arguments it attaches to the most recently started instance that has remote control enabled. `--socket <path>` selects a specific socket.
+`baud mcp` speaks [Model Context Protocol](https://modelcontextprotocol.io/) over stdin/stdout and translates each tool call into the protocol above. With no arguments it attaches to the most recently started **live** instance that has remote control enabled (dead sockets are skipped and removed). `--socket <path>` selects a specific socket. `--list-tools` prints the tool catalog as JSON and exits 0 without connecting to any instance.
 
 If no instance is listening, it prints `no running baud instance with remote_control enabled` to stderr and exits with status 1.
 
@@ -49,7 +50,7 @@ A client that launches MCP servers (for example Claude Code or Codex) can regist
 }
 ```
 
-The tools are `baud_list_sessions`, `baud_screen`, `baud_screen_detail`, `baud_send_text`, `baud_send_key`, `baud_wait_for`, `baud_get_config`, and `baud_tail_log`. Each maps one-to-one onto the methods in the table.
+The tools are `baud_list_sessions`, `baud_screen`, `baud_screen_detail`, `baud_send_text`, `baud_send_key`, `baud_wait_for`, `baud_wait_idle`, `baud_get_config`, and `baud_tail_log`. Each maps one-to-one onto the methods in the table.
 
 ## What this does not do
 
