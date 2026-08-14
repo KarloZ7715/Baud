@@ -259,8 +259,11 @@ impl Keybindings {
             .map(|(_, _, a)| *a)
     }
 
-    /// Inserta o reemplaza un binding (usado por overrides de config).
+    /// Inserta o reemplaza un binding (usado por overrides de config). La tecla
+    /// se normaliza al registrarla para que un override escrito en mayuscula
+    /// (p. ej. `ctrl+shift+C`) matchee igual que su forma canonica.
     pub fn set(&mut self, key: Key, mods: Mods, action: Action) {
+        let key = normalize_binding_key(key, mods);
         self.bindings.retain(|(k, m, _)| !(*k == key && *m == mods));
         self.bindings.push((key, mods, action));
     }
@@ -493,7 +496,10 @@ pub fn parse_action(s: &str) -> Option<Action> {
     })
 }
 
-/// Normaliza tecla y modificadores antes de consultar el mapa de bindings.
+/// Normaliza tecla y modificadores a una forma canonica unica, usada tanto al
+/// registrar un binding como al consultarlo. Colapsa las diferencias de
+/// plataforma en `logical_key` (mayuscula/minuscula con Shift, caracter de
+/// control con Ctrl) para que el mismo chord matchee en Linux y Windows.
 pub fn normalize_binding_key(key: Key, mods: Mods) -> Key {
     match key {
         // Shift desplaza el simbolo del layout (US QWERTY: '='->'+', '['->'{',
@@ -505,7 +511,15 @@ pub fn normalize_binding_key(key: Key, mods: Mods) -> Key {
         Key::Char('+') => Key::Char('='),
         Key::Char('{') => Key::Char('['),
         Key::Char('}') => Key::Char(']'),
-        Key::Char(c) if mods.ctrl => Key::Char(c.to_ascii_lowercase()),
+        // Con Ctrl, algunos backends entregan el caracter de control
+        // (\u{1}..\u{1a}) en vez de la letra; se mapea de vuelta a la letra
+        // canonica del binding (Ctrl+C -> \u{3} -> 'c').
+        Key::Char(c) if mods.ctrl && ('\u{1}'..='\u{1a}').contains(&c) => {
+            Key::Char((c as u8 - 1 + b'a') as char)
+        }
+        // Las letras se guardan en minuscula: con Ctrl o Shift, winit puede
+        // entregar la mayuscula (Windows aplica Shift al logical_key).
+        Key::Char(c) if mods.ctrl || mods.shift => Key::Char(c.to_ascii_lowercase()),
         other => other,
     }
 }
@@ -947,6 +961,45 @@ mod tests {
         let kb = Keybindings::default();
         let normalized = normalize_binding_key(Key::Char('C'), cs);
         assert_eq!(kb.lookup(normalized, cs), Some(Action::Copy));
+    }
+
+    #[test]
+    fn test_normalize_binding_key_control_char_con_ctrl() {
+        // Algunos backends entregan el caracter de control (Ctrl+C -> \u{3})
+        // en logical_key en vez de la letra; debe mapear de vuelta a 'c'.
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        let kb = Keybindings::default();
+        let normalized = normalize_binding_key(Key::Char('\u{3}'), cs);
+        assert_eq!(normalized, Key::Char('c'));
+        assert_eq!(kb.lookup(normalized, cs), Some(Action::Copy));
+    }
+
+    #[test]
+    fn test_normalize_binding_key_shift_solo_minuscula() {
+        // Shift solo tambien puede entregar la mayuscula en logical_key.
+        let shift = Mods {
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(normalize_binding_key(Key::Char('A'), shift), Key::Char('a'));
+    }
+
+    #[test]
+    fn test_override_en_mayuscula_matchea() {
+        // Un override escrito con mayuscula (ctrl+shift+C) debe registrarse
+        // normalizado y matchear el mismo chord que la forma canonica.
+        let overrides = vec![("ctrl+shift+C".to_string(), "paste".to_string())];
+        let kb = Keybindings::from_overrides(&overrides);
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(kb.lookup(Key::Char('c'), cs), Some(Action::Paste));
     }
 
     #[test]

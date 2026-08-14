@@ -5277,23 +5277,34 @@ impl ApplicationHandler<UserEvent> for App {
                     .map(|g| g.search.is_some())
                     .unwrap_or(false);
 
-                if let Some(k) = winit_to_key(&event.logical_key) {
-                    let k_norm = normalize_binding_key(k, mods);
-                    if let Some(action) = self.keybindings.lookup(k_norm, mods) {
-                        if in_search {
-                            use crate::input::actions::Action::*;
-                            match action {
-                                ScrollLineUp | ScrollLineDown | ScrollPageUp | ScrollPageDown
-                                | ScrollToBottom | JumpToPrevPrompt | JumpToNextPrompt => {}
-                                _ => {
-                                    self.run_action(action);
-                                    return;
-                                }
+                // Resuelve el chord una sola vez y lo registra: util para
+                // diagnosticar diferencias de plataforma en logical_key.
+                let resolved = winit_to_key(&event.logical_key).and_then(|k| {
+                    self.keybindings
+                        .lookup(normalize_binding_key(k, mods), mods)
+                });
+                tracing::debug!(
+                    target: "baud::input",
+                    logical = ?event.logical_key,
+                    physical = ?event.physical_key,
+                    mods = ?mods,
+                    resolved = resolved.map(|a| a.as_str()).unwrap_or("->pty".into()),
+                    "keyboard input"
+                );
+                if let Some(action) = resolved {
+                    if in_search {
+                        use crate::input::actions::Action::*;
+                        match action {
+                            ScrollLineUp | ScrollLineDown | ScrollPageUp | ScrollPageDown
+                            | ScrollToBottom | JumpToPrevPrompt | JumpToNextPrompt => {}
+                            _ => {
+                                self.run_action(action);
+                                return;
                             }
-                        } else {
-                            self.run_action(action);
-                            return;
                         }
+                    } else {
+                        self.run_action(action);
+                        return;
                     }
                 }
                 #[cfg(windows)]
