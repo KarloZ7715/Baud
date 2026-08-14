@@ -166,6 +166,7 @@ pub fn snapshot_for_event_loop(event_loop: &winit::event_loop::ActiveEventLoop) 
         primary_selection_likely = quirks.primary_selection_likely,
         "display quirks resueltos"
     );
+    log_backend_vs_env(&quirks);
     quirks
 }
 
@@ -181,6 +182,32 @@ fn detect_family_from_process_env() -> CompositorFamily {
         desktop_session: session.as_deref(),
         wayland_display: wayland.as_deref(),
     })
+}
+
+/// True si el proceso cree estar en una sesion Wayland.
+pub fn wayland_session_hint_from(wayland_display: bool, wayland_socket: bool) -> bool {
+    wayland_display || wayland_socket
+}
+
+/// True si winit eligio X11 pese a las pistas de sesion Wayland.
+pub fn backend_mismatches_wayland_session(backend: DisplayBackend, wayland_session: bool) -> bool {
+    wayland_session && matches!(backend, DisplayBackend::X11)
+}
+
+fn log_backend_vs_env(quirks: &DisplayQuirks) {
+    let wayland_display = env::var_os("WAYLAND_DISPLAY").is_some();
+    let wayland_socket = env::var_os("WAYLAND_SOCKET").is_some();
+    let wayland_session = wayland_session_hint_from(wayland_display, wayland_socket);
+    if backend_mismatches_wayland_session(quirks.backend, wayland_session) {
+        tracing::warn!(
+            target: "baud::display",
+            backend = ?quirks.backend,
+            family = ?quirks.family,
+            wayland_display,
+            wayland_socket,
+            "winit eligio X11 en una sesion Wayland; no se fuerza backend"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -289,5 +316,33 @@ mod tests {
         assert!(!q.force_initial_redraw);
         assert_eq!(q.backend, DisplayBackend::Other);
         assert_eq!(q.family, CompositorFamily::Unknown);
+    }
+
+    #[test]
+    fn wayland_session_si_display_o_socket() {
+        assert!(!wayland_session_hint_from(false, false));
+        assert!(wayland_session_hint_from(true, false));
+        assert!(wayland_session_hint_from(false, true));
+        assert!(wayland_session_hint_from(true, true));
+    }
+
+    #[test]
+    fn x11_en_sesion_wayland_es_desajuste() {
+        assert!(backend_mismatches_wayland_session(
+            DisplayBackend::X11,
+            true
+        ));
+        assert!(!backend_mismatches_wayland_session(
+            DisplayBackend::Wayland,
+            true
+        ));
+        assert!(!backend_mismatches_wayland_session(
+            DisplayBackend::X11,
+            false
+        ));
+        assert!(!backend_mismatches_wayland_session(
+            DisplayBackend::Other,
+            true
+        ));
     }
 }
