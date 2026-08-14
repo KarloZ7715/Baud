@@ -445,15 +445,30 @@ impl Grid {
     }
 
     /// Cambia el tamaño del grid a `new_rows` x `new_cols`.
-    /// Preserva el contenido existente tanto como sea posible.
-    /// Si el nuevo grid es más grande, las celdas nuevas son default.
-    /// Si es más pequeño, se truncan/descartan filas/columnas sobrantes.
-    /// Retorna cuantas filas se eliminaron del principio (0 si el grid crecio).
-    // ponytail: con reflow.
-    pub fn resize(&mut self, new_rows: usize, new_cols: usize) -> usize {
+    ///
+    /// Encoger con el cursor fuera del nuevo alto empuja las filas de arriba
+    /// al scrollback. Crecer las recupera por arriba para que el contenido
+    /// reciente quede anclado al fondo. Si el cursor ya cabe, se recorta
+    /// por abajo (huecos) sin ensuciar el historial.
+    ///
+    /// Devuelve `(filas_salidas_por_arriba, filas_recuperadas_del_scrollback)`.
+    pub fn resize(&mut self, new_rows: usize, new_cols: usize) -> (usize, usize) {
+        self.resize_at_cursor(new_rows, new_cols, None)
+    }
+
+    /// Como [`resize`], anclando el recorte vertical a `cursor_row` si se da.
+    pub fn resize_at_cursor(
+        &mut self,
+        new_rows: usize,
+        new_cols: usize,
+        cursor_row: Option<usize>,
+    ) -> (usize, usize) {
         const MAX_GRID: usize = 4096;
         let new_rows = new_rows.clamp(1, MAX_GRID);
         let new_cols = new_cols.clamp(1, MAX_GRID);
+        if new_rows == self.rows_count && new_cols == self.cols_count {
+            return (0, 0);
+        }
         self.resync_continuations();
         // Las filas recicladas tienen la longitud vieja: no sirven tras un resize.
         self.blank_row_pool.clear();
@@ -466,30 +481,67 @@ impl Grid {
             }
         }
 
-        let mut rows_removed = 0usize;
-
-        // Luego truncar o expandir filas.
-        if new_rows < self.rows.len() {
-            // Truncar del PRINCIPIO (lo mas antiguo), no del final.
-            // El prompt y el contenido reciente deben quedar al fondo.
-            rows_removed = self.rows.len() - new_rows;
-            let truncated: Vec<Vec<Cell>> = self.rows.drain(..rows_removed).collect();
-            // ponytail: truncar sin scrollback en resize; SIGWINCH redibuja prompt.
-            drop(truncated);
-            self.row_continuations.drain(..rows_removed);
+        let (from_top, from_scrollback) = if new_rows < self.rows.len() {
+            self.shrink_rows(new_rows, cursor_row)
         } else {
-            let added = new_rows - self.rows.len();
-            let blank_row = vec![Cell::default(); new_cols];
-            self.rows.extend(std::iter::repeat_n(blank_row, added));
-            self.row_continuations
-                .extend(std::iter::repeat_n(false, added));
-        }
+            (0, self.grow_rows(new_rows, new_cols))
+        };
 
         self.rows_count = new_rows;
         self.cols_count = new_cols;
         Self::normalize_row_lengths(self.rows.make_contiguous(), new_cols);
         self.damage.resize(new_rows, new_cols);
-        rows_removed
+        (from_top, from_scrollback)
+    }
+
+    fn shrink_rows(&mut self, new_rows: usize, cursor_row: Option<usize>) -> (usize, usize) {
+        let old_rows = self.rows.len();
+        let overflow = old_rows - new_rows;
+        let cursor = cursor_row.unwrap_or(old_rows.saturating_sub(1));
+        // Si el cursor no cabe, nos quedamos con las filas de abajo (el
+        // contenido reciente) y el resto pasa al historial. Si cabe, se
+        // recortan huecos por abajo y no se toca el scrollback.
+        let from_top = if cursor >= new_rows { overflow } else { 0 };
+        if from_top > 0 {
+            for _ in 0..from_top {
+                let Some(row) = self.rows.pop_front() else {
+                    break;
+                };
+                if !self.row_continuations.is_empty() {
+                    self.row_continuations.remove(0);
+                }
+                // No ensuciar el historial con filas vacias (huecos de una
+                // ventana mas alta que el contenido).
+                if !row.iter().all(Cell::is_blank) {
+                    self.push_scrollback(row);
+                }
+            }
+        } else {
+            self.rows.truncate(new_rows);
+            self.row_continuations.truncate(new_rows);
+        }
+        (from_top, 0)
+    }
+
+    fn grow_rows(&mut self, new_rows: usize, new_cols: usize) -> usize {
+        let needed = new_rows - self.rows.len();
+        let pulled = needed.min(self.scrollback.len());
+        for _ in 0..pulled {
+            let Some(mut row) = self.scrollback.pop_back() else {
+                break;
+            };
+            Self::normalize_row_lengths(std::slice::from_mut(&mut row), new_cols);
+            self.rows.push_front(row);
+            self.row_continuations.insert(0, false);
+        }
+        let blanks = needed.saturating_sub(pulled);
+        if blanks > 0 {
+            let blank_row = vec![Cell::default(); new_cols];
+            self.rows.extend(std::iter::repeat_n(blank_row, blanks));
+            self.row_continuations
+                .extend(std::iter::repeat_n(false, blanks));
+        }
+        pulled
     }
 
     /// Garantiza que cada fila tenga exactamente `cols` celdas.
@@ -1111,8 +1163,9 @@ mod tests {
     fn test_grid_resize_smaller_adjusts_cursor_offset() {
         let mut grid = Grid::new();
         grid.resize(40, 80);
-        let removed = grid.resize(24, 80);
-        assert_eq!(removed, 16);
+        let (from_top, pulled) = grid.resize(24, 80);
+        assert_eq!(from_top, 16);
+        assert_eq!(pulled, 0);
     }
 
     #[test]
@@ -1143,11 +1196,9 @@ mod tests {
         // row[23] tenía Z, row[23] se convierte en row[4] del nuevo grid
         assert_eq!(grid.rows[4][0].ch, 'Z');
         assert_eq!(grid.rows[4][5].ch, 'Y');
-        // ponytail: resize trunca sin scrollback.
-        assert!(
-            grid.scrollback.is_empty(),
-            "resize no debe empujar filas al scrollback"
-        );
+        // Solo habia contenido en la ultima fila, que se conserva; las
+        // filas vacias de arriba no ensucian el historial.
+        assert!(grid.scrollback.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -1338,20 +1389,71 @@ mod tests {
     }
 
     #[test]
-    fn resize_shrink_does_not_push_scrollback() {
-        let mut grid = Grid::new();
-        grid.resize(10, 80);
-        let scrollback_before = grid.scrollback.len();
-        grid.resize(5, 80);
-        assert_eq!(grid.scrollback.len(), scrollback_before);
+    fn resize_shrink_con_cursor_abajo_guarda_en_scrollback() {
+        let mut grid = Grid::new_sized(10, 80);
+        for r in 0..10 {
+            grid.rows[r][0].ch = (b'A' + r as u8) as char;
+        }
+        let (from_top, pulled) = grid.resize_at_cursor(5, 80, Some(9));
+        assert_eq!(from_top, 5);
+        assert_eq!(pulled, 0);
+        assert_eq!(grid.rows[4][0].ch, 'J');
+        assert_eq!(grid.scrollback.len(), 5);
+        assert_eq!(grid.scrollback[0][0].ch, 'A');
+        assert_eq!(grid.scrollback[4][0].ch, 'E');
+    }
+
+    #[test]
+    fn resize_shrink_grow_restaura_el_contenido() {
+        let mut grid = Grid::new_sized(10, 80);
+        for r in 0..10 {
+            grid.rows[r][0].ch = (b'A' + r as u8) as char;
+        }
+        grid.resize_at_cursor(5, 80, Some(9));
+        let (from_top, pulled) = grid.resize_at_cursor(10, 80, Some(4));
+        assert_eq!(from_top, 0);
+        assert_eq!(pulled, 5);
+        for r in 0..10 {
+            assert_eq!(grid.rows[r][0].ch, (b'A' + r as u8) as char);
+        }
+        assert!(grid.scrollback.is_empty());
+    }
+
+    #[test]
+    fn resize_shrink_con_cursor_arriba_no_tira_el_contenido() {
+        let mut grid = Grid::new_sized(10, 80);
+        grid.rows[0][0].ch = 'X';
+        grid.rows[1][0].ch = 'Y';
+        grid.resize_at_cursor(5, 80, Some(1));
+        assert_eq!(grid.rows[0][0].ch, 'X');
+        assert_eq!(grid.rows[1][0].ch, 'Y');
+        assert!(
+            grid.scrollback.is_empty(),
+            "recortar huecos de abajo no ensucia el historial"
+        );
+    }
+
+    #[test]
+    fn resize_grow_recupera_scrollback_y_deja_el_fondo_abajo() {
+        let mut grid = Grid::new_sized(5, 80);
+        for ch in ['A', 'B', 'C'] {
+            let mut row = vec![Cell::default(); 80];
+            row[0].ch = ch;
+            grid.scrollback.push_back(row);
+        }
+        grid.rows[4][0].ch = '$';
+        grid.resize_at_cursor(8, 80, Some(4));
+        assert_eq!(grid.rows[0][0].ch, 'A');
+        assert_eq!(grid.rows[2][0].ch, 'C');
+        assert_eq!(grid.rows[7][0].ch, '$');
+        assert!(grid.scrollback.is_empty());
     }
 
     /// Verifica que resize (encoger y crecer) no corrompe el grid.
     #[test]
     #[allow(clippy::needless_range_loop)]
     fn test_resize_shrink_grow_no_corruption() {
-        let mut grid = Grid::new();
-        grid.resize(10, 80);
+        let mut grid = Grid::new_sized(10, 80);
         for r in 0..10 {
             for c in 0..5 {
                 grid.rows[r][c].ch = (b'A' + r as u8) as char;
@@ -1363,21 +1465,12 @@ mod tests {
             .map(|r| r.iter().take(5).map(|c| c.ch).collect())
             .collect();
 
-        // Encoger luego crecer de vuelta
         grid.resize(5, 80);
         grid.resize(10, 80);
 
-        // Tras truncar del inicio, se preservan las ultimas 5 filas del grid original
-        for r in 0..5 {
+        for r in 0..10 {
             let s: String = grid.rows[r].iter().take(5).map(|c| c.ch).collect();
-            assert_eq!(s, original[r + 5], "la fila {r} debe preservarse");
-        }
-        // Las filas 5-9 son nuevas (vacias) al crecer por extension abajo
-        for r in 5..10 {
-            assert!(
-                grid.rows[r].iter().all(|c| *c == Cell::default()),
-                "la fila {r} debe estar vacia tras crecer"
-            );
+            assert_eq!(s, original[r], "la fila {r} debe restaurarse");
         }
         assert_eq!(grid.rows[0].len(), 80, "todas las filas tienen new_cols");
     }
@@ -1398,9 +1491,9 @@ mod tests {
         );
 
         grid.resize(24, 80);
-        assert!(
-            grid.rows.iter().any(|row| row[0].ch == '$'),
-            "la ultima linea sigue visible al volver a 24 filas"
+        assert_eq!(
+            grid.rows[23][0].ch, '$',
+            "la ultima linea queda anclada al fondo al volver a 24 filas"
         );
     }
 

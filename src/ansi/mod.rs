@@ -1573,13 +1573,16 @@ impl Term {
         let cursor_before = (self.cursor.row, self.cursor.col);
         let was_at_bottom = cursor_before.0 == old_rows.saturating_sub(1);
         if self.alt_screen {
-            let removed = self.alt_grid.resize(new_rows, new_cols);
+            let (from_top, pulled) =
+                self.alt_grid
+                    .resize_at_cursor(new_rows, new_cols, Some(cursor_before.0));
             let (row, col) = Self::adjust_cursor_after_resize(
                 cursor_before,
                 old_rows,
                 new_rows,
                 new_cols,
-                removed,
+                from_top,
+                pulled,
                 was_at_bottom,
             );
             self.cursor.row = row;
@@ -1602,13 +1605,19 @@ impl Term {
                     *c = false;
                 }
             }
-            let removed = self.grid.resize(new_rows, new_cols);
+            let (from_top, pulled) =
+                self.grid
+                    .resize_at_cursor(new_rows, new_cols, Some(cursor_pos.0));
+            if pulled > 0 && self.scrollback_offset > 0 {
+                self.scrollback_offset = self.scrollback_offset.saturating_sub(pulled as isize);
+            }
             cursor_pos = Self::adjust_cursor_after_resize(
                 cursor_pos,
                 old_rows,
                 new_rows,
                 new_cols,
-                removed,
+                from_top,
+                pulled,
                 was_at_bottom,
             );
             self.cursor.row = cursor_pos.0;
@@ -1627,16 +1636,15 @@ impl Term {
         _old_rows: usize,
         new_rows: usize,
         new_cols: usize,
-        rows_removed: usize,
+        rows_from_top: usize,
+        rows_from_scrollback: usize,
         _was_at_bottom: bool,
     ) -> (usize, usize) {
-        // Solo ajustar al truncar filas; al crecer mantener la fila actual y dejar
-        // que el shell reposicione el cursor tras SIGWINCH (evita huecos y prompts duplicados).
-        let row = if rows_removed > 0 {
-            row.saturating_sub(rows_removed)
-        } else {
-            row
-        };
+        // Encoger desde arriba baja el cursor con el contenido. Crecer
+        // recuperando historial lo empuja hacia el fondo.
+        let row = row
+            .saturating_add(rows_from_scrollback)
+            .saturating_sub(rows_from_top);
         (
             row.min(new_rows.saturating_sub(1)),
             col.min(new_cols.saturating_sub(1)),
@@ -5743,15 +5751,29 @@ mod tests {
                 .contains("PROMPT")
         });
         assert!(visible, "PROMPT visible tras 24->10");
+        assert!(
+            term.grid.scrollback.iter().any(|row| {
+                row.iter()
+                    .map(|c| c.ch)
+                    .collect::<String>()
+                    .contains("line0")
+            }),
+            "el contenido recortado queda en el historial"
+        );
+        assert_eq!(term.cursor.row, 9);
 
         term.resize_grid(24, DEFAULT_COLS, true);
-        let visible = term.grid.rows.iter().any(|row| {
-            row.iter()
-                .map(|c| c.ch)
-                .collect::<String>()
-                .contains("PROMPT")
-        });
-        assert!(visible, "PROMPT visible tras 10->24");
+        let first: String = term.grid.rows[0].iter().map(|c| c.ch).collect();
+        assert!(
+            first.contains("line0"),
+            "el contenido de arriba se restaura, got {first:?}"
+        );
+        let last: String = term.grid.rows[23].iter().map(|c| c.ch).collect();
+        assert!(
+            last.contains("PROMPT"),
+            "el prompt queda al fondo, got {last:?}"
+        );
+        assert_eq!(term.cursor.row, 23);
     }
 
     /// En pantalla primaria, resize_grid aplica reflow.
