@@ -142,6 +142,7 @@ fn current_key_modes(term: &Arc<Mutex<Term>>) -> KeyModes {
             app_keypad: g.keypad_application_mode,
             newline_mode: g.newline_mode,
             keyboard_flags: g.keyboard_flags,
+            modify_other_keys: g.modify_other_keys,
         }
     } else {
         KeyModes::default()

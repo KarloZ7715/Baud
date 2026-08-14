@@ -422,6 +422,7 @@ fn send_key(app: &App, req: &Request) -> Response {
             app_keypad: term.keypad_application_mode,
             newline_mode: term.newline_mode,
             keyboard_flags: term.keyboard_flags,
+            modify_other_keys: term.modify_other_keys,
         },
         Err(r) => return r,
     };

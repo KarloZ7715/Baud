@@ -72,6 +72,8 @@ pub struct KeyModes {
     pub newline_mode: bool,
     /// Flags del protocolo de teclado extendido (CSI u).
     pub keyboard_flags: u8,
+    /// Nivel de modifyOtherKeys (XTMODKEYS): 1 o 2; 0 = desactivado.
+    pub modify_other_keys: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +156,54 @@ pub fn encode_key_extended(
     Some(format!("\x1b[{};{}u", cp, field).into_bytes())
 }
 
+/// Codifica una tecla "other" (Enter/Escape/Tab/Backspace) con modificadores
+/// en la forma xterm `CSI 27;mod;code~` (modifyOtherKeys). Devuelve None cuando
+/// la combinacion ya tiene una representacion estandar de un byte/secuencia.
+fn encode_modified_other(key: Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
+    let level = modes.modify_other_keys;
+    if level == 0 {
+        return None;
+    }
+    let code = u_form_codepoint(key)?;
+    match key {
+        // Enter: shift/ctrl/ctrl+shift/alt+shift se distinguen; alt solo sigue
+        // por metaSendsEscape (ESC CR).
+        Key::Enter => {
+            if mods.any() && !(mods.alt && !mods.shift && !mods.ctrl) {
+                Some(format!("\x1b[27;{};{code}~", mods.xterm_param()).into_bytes())
+            } else {
+                None
+            }
+        }
+        // Escape: cualquier modificador (salvo alt solo -> ESC ESC) se distingue.
+        Key::Escape => {
+            if mods.any() && !(mods.alt && !mods.shift && !mods.ctrl) {
+                Some(format!("\x1b[27;{};{code}~", mods.xterm_param()).into_bytes())
+            } else {
+                None
+            }
+        }
+        // Tab: shift ya es CSI Z; ctrl/alt solo se distinguen en nivel 2.
+        Key::Tab => {
+            if level >= 2 && (mods.ctrl || mods.alt) {
+                Some(format!("\x1b[27;{};{code}~", mods.xterm_param()).into_bytes())
+            } else {
+                None
+            }
+        }
+        // Backspace: shift solo se distingue en nivel 2; ctrl/alt conservan su
+        // representacion estandar (0x08 / ESC prefijo).
+        Key::Backspace => {
+            if level >= 2 && mods.shift && !mods.ctrl && !mods.alt {
+                Some(format!("\x1b[27;{};{code}~", mods.xterm_param()).into_bytes())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Codifica una tecla a bytes para el PTY. None = no se envia nada.
 pub fn encode_key(key: Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
     // ponytail: application keypad real requiere distinguir el numpad fisico, que
@@ -162,9 +212,12 @@ pub fn encode_key(key: Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
     match key {
         Key::Char(c) => Some(encode_char(c, mods)),
         Key::Enter => {
-            // Alt antepone ESC (mismo patron que Backspace/Escape). Shift no
-            // tiene encoding clasico distinguible de Enter (limitacion del
-            // protocolo legacy sin modifyOtherKeys): ambos envian CR/CRLF.
+            if let Some(bytes) = encode_modified_other(key, mods, modes) {
+                return Some(bytes);
+            }
+            // Alt antepone ESC (mismo patron que Backspace/Escape). Shift sin
+            // modifyOtherKeys no tiene encoding distinguible de Enter: ambos
+            // envian CR/CRLF.
             let base = if modes.newline_mode {
                 vec![0x0d, 0x0a]
             } else {
@@ -180,6 +233,9 @@ pub fn encode_key(key: Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
             })
         }
         Key::Tab => {
+            if let Some(bytes) = encode_modified_other(key, mods, modes) {
+                return Some(bytes);
+            }
             if mods.shift {
                 Some(b"\x1b[Z".to_vec())
             } else {
@@ -187,6 +243,9 @@ pub fn encode_key(key: Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
             }
         }
         Key::Backspace => {
+            if let Some(bytes) = encode_modified_other(key, mods, modes) {
+                return Some(bytes);
+            }
             // Ctrl+Backspace -> BS (0x08); Alt antepone ESC.
             let base = if mods.ctrl { 0x08 } else { 0x7f };
             Some(if mods.alt {
@@ -195,11 +254,16 @@ pub fn encode_key(key: Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
                 vec![base]
             })
         }
-        Key::Escape => Some(if mods.alt {
-            vec![0x1b, 0x1b]
-        } else {
-            vec![0x1b]
-        }),
+        Key::Escape => {
+            if let Some(bytes) = encode_modified_other(key, mods, modes) {
+                return Some(bytes);
+            }
+            Some(if mods.alt {
+                vec![0x1b, 0x1b]
+            } else {
+                vec![0x1b]
+            })
+        }
         Key::Up | Key::Down | Key::Right | Key::Left | Key::Home | Key::End => {
             encode_cursor(key, mods, modes)
         }
@@ -687,6 +751,128 @@ mod tests {
             ..Mods::NONE
         };
         assert_eq!(encode_key(Key::Enter, shift, d), Some(vec![0x0d]));
+    }
+
+    #[test]
+    fn test_modify_other_keys_enter_nivel_1() {
+        let m = KeyModes {
+            modify_other_keys: 1,
+            ..KeyModes::default()
+        };
+        let shift = Mods {
+            shift: true,
+            ..Mods::NONE
+        };
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        let alt_shift = Mods {
+            alt: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            encode_key(Key::Enter, shift, m),
+            Some(b"\x1b[27;2;13~".to_vec())
+        );
+        assert_eq!(
+            encode_key(Key::Enter, ctrl, m),
+            Some(b"\x1b[27;5;13~".to_vec())
+        );
+        assert_eq!(
+            encode_key(Key::Enter, cs, m),
+            Some(b"\x1b[27;6;13~".to_vec())
+        );
+        assert_eq!(
+            encode_key(Key::Enter, alt_shift, m),
+            Some(b"\x1b[27;4;13~".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_modify_other_keys_tab_y_backspace_nivel_2() {
+        let nivel1 = KeyModes {
+            modify_other_keys: 1,
+            ..KeyModes::default()
+        };
+        let nivel2 = KeyModes {
+            modify_other_keys: 2,
+            ..KeyModes::default()
+        };
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        let shift = Mods {
+            shift: true,
+            ..Mods::NONE
+        };
+        let alt = Mods {
+            alt: true,
+            ..Mods::NONE
+        };
+        // Tab ctrl/alt: sin distinguir en nivel 1, distinguido en nivel 2.
+        assert_eq!(encode_key(Key::Tab, ctrl, nivel1), Some(vec![0x09]));
+        assert_eq!(
+            encode_key(Key::Tab, ctrl, nivel2),
+            Some(b"\x1b[27;5;9~".to_vec())
+        );
+        assert_eq!(
+            encode_key(Key::Tab, alt, nivel2),
+            Some(b"\x1b[27;3;9~".to_vec())
+        );
+        // Shift+Tab siempre es CSI Z.
+        assert_eq!(
+            encode_key(Key::Tab, shift, nivel2),
+            Some(b"\x1b[Z".to_vec())
+        );
+        // Shift+Backspace: distinguido solo en nivel 2.
+        assert_eq!(encode_key(Key::Backspace, shift, nivel1), Some(vec![0x7f]));
+        assert_eq!(
+            encode_key(Key::Backspace, shift, nivel2),
+            Some(b"\x1b[27;2;127~".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_modify_other_keys_escape_nivel_1() {
+        let m = KeyModes {
+            modify_other_keys: 1,
+            ..KeyModes::default()
+        };
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        let alt = Mods {
+            alt: true,
+            ..Mods::NONE
+        };
+        assert_eq!(
+            encode_key(Key::Escape, ctrl, m),
+            Some(b"\x1b[27;5;27~".to_vec())
+        );
+        // Alt solo conserva ESC ESC.
+        assert_eq!(encode_key(Key::Escape, alt, m), Some(vec![0x1b, 0x1b]));
+    }
+
+    #[test]
+    fn test_alt_enter_sin_cambio_con_modify_other_keys() {
+        let m = KeyModes {
+            modify_other_keys: 1,
+            ..KeyModes::default()
+        };
+        let alt = Mods {
+            alt: true,
+            ..Mods::NONE
+        };
+        assert_eq!(encode_key(Key::Enter, alt, m), Some(vec![0x1b, 0x0d]));
     }
 
     #[test]
