@@ -22,10 +22,10 @@ Overlays (consent, theme picker, copy mode, search) get first refusal. Unbound k
 
 `src/input/keymap.rs` owns both paths, driven by terminal modes on `Term`:
 
-- **Classic:** ctrl characters, alt as ESC-prefix, CSI/SS3 cursors, `~` keys, function keys — the usual xterm-style stream.
+- **Classic:** ctrl characters, alt as ESC-prefix, CSI/SS3 cursors, `~` keys, function keys — the usual xterm-style stream. With `modify_other_keys` active (level 1 or 2), modified "other" keys (Enter, Escape, and at level 2 Tab and Backspace) that lack a standard one-byte form are encoded as `CSI 27;mod;code~` instead; see the [Terminal API](../vt/index.md#modifyotherkeys-xtmodkeys) page for the exact bytes.
 - **Extended (CSI u):** when `keyboard_flags` is non-zero (set by the CSI u protocol in `src/ansi/`), `encode_key_extended` may emit `\x1b[{codepoint};{modifiers}u`. If extended encoding returns nothing for that key, the classic path is used. Not every key is on the u-form yet (arrows, function keys, and page keys are among the classic holdouts).
 
-`KeyModes` also carries app cursor keys, app keypad, and newline mode for classic sequences.
+`KeyModes` also carries app cursor keys, app keypad, newline mode, and the `modify_other_keys` level for classic sequences.
 
 Binding overrides and the full `Action` set live in `src/input/actions.rs`. Defaults and user chords are documented in the generated [Keybindings reference](../reference/keybindings.md); this page only describes the machinery.
 

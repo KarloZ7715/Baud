@@ -26,7 +26,7 @@ High-signal areas owned by `Term` in `src/ansi/mod.rs`:
 | --- | --- |
 | Buffers | Primary `grid`, `alt_grid`, alt-screen flag, scroll region, scrollback offset |
 | Cursor and attributes | Cursor, current `Attrs` (fg/bg, bold/italic/underline styles, …), visibility and blink |
-| Modes | Auto-wrap, bracketed paste, app cursor/keypad, origin/insert/newline, `keyboard_flags` (CSI u stack) |
+| Modes | Auto-wrap, bracketed paste, app cursor/keypad, origin/insert/newline, `keyboard_flags` (CSI u stack), `modify_other_keys` (XTMODKEYS level) |
 | Synchronized output | `sync_update_active` and `should_defer_redraw` (DECSET/DECRST 2026, with a timeout) |
 | Prompt marks | OSC 133 marks, reconciled when scrollback trims |
 | Links | Hyperlink table, per-cell link id, hover range |
