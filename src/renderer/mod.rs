@@ -926,6 +926,44 @@ impl Renderer {
         self.reset_aux_buffers();
     }
 
+    /// Presenta un frame solo con el fondo del tema. Cubre la superficie
+    /// recien reconfigurada para que el compositor no muestre un buffer
+    /// sin inicializar entre el `configure` y el siguiente frame completo.
+    pub fn present_theme_background(&mut self, bg: (u8, u8, u8), window_opacity: f32) {
+        let clear_color = frame_clear_color(bg, window_opacity, self.config.format.is_srgb());
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            _ => return,
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("resize background clear"),
+            });
+        {
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("resize background clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear_color),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                ..Default::default()
+            });
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+        frame.present();
+    }
+
     /// Renderiza los panes del layout activo en la surface.
     #[expect(
         clippy::too_many_arguments,

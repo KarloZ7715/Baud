@@ -4227,6 +4227,8 @@ impl ApplicationHandler<UserEvent> for App {
                 let size = window.inner_size();
                 renderer.set_scale_factor(scale_factor as f32);
                 renderer.resize(size.width, size.height, 0);
+                let bg = crate::config::parse_hex(&self.config.theme.background);
+                renderer.present_theme_background(bg, self.config.window.opacity);
                 let cell_w = renderer.cell_w;
                 let cell_h = renderer.cell_h;
                 let (_old_rows, _old_cols, new_rows, new_cols, deferred) =
@@ -4250,6 +4252,8 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 };
                 renderer.resize(new_size.width, new_size.height, 0);
+                let bg = crate::config::parse_hex(&self.config.theme.background);
+                renderer.present_theme_background(bg, self.config.window.opacity);
                 let cell_w = renderer.cell_w;
                 let cell_h = renderer.cell_h;
                 let (_old_rows, _old_cols, new_rows, new_cols, deferred) = self
