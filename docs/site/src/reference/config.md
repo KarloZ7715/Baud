@@ -522,7 +522,7 @@ Local troubleshooting: the event-loop watchdog, log level, and opt-in crash repo
 
 ### diagnostics.latency_probe {#config-diagnostics-latency_probe}
 
-Measures key-to-presentation latency (from `KeyboardInput` to `frame.present()`), logging p50/p95/p99 every 60 samples. This is a strict lower bound: it excludes keyboard, compositor, and panel latency.
+Measures key-to-presentation latency (from `KeyboardInput` to `frame.present()`), logging p50/p90/p99/max every 60 samples and again on exit. This is a strict lower bound: it excludes keyboard, compositor, and panel latency.
 
 Type: `boolean`. Default: `false`.
 

@@ -151,7 +151,8 @@ pub struct DiagnosticsConfig {
     /// a `frame.present()`, no de dedo a fotón: deja fuera el teclado,
     /// el compositor y el panel. Es un límite inferior estricto, pero es
     /// lo único que Baud controla y puede regresionar por un cambio de
-    /// código. Registra p50/p95/p99 cada N muestras, no cada muestra.
+    /// código. Acumula la sesión, registra p50/p90/p99/max cada 60
+    /// muestras y vuelve a emitir el informe al salir.
     #[serde(default)]
     pub latency_probe: bool,
     /// Nivel de log por defecto del target `baud`. Solo aplica si no hay

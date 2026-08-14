@@ -22,6 +22,7 @@ use crate::config::{
     ProcessSection, StartupState,
 };
 use crate::copy_mode::CopyModeState;
+use crate::diagnostics::latency::LatencyTracker;
 use crate::display_quirks::{self, DisplayQuirks};
 use crate::event_loop::{should_redraw, BlinkFocus};
 use crate::grid::Cell;
@@ -452,17 +453,12 @@ pub struct App {
     /// Se re-resuelve al crear la ventana y al moverla entre monitores.
     monitor_refresh_hz: Option<u32>,
     // --- Sonda de latencia tecla→present (diagnostics.latency_probe) ---
-    /// Instant en que se envió la última entrada al PTY; None si no hay
-    /// eco pendiente. Solo se mide cuando el drain dispara el redraw, no
-    /// en el request_redraw inmediato del handler de teclado (ese frame
-    /// no contiene el eco todavía).
-    pending_echo: Option<Instant>,
+    /// `None` si la sonda está apagada: el camino caliente no paga Instant.
+    latency: Option<LatencyTracker>,
     /// True cuando el último RedrawNeeded vino del drain (procesó salida).
     /// Distingue los frames que pueden contener el eco de los redraws
     /// inmediatos del handler de teclado.
     drain_triggered_redraw: bool,
-    /// Acumulador de muestras de latencia; emite p50/p95/p99 al llenarse.
-    latency_probe: LatencyProbeStats,
     /// True mientras el compositor reporta la ventana como no visible
     /// (`WindowEvent::Occluded`). Pedir imagenes del swapchain en ese estado
     /// bloquea el event loop hasta el timeout de wgpu sin que nadie vea el
@@ -476,39 +472,6 @@ pub struct App {
     /// True cuando el último frame dejó algún pane sin repintar (el `Term`
     /// estaba tomado). Obliga a un redraw de seguimiento.
     followup_redraw: bool,
-}
-
-/// Recopila muestras de latencia (µs) y registra p50/p95/p99 cada N.
-struct LatencyProbeStats {
-    samples: Vec<u64>,
-    capacity: usize,
-}
-
-impl LatencyProbeStats {
-    const DEFAULT_CAPACITY: usize = 60;
-
-    fn new() -> Self {
-        Self {
-            samples: Vec::with_capacity(Self::DEFAULT_CAPACITY),
-            capacity: Self::DEFAULT_CAPACITY,
-        }
-    }
-
-    /// Añade una muestra; devuelve los percentiles (µs) cuando se llena.
-    fn record(&mut self, latency_us: u64) -> Option<(u64, u64, u64)> {
-        self.samples.push(latency_us);
-        if self.samples.len() < self.capacity {
-            return None;
-        }
-        self.samples.sort_unstable();
-        let p = |pct: f64| -> u64 {
-            let idx = ((pct / 100.0) * self.samples.len() as f64) as usize;
-            self.samples[idx.min(self.samples.len() - 1)]
-        };
-        let result = (p(50.0), p(95.0), p(99.0));
-        self.samples.clear();
-        Some(result)
-    }
 }
 
 fn allowed_open_url(url: &str) -> bool {
@@ -595,6 +558,7 @@ impl App {
         let window_height = config.window.height as f32;
         let keybindings = config.keybindings();
         let redraw_interval_nanos = Arc::new(AtomicU64::new(config.render.redraw_interval_nanos()));
+        let latency = config.diagnostics.latency_probe.then(LatencyTracker::new);
         let tabs: Vec<TabLayout> = sessions
             .iter()
             .map(|h| TabLayout::new(h.session.id))
@@ -662,9 +626,8 @@ impl App {
             first_frame_logged: false,
             scale_factor: 1.0,
             monitor_refresh_hz: None,
-            pending_echo: None,
+            latency,
             drain_triggered_redraw: false,
-            latency_probe: LatencyProbeStats::new(),
             occluded: false,
             last_acquire_failure: None,
             followup_redraw: false,
@@ -1138,6 +1101,11 @@ impl App {
                 "baud termina"
             );
         }
+        if let Some(tracker) = &self.latency {
+            if tracker.samples() > 0 {
+                tracing::info!(target: "baud::latency", "{}", tracker.report());
+            }
+        }
         self.pending_exit = Some(reason);
     }
 
@@ -1315,9 +1283,13 @@ impl App {
             Ordering::Relaxed,
         );
 
-        // Sonda de latencia: limpiar estado pendiente si se desactiva.
-        if !self.config.diagnostics.latency_probe {
-            self.pending_echo = None;
+        // Sonda de latencia: crear al activar, soltar al desactivar.
+        if self.config.diagnostics.latency_probe {
+            if self.latency.is_none() {
+                self.latency = Some(LatencyTracker::new());
+            }
+        } else {
+            self.latency = None;
         }
 
         if !self.config.debug.fps_counter_enabled && self.fps_overlay_visible {
@@ -4528,25 +4500,13 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
 
-                // Sonda de latencia: medir tecla→present solo en frames
-                // disparados por el drain (contienen el eco), no en el
-                // request_redraw inmediato del handler de teclado.
-                if self.config.diagnostics.latency_probe {
-                    if let Some(t_echo) = self.pending_echo.take() {
-                        if self.drain_triggered_redraw {
-                            let us = t_echo.elapsed().as_micros() as u64;
-                            if let Some((p50, p95, p99)) = self.latency_probe.record(us) {
-                                tracing::info!(
-                                    "[LATENCY] p50={}µs p95={}µs p99={}µs",
-                                    p50,
-                                    p95,
-                                    p99
-                                );
-                            }
-                        } else {
-                            // El frame no vino del drain: reponer para la
-                            // próxima presentación que sí contenga el eco.
-                            self.pending_echo = Some(t_echo);
+                // Solo el present disparado por el drain contiene el eco;
+                // el request_redraw inmediato del teclado no cuenta.
+                if self.drain_triggered_redraw {
+                    if let Some(tracker) = &mut self.latency {
+                        tracker.on_present();
+                        if let Some(msg) = tracker.take_periodic() {
+                            tracing::info!(target: "baud::latency", "{msg}");
                         }
                     }
                 }
@@ -5389,12 +5349,9 @@ impl ApplicationHandler<UserEvent> for App {
                 }
 
                 // Fallback: encode_key_extended (CSI u) o encode_key clasico.
-                // Sonda de latencia: marcar el instante de envío justo antes
-                // de encode_key. Solo se mide cuando el drain dispara el redraw
-                // (drain_triggered_redraw), no en el request_redraw inmediato
-                // de abajo: ese frame no contiene el eco todavía.
-                if self.config.diagnostics.latency_probe && self.pending_echo.is_none() {
-                    self.pending_echo = Some(Instant::now());
+                // La marca va aquí: el present que cuenta es el del drain.
+                if let Some(tracker) = &mut self.latency {
+                    tracker.on_key();
                 }
                 if let Some(k) = winit_to_key(&event.logical_key) {
                     let modes = current_key_modes(self.focused_term());

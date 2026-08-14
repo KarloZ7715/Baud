@@ -118,7 +118,7 @@ keys = "User-defined keybinding overrides, mapping a chord string to an action n
 "status.fg_color" = "Status overlay text color; unset uses an adjusted `theme.foreground`."
 
 "diagnostics.watchdog" = "Runs a background thread that detects an unresponsive event loop. Requires a restart to take effect."
-"diagnostics.latency_probe" = "Measures key-to-presentation latency (from `KeyboardInput` to `frame.present()`), logging p50/p95/p99 every 60 samples. This is a strict lower bound: it excludes keyboard, compositor, and panel latency."
+"diagnostics.latency_probe" = "Measures key-to-presentation latency (from `KeyboardInput` to `frame.present()`), logging p50/p90/p99/max every 60 samples and again on exit. This is a strict lower bound: it excludes keyboard, compositor, and panel latency."
 "diagnostics.log_level" = "Default log level for the `baud` tracing target; ignored when `RUST_LOG` is set in the environment."
 "diagnostics.reporting.enabled" = "Whether remote crash reporting (Sentry) is turned on; unset means the user has not been asked yet."
 "diagnostics.reporting.dsn" = "Sentry DSN to report to; unset uses the DSN baked in at build time (`BAUD_SENTRY_DSN`)."

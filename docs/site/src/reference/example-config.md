@@ -37,7 +37,7 @@ A fully commented `config.toml`, generated from the same defaults as the configu
 # fps_counter_enabled = false
 
 [diagnostics]
-# Measures key-to-presentation latency (from `KeyboardInput` to `frame.present()`), logging p50/p95/p99 every 60 samples. This is a strict lower bound: it excludes keyboard, compositor, and panel latency.
+# Measures key-to-presentation latency (from `KeyboardInput` to `frame.present()`), logging p50/p90/p99/max every 60 samples and again on exit. This is a strict lower bound: it excludes keyboard, compositor, and panel latency.
 # latency_probe = false
 # Runs a background thread that detects an unresponsive event loop. Requires a restart to take effect.
 # watchdog = false
