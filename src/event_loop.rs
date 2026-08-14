@@ -108,6 +108,10 @@ impl BlinkFocus {
         self.window_focused.store(focused, Ordering::Relaxed);
     }
 
+    pub fn window_focused(&self) -> bool {
+        self.window_focused.load(Ordering::Relaxed)
+    }
+
     pub fn is_active(&self, id: SessionId) -> bool {
         self.window_focused.load(Ordering::Relaxed)
             && self.current.lock().is_ok_and(|guard| *guard == id)
@@ -342,11 +346,12 @@ fn read_master_available(
 
 /// Lanza el hilo periodico de parpadeo y de recuperacion de sync.
 ///
-/// Cada `blink_interval/2` (o ~50ms si hay sync activo o el parpadeo esta
-/// desactivado) consulta el term: si hay cursor/celdas SGR 5 que parpadean, o
-/// un frame sincronizado cuyo timeout de seguridad ya vencio, marca dirty y
-/// envia `RedrawNeeded`. El wake de sync no exige foco, para que panes en
-/// segundo plano tambien salgan del deferral tras el timeout.
+/// Duerme hasta el proximo cambio visual de fase (o ~50ms si hay sync activo
+/// o el parpadeo esta desactivado) y consulta el term: si hay cursor/celdas
+/// SGR 5 que parpadean fuera de la supresion por tecleo, o un frame
+/// sincronizado cuyo timeout de seguridad ya vencio, marca dirty y envia
+/// `RedrawNeeded`. El wake de sync no exige foco, para que panes en segundo
+/// plano tambien salgan del deferral tras el timeout.
 pub(crate) fn spawn_blink_timer(
     term: Arc<Mutex<Term>>,
     proxy: winit::event_loop::EventLoopProxy<UserEvent>,
@@ -354,16 +359,29 @@ pub(crate) fn spawn_blink_timer(
     focus: Arc<BlinkFocus>,
 ) {
     thread::spawn(move || loop {
-        let (interval_ms, sync_active) = match term.try_lock() {
-            Ok(g) => (g.blink_interval_ms, g.sync_update_active),
+        let (interval_ms, sync_active, last_reset) = match term.try_lock() {
+            Ok(g) => (
+                g.blink_interval_ms,
+                g.sync_update_active,
+                g.last_blink_reset,
+            ),
             Err(_) => {
                 thread::sleep(Duration::from_millis(50));
                 continue;
             }
         };
         // Con sync activo o blink desactivado, sondear al menos cada ~50ms.
+        // Si hay fase de parpadeo, dormir hasta el proximo cambio visual
+        // (incluye la supresion tras teclear: cero redraws mientras dura).
+        let interval = Duration::from_millis(interval_ms);
         let sleep_for = if sync_active || interval_ms == 0 {
             Duration::from_millis(50)
+        } else if let Some(until) = crate::renderer::blink_next_deadline(
+            last_reset.elapsed(),
+            interval,
+            focus.window_focused(),
+        ) {
+            until.max(Duration::from_millis(1))
         } else {
             Duration::from_millis(interval_ms) / 2
         };
@@ -371,7 +389,10 @@ pub(crate) fn spawn_blink_timer(
         let need_redraw = match term.try_lock() {
             Ok(mut g) => {
                 let sync_wake = g.sync_update_active && !g.should_defer_redraw();
-                let blink_wake = focus.is_active(session_id) && g.has_blink_stuff();
+                let interval = Duration::from_millis(g.blink_interval_ms);
+                let blink_wake = focus.is_active(session_id)
+                    && g.has_blink_stuff()
+                    && !crate::renderer::blink_suppressed(g.last_blink_reset.elapsed(), interval);
                 if sync_wake || blink_wake {
                     g.mark_dirty();
                     true

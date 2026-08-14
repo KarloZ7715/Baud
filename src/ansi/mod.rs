@@ -1434,9 +1434,9 @@ impl Term {
         self.sync_update_started_at = at;
     }
 
-    /// Resetea la fase de parpadeo a "on". Llamar en cada input del usuario y
-    /// tras procesar salida del PTY, para que el cursor quede solido mientras
-    /// se escribe (comportamiento xterm).
+    /// Resetea la fase de parpadeo a visible y abre una ventana de supresion
+    /// de un intervalo. Llamar en cada input del usuario y tras procesar
+    /// salida del PTY, para que el cursor quede solido mientras se escribe.
     ///
     /// Solo se invoca en estos dos caminos deliberadamente: eventos de mouse,
     /// scroll y navegacion de copy mode no resetean la fase (no son entrada

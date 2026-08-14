@@ -20,7 +20,7 @@ mod tab_bar;
 mod terminal_fallback;
 mod title_bar;
 
-pub use blink::blink_on;
+pub use blink::{blink_next_deadline, blink_on, blink_suppressed, blink_visible};
 pub use contrast::{adjust_fg, ContrastCache};
 pub use decorations::SOLID_MASK_GLYPH_ID;
 pub use palette::{ColorOverrides, Palette};
@@ -1661,7 +1661,7 @@ impl Renderer {
 
         self.prepare_glyph_metrics(metrics);
         let blink_on = if track_selection {
-            crate::renderer::blink_on(
+            crate::renderer::blink_visible(
                 term.last_blink_reset.elapsed(),
                 std::time::Duration::from_millis(term.blink_interval_ms),
             )
