@@ -661,6 +661,8 @@ pub struct Term {
     pub newline_mode: bool,
     /// Flags del protocolo de teclado extendido (CSI u): bitmask activa.
     pub keyboard_flags: u8,
+    /// Nivel de modifyOtherKeys (XTMODKEYS): 1 o 2, con 1 por defecto (paridad foot).
+    pub modify_other_keys: u8,
     /// Stack para CSI > u (push) / CSI < u (pop).
     keyboard_flags_stack: Vec<u8>,
     /// Intermedios del DCS activo (`+` en XTGETTCAP).
@@ -809,6 +811,7 @@ impl Term {
             insert_mode: false,
             newline_mode: false,
             keyboard_flags: 0,
+            modify_other_keys: 1,
             keyboard_flags_stack: Vec::new(),
             dcs_intermediates: Vec::new(),
             dcs_action: None,
@@ -2591,6 +2594,28 @@ impl vte::Perform for Term {
             }
         }
 
+        // modifyOtherKeys (XTMODKEYS/XTQMODKEYS): niveles 1 y 2 (paridad foot).
+        // Se intercepta antes del match principal de 'm' para no confundirlo
+        // con SGR. Solo Pp=4 (modifyOtherKeys); el resto de categorias se ignora.
+        if intermediates == b">" && action == 'm' {
+            let mut flat = params.iter().map(|p| p.first().copied().unwrap_or(0));
+            let pp = flat.next().unwrap_or(0);
+            if pp == 4 {
+                let pv = flat.next().unwrap_or(1);
+                self.modify_other_keys = pv.clamp(1, 2) as u8;
+                return;
+            }
+        }
+        if intermediates == b"?" && action == 'm' {
+            let mut flat = params.iter().map(|p| p.first().copied().unwrap_or(0));
+            let pp = flat.next().unwrap_or(0);
+            if pp == 4 {
+                let resp = format!("\x1b[>4;{}m", self.modify_other_keys);
+                self.respond(resp.as_bytes());
+                return;
+            }
+        }
+
         // DEC private modes: handler temprano con return para no ensuciar
         // el match principal.
         if intermediates == b"?" {
@@ -3485,6 +3510,38 @@ mod tests {
         assert_eq!(term.take_pty_response(), b"\x1b[?3u");
         feed(&mut term, b"\x1b[<1u");
         assert_eq!(term.keyboard_flags, 0);
+    }
+
+    #[test]
+    fn modify_other_keys_es_1_por_defecto() {
+        let term = Term::new();
+        assert_eq!(term.modify_other_keys, 1);
+    }
+
+    #[test]
+    fn xtmodkeys_set_nivel_2_y_query_responde() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[>4;2m");
+        assert_eq!(term.modify_other_keys, 2);
+        feed(&mut term, b"\x1b[?4m");
+        assert_eq!(term.take_pty_response(), b"\x1b[>4;2m");
+    }
+
+    #[test]
+    fn xtmodkeys_reset_vuelve_a_nivel_1() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[>4;2m");
+        assert_eq!(term.modify_other_keys, 2);
+        feed(&mut term, b"\x1b[>4m");
+        assert_eq!(term.modify_other_keys, 1);
+    }
+
+    #[test]
+    fn xtmodkeys_ignora_otros_pp() {
+        let mut term = Term::new();
+        // Pp=1 es modifyCursorKeys, no modifyOtherKeys: no debe cambiar nada.
+        feed(&mut term, b"\x1b[>1;2m");
+        assert_eq!(term.modify_other_keys, 1);
     }
 
     #[test]
