@@ -157,8 +157,9 @@ pub fn encode_key_extended(
 }
 
 /// Codifica una tecla "other" (Enter/Escape/Tab/Backspace) con modificadores
-/// en la forma xterm `CSI 27;mod;code~` (modifyOtherKeys). Devuelve None cuando
-/// la combinacion ya tiene una representacion estandar de un byte/secuencia.
+/// en la forma `CSI code;mod u` (modifyOtherKeys con formatOtherKeys=1).
+/// Devuelve None cuando la combinacion ya tiene una representacion estandar
+/// de un byte/secuencia.
 fn encode_modified_other(key: Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8>> {
     let level = modes.modify_other_keys;
     if level == 0 {
@@ -170,7 +171,7 @@ fn encode_modified_other(key: Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8
         // por metaSendsEscape (ESC CR).
         Key::Enter => {
             if mods.any() && !(mods.alt && !mods.shift && !mods.ctrl) {
-                Some(format!("\x1b[27;{};{code}~", mods.xterm_param()).into_bytes())
+                Some(format!("\x1b[{code};{}u", mods.xterm_param()).into_bytes())
             } else {
                 None
             }
@@ -178,7 +179,7 @@ fn encode_modified_other(key: Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8
         // Escape: cualquier modificador (salvo alt solo -> ESC ESC) se distingue.
         Key::Escape => {
             if mods.any() && !(mods.alt && !mods.shift && !mods.ctrl) {
-                Some(format!("\x1b[27;{};{code}~", mods.xterm_param()).into_bytes())
+                Some(format!("\x1b[{code};{}u", mods.xterm_param()).into_bytes())
             } else {
                 None
             }
@@ -186,7 +187,7 @@ fn encode_modified_other(key: Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8
         // Tab: shift ya es CSI Z; ctrl/alt solo se distinguen en nivel 2.
         Key::Tab => {
             if level >= 2 && (mods.ctrl || mods.alt) {
-                Some(format!("\x1b[27;{};{code}~", mods.xterm_param()).into_bytes())
+                Some(format!("\x1b[{code};{}u", mods.xterm_param()).into_bytes())
             } else {
                 None
             }
@@ -195,7 +196,7 @@ fn encode_modified_other(key: Key, mods: Mods, modes: KeyModes) -> Option<Vec<u8
         // representacion estandar (0x08 / ESC prefijo).
         Key::Backspace => {
             if level >= 2 && mods.shift && !mods.ctrl && !mods.alt {
-                Some(format!("\x1b[27;{};{code}~", mods.xterm_param()).into_bytes())
+                Some(format!("\x1b[{code};{}u", mods.xterm_param()).into_bytes())
             } else {
                 None
             }
@@ -779,19 +780,16 @@ mod tests {
         };
         assert_eq!(
             encode_key(Key::Enter, shift, m),
-            Some(b"\x1b[27;2;13~".to_vec())
+            Some(b"\x1b[13;2u".to_vec())
         );
         assert_eq!(
             encode_key(Key::Enter, ctrl, m),
-            Some(b"\x1b[27;5;13~".to_vec())
+            Some(b"\x1b[13;5u".to_vec())
         );
-        assert_eq!(
-            encode_key(Key::Enter, cs, m),
-            Some(b"\x1b[27;6;13~".to_vec())
-        );
+        assert_eq!(encode_key(Key::Enter, cs, m), Some(b"\x1b[13;6u".to_vec()));
         assert_eq!(
             encode_key(Key::Enter, alt_shift, m),
-            Some(b"\x1b[27;4;13~".to_vec())
+            Some(b"\x1b[13;4u".to_vec())
         );
     }
 
@@ -821,11 +819,11 @@ mod tests {
         assert_eq!(encode_key(Key::Tab, ctrl, nivel1), Some(vec![0x09]));
         assert_eq!(
             encode_key(Key::Tab, ctrl, nivel2),
-            Some(b"\x1b[27;5;9~".to_vec())
+            Some(b"\x1b[9;5u".to_vec())
         );
         assert_eq!(
             encode_key(Key::Tab, alt, nivel2),
-            Some(b"\x1b[27;3;9~".to_vec())
+            Some(b"\x1b[9;3u".to_vec())
         );
         // Shift+Tab siempre es CSI Z.
         assert_eq!(
@@ -836,7 +834,7 @@ mod tests {
         assert_eq!(encode_key(Key::Backspace, shift, nivel1), Some(vec![0x7f]));
         assert_eq!(
             encode_key(Key::Backspace, shift, nivel2),
-            Some(b"\x1b[27;2;127~".to_vec())
+            Some(b"\x1b[127;2u".to_vec())
         );
     }
 
@@ -856,7 +854,7 @@ mod tests {
         };
         assert_eq!(
             encode_key(Key::Escape, ctrl, m),
-            Some(b"\x1b[27;5;27~".to_vec())
+            Some(b"\x1b[27;5u".to_vec())
         );
         // Alt solo conserva ESC ESC.
         assert_eq!(encode_key(Key::Escape, alt, m), Some(vec![0x1b, 0x1b]));

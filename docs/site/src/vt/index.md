@@ -100,7 +100,7 @@ Every other OSC number is parsed and ignored rather than erroring.
 
 `CSI > 4 ; Pv m` sets the `modifyOtherKeys` level, `CSI > 4 m` resets it to level 1, and `CSI ? 4 m` queries it (answering `CSI > 4 ; Pv m`). Baud supports levels 1 and 2, with level 1 active by default — the same range and default as foot. Level 0 and level 3 are not supported; a value outside 1–2 is clamped.
 
-When active, "other" keys (Enter, Escape, and at level 2 Tab and Backspace) that carry a modifier with no standard one-byte representation are encoded as `CSI 27 ; mod ; code ~`, where `code` is the key's codepoint (Enter 13, Tab 9, Backspace 127, Escape 27) and `mod` is `1 + bitmask` (shift 1, alt 2, ctrl 4, super 8). Shift+Enter, for example, becomes `CSI 27;2;13~` instead of the plain `CR` that Enter sends, so an application can tell the two apart without opting into the kitty keyboard protocol. Combinations that already have a standard representation are left alone: Alt still prefixes ESC, Ctrl still produces control codes, and Shift+Tab remains `CSI Z`.
+When active, "other" keys (Enter, Escape, and at level 2 Tab and Backspace) that carry a modifier with no standard one-byte representation are encoded as `CSI code ; mod u`, where `code` is the key's codepoint (Enter 13, Tab 9, Backspace 127, Escape 27) and `mod` is `1 + bitmask` (shift 1, alt 2, ctrl 4, super 8). Shift+Enter, for example, becomes `CSI 13;2u` instead of the plain `CR` that Enter sends, so an application can tell the two apart without opting into the kitty keyboard protocol. Combinations that already have a standard representation are left alone: Alt still prefixes ESC, Ctrl still produces control codes, and Shift+Tab remains `CSI Z`.
 
 ## Device attributes and status reports
 
