@@ -808,6 +808,7 @@ impl App {
                 let held = session_idx.is_some_and(|i| self.sessions[i].session.hold);
                 let close_on_exit =
                     session_idx.is_some_and(|i| self.sessions[i].session.close_on_exit);
+                self.log_early_pty_death(id, code, close_on_exit, held);
 
                 if self.is_session_in_active_tab(id) {
                     if self.is_focused_session(id) {
@@ -851,6 +852,7 @@ impl App {
                 let held = session_idx.is_some_and(|i| self.sessions[i].session.hold);
                 let close_on_exit =
                     session_idx.is_some_and(|i| self.sessions[i].session.close_on_exit);
+                self.log_early_pty_death(id, -1, close_on_exit, held);
 
                 if self.is_session_in_active_tab(id) {
                     if self.is_focused_session(id) {
@@ -1084,6 +1086,25 @@ impl App {
 
     pub(crate) fn session_by_id(&self, id: SessionId) -> Option<usize> {
         self.sessions.iter().position(|h| h.session.id == id)
+    }
+
+    /// Avisa si el PTY muere antes de EARLY_EXIT_WARN. Solo registra; no cierra.
+    fn log_early_pty_death(&self, id: SessionId, exit_code: i32, close_on_exit: bool, hold: bool) {
+        let uptime = self.startup_instant.map(|t| t.elapsed());
+        if uptime.is_some_and(|d| d < EARLY_EXIT_WARN) {
+            let uptime_ms = uptime.map(|d| d.as_millis() as u64).unwrap_or(0);
+            tracing::warn!(
+                target: "baud::exit",
+                session = ?id,
+                exit_code,
+                uptime_ms,
+                close_on_exit,
+                hold,
+                backend = ?self.display_quirks.backend,
+                family = ?self.display_quirks.family,
+                "PTY termino poco despues de arrancar"
+            );
+        }
     }
 
     /// Registra el motivo del cierre y lo deja anotado. Llamarlo desde todos
@@ -6263,6 +6284,42 @@ import = false
         app.dispatch_user_event(UserEvent::PtyExited(id, 0));
 
         assert!(app.pending_exit.is_none());
+    }
+
+    #[test]
+    fn pty_exited_sin_close_on_exit_no_cierra_app() {
+        let mut app = test_app(Arc::new(Mutex::new(Term::new())));
+        let id = app.sessions[0].session.id;
+        assert!(!app.sessions[0].session.close_on_exit);
+
+        app.dispatch_user_event(UserEvent::PtyExited(id, -1));
+
+        assert!(app.pending_exit.is_none());
+        assert_eq!(app.sessions.len(), 1);
+    }
+
+    #[test]
+    fn pty_error_sin_close_on_exit_no_cierra_app() {
+        let mut app = test_app(Arc::new(Mutex::new(Term::new())));
+        let id = app.sessions[0].session.id;
+        assert!(!app.sessions[0].session.close_on_exit);
+
+        app.dispatch_user_event(UserEvent::PtyError(id, "broken pipe".into()));
+
+        assert!(app.pending_exit.is_none());
+        assert_eq!(app.sessions.len(), 1);
+    }
+
+    #[test]
+    fn pty_exited_con_menos_de_cinco_segundos_sigue_el_mismo_cierre() {
+        let mut app = test_app(Arc::new(Mutex::new(Term::new())));
+        let id = app.sessions[0].session.id;
+        app.sessions[0].session.close_on_exit = true;
+        app.startup_instant = Some(Instant::now());
+
+        app.dispatch_user_event(UserEvent::PtyExited(id, -1));
+
+        assert_eq!(app.pending_exit, Some(ExitReason::SessionExited(-1)));
     }
 
     #[test]
