@@ -1556,7 +1556,17 @@ impl Term {
         } else {
             self.grid.rows_count
         };
-        let old_cols = self.grid.cols_count;
+        let old_cols = if self.alt_screen {
+            self.alt_grid.cols_count
+        } else {
+            self.grid.cols_count
+        };
+        if new_rows == old_rows && new_cols == old_cols {
+            // Mismo tamano en celdas: no reflow ni se pierde pending_wrap.
+            // El dirty fuerza el present del nuevo tamano en pixeles.
+            self.mark_dirty();
+            return;
+        }
         let cursor_before = (self.cursor.row, self.cursor.col);
         let was_at_bottom = cursor_before.0 == old_rows.saturating_sub(1);
         if self.alt_screen {
@@ -1576,6 +1586,7 @@ impl Term {
         } else {
             let mut cursor_pos = cursor_before;
             if reflow && new_cols != old_cols {
+                tracing::debug!(old_cols, new_cols, "reflow");
                 cursor_pos = self
                     .grid
                     .reflow_with_cursor(new_cols, Some(cursor_pos))
@@ -5647,6 +5658,43 @@ mod tests {
         assert_eq!(term.grid.rows[0][0].ch, 'P');
         // Verificar que no hubo reflow en primaria
         assert_eq!(term.grid.cols_count, DEFAULT_COLS);
+    }
+
+    #[test]
+    fn resize_grid_mismo_tamano_no_toca_pending_wrap() {
+        let mut term = Term::new();
+        term.pending_wrap = true;
+        term.take_dirty();
+        term.resize_grid(DEFAULT_ROWS, DEFAULT_COLS, true);
+        assert!(term.pending_wrap);
+        assert!(term.take_dirty());
+    }
+
+    #[test]
+    fn resize_vertical_mantiene_visible_la_ultima_linea() {
+        let mut term = Term::new();
+        for i in 0..23 {
+            feed(&mut term, format!("line{i}\r\n").as_bytes());
+        }
+        feed(&mut term, b"PROMPT");
+
+        term.resize_grid(10, DEFAULT_COLS, true);
+        let visible = term.grid.rows.iter().any(|row| {
+            row.iter()
+                .map(|c| c.ch)
+                .collect::<String>()
+                .contains("PROMPT")
+        });
+        assert!(visible, "PROMPT visible tras 24->10");
+
+        term.resize_grid(24, DEFAULT_COLS, true);
+        let visible = term.grid.rows.iter().any(|row| {
+            row.iter()
+                .map(|c| c.ch)
+                .collect::<String>()
+                .contains("PROMPT")
+        });
+        assert!(visible, "PROMPT visible tras 10->24");
     }
 
     /// En pantalla primaria, resize_grid aplica reflow.

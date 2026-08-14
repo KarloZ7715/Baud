@@ -1383,6 +1383,28 @@ mod tests {
     }
 
     #[test]
+    fn resize_vertical_mantiene_visible_la_ultima_linea() {
+        let mut grid = Grid::new();
+        grid.resize(24, 80);
+        for r in 0..24 {
+            grid.rows[r][0].ch = char::from_u32(b'A' as u32 + r as u32).unwrap();
+        }
+        grid.rows[23][0].ch = '$';
+
+        grid.resize(10, 80);
+        assert!(
+            grid.rows.iter().any(|row| row[0].ch == '$'),
+            "la ultima linea sigue visible al encoger"
+        );
+
+        grid.resize(24, 80);
+        assert!(
+            grid.rows.iter().any(|row| row[0].ch == '$'),
+            "la ultima linea sigue visible al volver a 24 filas"
+        );
+    }
+
+    #[test]
     fn test_scrollback_1000_lines() {
         let mut grid = Grid::new_sized_with_scrollback(24, 80, 100);
         for i in 0..1000 {
