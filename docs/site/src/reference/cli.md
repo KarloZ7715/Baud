@@ -24,6 +24,7 @@ Options:
 
   mcp options:
       --socket <path>                Control socket (default: newest instance in the runtime dir)
+      --list-tools                   Print the MCP tool catalog as JSON and exit
 
 Aliases:
   -v, --version    Print the installed Baud version
