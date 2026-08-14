@@ -17,7 +17,7 @@ These flags configure the window and initial process before it launches; they ne
 | `-e <command> [args...]` | Run `<command>` (and everything after it) in the PTY instead of your default shell. Must be the last flag — everything following `-e` is passed through verbatim, including further `-`-prefixed tokens. |
 | `--working-directory <dir>` | Set the initial working directory for the child process. |
 | `--title <text>` | Set the initial window title. |
-| `--app-id <id>` | Set the Wayland `app_id` / X11 `WM_CLASS` instance name, for window manager rules. |
+| `--app-id <id>` | Override the Wayland `app_id` / X11 `WM_CLASS` (config `window.app_id`, default `baud`). |
 | `--hold` | Keep the window open after the command exits, instead of closing it. |
 
 Flags accept either `--flag value` or `--flag=value` form, and can appear in any order (except `-e`, which must come last).

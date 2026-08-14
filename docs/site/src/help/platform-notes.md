@@ -29,7 +29,8 @@ Baud detects your session's display backend at startup and adjusts a few behavio
 
 - **Primary selection** (middle-click paste, `shift+insert`) works reliably on X11 and on Wayland under Hyprland, wlroots-based compositors, and KDE, but is unlikely to work under GNOME Wayland — the compositor typically doesn't expose a usable primary selection there.
 - **Mouse-leave events**: on any Wayland session, moving the pointer out of the window stops delivering motion events, a protocol limitation rather than something Baud can work around.
-- **Window identity**: the `--app-id` flag (see [Getting started](../getting-started.md)) sets both the Wayland `app_id` and the X11 `WM_CLASS` from the same value, for window manager rules that key off either.
+- **Window identity**: Baud sets both the Wayland `app_id` and the X11 `WM_CLASS` to `window.app_id` (default `baud`) when the window is created. `--app-id` overrides that value. The packaged desktop entry also sets `StartupWMClass=baud` so launchers can match the window. Changing `window.app_id` requires a restart.
+- **Display backend**: Baud does not pick Wayland or X11. winit uses `WAYLAND_DISPLAY` / `WAYLAND_SOCKET` when they are set, and `DISPLAY` otherwise. To force X11 in a Wayland session, unset `WAYLAND_DISPLAY`. If the log says `backend=X11` while you are on Hyprland/Sway/GNOME Wayland, that is a winit fallback — Baud logs `winit eligio X11 en una sesion Wayland` and keeps going. Do not put `WINIT_UNIX_BACKEND` in the desktop file.
 
 ## Clipboard backend by session
 
