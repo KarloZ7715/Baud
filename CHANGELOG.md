@@ -6,6 +6,44 @@ Full documentation is published at <https://karloz7715.github.io/Baud/>.
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/KarloZ7715/Baud/compare/v0.1.0...v0.1.1) - 2026-08-14
+
+### Added
+
+- *(diagnostics)* log exit reason on every app exit
+- *(diagnostics)* log exit path for WM close and title bar button
+- *(core)* survive gpu loss, dead pty reader and absurd config values
+- *(remote)* add control protocol types and lock-safe request resolution
+- *(remote)* serve the control protocol over a tokened local socket
+- *(mcp)* translate MCP stdio tool calls into the remote control protocol
+- *(renderer)* calibrate default font.text_contrast to 0.6
+- *(remote)* add wait_idle to wait until the visible screen stops changing
+- *(remote)* trim blank screen_text output and add absolute row ranges with grid metadata
+- *(remote)* report send target session and support optional bracketed paste
+- *(remote)* default screen_detail to compact style runs with full mode kept via detail param
+- *(mcp)* expose baud_wait_idle and new params, keep error codes and echo protocolVersion
+- *(mcp)* add --list-tools offline catalog and pane geometry in list_sessions
+
+### Fixed
+
+- *(x11)* ignore ClientMessages that are not WM_PROTOCOLS
+- *(ci)* derive release policy baseline from latest git tag
+- *(watchdog)* nombrar la fase resumed en vez de reportarla como idle
+- *(renderer)* position title bar button icons inside the surface
+- *(renderer)* align title bar buttons with content padding
+- *(windows)* join the PTY reader before dropping ConPTY on close
+- *(core)* replace reachable unwraps with explicit degradation in parser, grid and pty
+- *(grid)* resize recycled scrollback rows to current width
+- *(remote)* compile the MCP adapter on Windows and keep the e2e runtime dir
+- *(ci)* give remote e2e a writable runtime dir and wait for the event loop
+- *(test)* close the remote e2e session with exit instead of ctrl+d
+- *(config)* clamp font.text_contrast to the 0.0-1.0 range
+- *(tools)* paste the render-ab specimen after the window is sized
+- *(remote)* match wait_for against the visible screen instead of the whole scrollback
+- *(remote)* report wait_for timeout as a result instead of a tool error
+- *(remote)* skip and clean up stale sockets during instance discovery
+- *(remote)* give wait_idle the same IPC recv slack as wait_for
+
 ## [0.1.0](https://github.com/KarloZ7715/Baud/compare/v0.0.8...v0.1.0) - 2026-08-05
 
 ### Added
