@@ -19,6 +19,7 @@ The same default bindings as the keybindings reference, grouped by what they're 
 | `pageup` | `scroll_page_up` | All |
 | `pagedown` | `scroll_page_down` | All |
 | `ctrl+end` | `scroll_to_bottom` | All |
+| `ctrl+home` | `scroll_to_top` | All |
 | `ctrl+alt+up` | `jump_to_prev_prompt` | All |
 | `ctrl+alt+down` | `jump_to_next_prompt` | All |
 
@@ -75,6 +76,8 @@ The same default bindings as the keybindings reference, grouped by what they're 
 | `ctrl+-` | `font_zoom_out` | All |
 | `ctrl+0` | `font_zoom_reset` | All |
 | `ctrl+alt+t` | `toggle_theme_picker` | All |
+| `f11` | `toggle_fullscreen` | All |
+| `ctrl+shift+n` | `spawn_window` | All |
 | `ctrl+shift+f12` | `toggle_fps_counter` | All |
 | `ctrl+alt+shift+t` | `toggle_theme_picker` | Windows |
 

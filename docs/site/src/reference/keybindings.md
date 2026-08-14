@@ -29,8 +29,11 @@ Every default binding, as the exact chord and action strings `parse_binding` and
 | `pageup` | `scroll_page_up` | All |
 | `pagedown` | `scroll_page_down` | All |
 | `ctrl+end` | `scroll_to_bottom` | All |
+| `ctrl+home` | `scroll_to_top` | All |
 | `ctrl+alt+up` | `jump_to_prev_prompt` | All |
 | `ctrl+alt+down` | `jump_to_next_prompt` | All |
+| `f11` | `toggle_fullscreen` | All |
+| `ctrl+shift+n` | `spawn_window` | All |
 | `ctrl+shift+d` | `split_pane` | All |
 | `ctrl+shift+\|` | `toggle_split` | All |
 | `ctrl+shift+s` | `swap_split` | All |

@@ -1720,6 +1720,37 @@ impl App {
         false
     }
 
+    fn toggle_fullscreen(&mut self) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let next = if self.is_fullscreen() {
+            None
+        } else {
+            Some(Fullscreen::Borderless(None))
+        };
+        window.set_fullscreen(next);
+    }
+
+    fn spawn_window(&mut self) {
+        // Lanza una instancia nueva del propio ejecutable con el cwd de la
+        // sesion activa (OSC 7) o el del proceso; sin esperar al hijo.
+        let cwd = self.focused_term().lock().ok().and_then(|t| t.cwd.clone());
+        let mut cmd = match std::env::current_exe() {
+            Ok(exe) => std::process::Command::new(exe),
+            Err(e) => {
+                tracing::warn!("spawn_window: no se pudo resolver el ejecutable: {e}");
+                return;
+            }
+        };
+        if let Some(cwd) = cwd {
+            cmd.current_dir(cwd);
+        }
+        if let Err(e) = cmd.spawn() {
+            tracing::warn!("spawn_window: spawn fallo: {e}");
+        }
+    }
+
     fn new_tab(&mut self) {
         let Some(proxy) = self.proxy.clone() else {
             tracing::warn!("new_tab: proxy no disponible");
@@ -2679,6 +2710,16 @@ impl App {
         self.clear_link_hover_state();
     }
 
+    fn scroll_to_top(&mut self) {
+        let mut guard = self.lock_focused_term();
+        if !guard.alt_screen {
+            guard.scrollback_offset = guard.scrollback_len() as isize;
+        }
+        guard.mark_dirty();
+        drop(guard);
+        self.clear_link_hover_state();
+    }
+
     fn jump_to_prev_prompt(&mut self) {
         let mut guard = self.lock_focused_term();
         guard.jump_to_prev_prompt();
@@ -3054,12 +3095,15 @@ impl App {
             ScrollPageUp => self.scroll_page(1),
             ScrollPageDown => self.scroll_page(-1),
             ScrollToBottom => self.scroll_to_bottom(),
+            ScrollToTop => self.scroll_to_top(),
             JumpToPrevPrompt => self.jump_to_prev_prompt(),
             JumpToNextPrompt => self.jump_to_next_prompt(),
             FontZoomIn => self.font_zoom(1),
             FontZoomOut => self.font_zoom(-1),
             FontZoomReset => self.font_zoom(0),
             ToggleThemePicker => self.toggle_theme_picker(),
+            ToggleFullscreen => self.toggle_fullscreen(),
+            SpawnWindow => self.spawn_window(),
             NewTab => self.new_tab(),
             CloseTab => self.close_tab(),
             NextTab => self.next_tab(),
@@ -5296,7 +5340,8 @@ impl ApplicationHandler<UserEvent> for App {
                         use crate::input::actions::Action::*;
                         match action {
                             ScrollLineUp | ScrollLineDown | ScrollPageUp | ScrollPageDown
-                            | ScrollToBottom | JumpToPrevPrompt | JumpToNextPrompt => {}
+                            | ScrollToBottom | ScrollToTop | JumpToPrevPrompt
+                            | JumpToNextPrompt => {}
                             _ => {
                                 self.run_action(action);
                                 return;

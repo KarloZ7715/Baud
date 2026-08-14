@@ -12,12 +12,15 @@ pub enum Action {
     ScrollPageUp,
     ScrollPageDown,
     ScrollToBottom,
+    ScrollToTop,
     JumpToPrevPrompt,
     JumpToNextPrompt,
     FontZoomIn,
     FontZoomOut,
     FontZoomReset,
     ToggleThemePicker,
+    ToggleFullscreen,
+    SpawnWindow,
     NewTab,
     CloseTab,
     NextTab,
@@ -88,6 +91,7 @@ impl Action {
             | Action::ScrollPageUp
             | Action::ScrollPageDown
             | Action::ScrollToBottom
+            | Action::ScrollToTop
             | Action::JumpToPrevPrompt
             | Action::JumpToNextPrompt => ActionFamily::Scrolling,
             Action::NewTab
@@ -120,7 +124,9 @@ impl Action {
             | Action::FontZoomOut
             | Action::FontZoomReset
             | Action::ToggleThemePicker
-            | Action::ToggleFpsCounter => ActionFamily::Appearance,
+            | Action::ToggleFpsCounter
+            | Action::ToggleFullscreen
+            | Action::SpawnWindow => ActionFamily::Appearance,
         }
     }
 
@@ -138,12 +144,15 @@ impl Action {
             Action::ScrollPageUp => "scroll_page_up".into(),
             Action::ScrollPageDown => "scroll_page_down".into(),
             Action::ScrollToBottom => "scroll_to_bottom".into(),
+            Action::ScrollToTop => "scroll_to_top".into(),
             Action::JumpToPrevPrompt => "jump_to_prev_prompt".into(),
             Action::JumpToNextPrompt => "jump_to_next_prompt".into(),
             Action::FontZoomIn => "font_zoom_in".into(),
             Action::FontZoomOut => "font_zoom_out".into(),
             Action::FontZoomReset => "font_zoom_reset".into(),
             Action::ToggleThemePicker => "toggle_theme_picker".into(),
+            Action::ToggleFullscreen => "toggle_fullscreen".into(),
+            Action::SpawnWindow => "spawn_window".into(),
             Action::NewTab => "new_tab".into(),
             Action::CloseTab => "close_tab".into(),
             Action::NextTab => "next_tab".into(),
@@ -335,8 +344,11 @@ fn base_bindings() -> Vec<(Key, Mods, Action)> {
         (Key::PageUp, Mods::NONE, Action::ScrollPageUp),
         (Key::PageDown, Mods::NONE, Action::ScrollPageDown),
         (Key::End, ctrl, Action::ScrollToBottom),
+        (Key::Home, ctrl, Action::ScrollToTop),
         (Key::Up, alt_ctrl, Action::JumpToPrevPrompt),
         (Key::Down, alt_ctrl, Action::JumpToNextPrompt),
+        (Key::F(11), Mods::NONE, Action::ToggleFullscreen),
+        (Key::Char('n'), cs, Action::SpawnWindow),
         (Key::Char('d'), cs, Action::SplitPane),
         (Key::Char('|'), cs, Action::ToggleSplit),
         (Key::Char('s'), cs, Action::SwapSplit),
@@ -462,12 +474,15 @@ pub fn parse_action(s: &str) -> Option<Action> {
         "scroll_page_up" => Action::ScrollPageUp,
         "scroll_page_down" => Action::ScrollPageDown,
         "scroll_to_bottom" => Action::ScrollToBottom,
+        "scroll_to_top" => Action::ScrollToTop,
         "jump_to_prev_prompt" => Action::JumpToPrevPrompt,
         "jump_to_next_prompt" => Action::JumpToNextPrompt,
         "font_zoom_in" => Action::FontZoomIn,
         "font_zoom_out" => Action::FontZoomOut,
         "font_zoom_reset" => Action::FontZoomReset,
         "toggle_theme_picker" => Action::ToggleThemePicker,
+        "toggle_fullscreen" => Action::ToggleFullscreen,
+        "spawn_window" => Action::SpawnWindow,
         "new_tab" => Action::NewTab,
         "close_tab" => Action::CloseTab,
         "next_tab" => Action::NextTab,
@@ -539,12 +554,15 @@ mod tests {
         Action::ScrollPageUp,
         Action::ScrollPageDown,
         Action::ScrollToBottom,
+        Action::ScrollToTop,
         Action::JumpToPrevPrompt,
         Action::JumpToNextPrompt,
         Action::FontZoomIn,
         Action::FontZoomOut,
         Action::FontZoomReset,
         Action::ToggleThemePicker,
+        Action::ToggleFullscreen,
+        Action::SpawnWindow,
         Action::NewTab,
         Action::CloseTab,
         Action::NextTab,
@@ -913,6 +931,34 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_action_acciones_estandar() {
+        assert_eq!(
+            parse_action("toggle_fullscreen"),
+            Some(Action::ToggleFullscreen)
+        );
+        assert_eq!(parse_action("spawn_window"), Some(Action::SpawnWindow));
+        assert_eq!(parse_action("scroll_to_top"), Some(Action::ScrollToTop));
+    }
+
+    #[test]
+    fn test_default_bindings_acciones_estandar() {
+        let kb = Keybindings::default();
+        let none = Mods::NONE;
+        let cs = Mods {
+            ctrl: true,
+            shift: true,
+            ..Mods::NONE
+        };
+        let ctrl = Mods {
+            ctrl: true,
+            ..Mods::NONE
+        };
+        assert_eq!(kb.lookup(Key::F(11), none), Some(Action::ToggleFullscreen));
+        assert_eq!(kb.lookup(Key::Char('n'), cs), Some(Action::SpawnWindow));
+        assert_eq!(kb.lookup(Key::Home, ctrl), Some(Action::ScrollToTop));
+    }
+
+    #[test]
     fn test_normalize_binding_key_llaves_a_corchetes_focus_pane() {
         // Con Shift sostenido, winit reporta el simbolo desplazado del layout
         // ('{'/'}' en US QWERTY), no el corchete sin desplazar almacenado en
@@ -1089,8 +1135,11 @@ mod tests {
             (Key::PageUp, none, Action::ScrollPageUp),
             (Key::PageDown, none, Action::ScrollPageDown),
             (Key::End, ctrl, Action::ScrollToBottom),
+            (Key::Home, ctrl, Action::ScrollToTop),
             (Key::Up, alt_ctrl, Action::JumpToPrevPrompt),
             (Key::Down, alt_ctrl, Action::JumpToNextPrompt),
+            (Key::F(11), none, Action::ToggleFullscreen),
+            (Key::Char('n'), cs, Action::SpawnWindow),
             (Key::Char('d'), cs, Action::SplitPane),
             (Key::Char('|'), cs, Action::ToggleSplit),
             (Key::Char('s'), cs, Action::SwapSplit),
