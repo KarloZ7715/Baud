@@ -6,6 +6,43 @@ Full documentation is published at <https://karloz7715.github.io/Baud/>.
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/KarloZ7715/Baud/compare/v0.1.1...v0.1.2) - 2026-08-16
+
+### Added
+
+- default window.app_id to baud unless --app-id is set
+- *(diagnostics)* add opt-in key-to-present latency histogram
+- *(input)* add toggle_fullscreen, spawn_window and scroll_to_top defaults
+- *(renderer)* keep the cursor solid while typing and reset blink phase
+- *(ansi)* parse XTMODKEYS and XTQMODKEYS for modifyOtherKeys levels 1 and 2
+- *(input)* encode modified other keys as CSI 27;mod;code~ for modifyOtherKeys
+- *(windows)* load bundled conpty.dll when present, fall back to the OS ConPTY
+- *(security)* default OSC 52 clipboard access to write-only
+- *(input)* classify paste risk for the confirmation guard
+- *(input)* confirm risky pastes with a preview overlay
+- *(actions)* add clear_scrollback, reset_terminal, move_tab and open_config
+- *(shell)* add embedded zsh, bash and pwsh integration scripts
+- *(shell)* auto-inject OSC 133 integration for zsh and bash
+
+### Fixed
+
+- set StartupWMClass=baud on the packaged desktop entry
+- warn when winit picks X11 inside a Wayland session
+- log early PTY death without changing close_on_exit
+- *(input)* normalize logical keys at registration and lookup for Windows chords
+- *(render)* paint the theme background after a surface resize
+- *(term)* skip resize_grid work when the cell size is unchanged
+- *(grid)* keep resized-off rows in scrollback and restore them on grow
+- *(input)* emit modifyOtherKeys as CSI u format for app compatibility
+- *(input)* bind paste confirmation to session and exclusive overlays
+- *(config)* reject non-ascii hex in theme import
+- *(term)* keep configured cursor style across reset_terminal
+- *(shell)* preserve exit status, B marks, zsh rcs and PROMPT_COMMAND arrays
+
+### Packaging
+
+- *(packaging)* ship the pinned ConPTY pair in the Windows zip and MSI
+
 ## [0.1.1](https://github.com/KarloZ7715/Baud/compare/v0.1.0...v0.1.1) - 2026-08-14
 
 ### Added
