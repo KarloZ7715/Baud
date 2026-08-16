@@ -26,6 +26,15 @@
         <Component Id="BaudLicense" Guid="1756C607-64CC-49CB-9179-ED8382435B70">
           <File Id="LicenseFile" Source="$(var.BaudLicensePath)" Name="LICENSE" KeyPath="yes" />
         </Component>
+        <Component Id="BaudThirdPartyLicenses" Guid="E1500CB9-B6B5-4473-91D4-CE88F3DC1273">
+          <File Id="ThirdPartyLicenseFile" Source="$(var.BaudThirdPartyLicensePath)" Name="LICENSES-THIRD-PARTY" KeyPath="yes" />
+        </Component>
+        <Component Id="ConptyDll" Guid="B90B7CC7-BD76-49F1-BAAC-E41B61D66E5E">
+          <File Id="ConptyDll" Source="$(var.BaudConptyDllPath)" Name="conpty.dll" KeyPath="yes" />
+        </Component>
+        <Component Id="OpenConsoleExe" Guid="89FC7A88-5997-448D-813A-38FA5788704C">
+          <File Id="OpenConsoleExe" Source="$(var.BaudOpenConsolePath)" Name="OpenConsole.exe" KeyPath="yes" />
+        </Component>
       </Directory>
     </StandardDirectory>
 
@@ -47,6 +56,9 @@
     <Feature Id="MainFeature" Title="Baud" Level="1">
       <ComponentRef Id="BaudExecutable" />
       <ComponentRef Id="BaudLicense" />
+      <ComponentRef Id="BaudThirdPartyLicenses" />
+      <ComponentRef Id="ConptyDll" />
+      <ComponentRef Id="OpenConsoleExe" />
       <ComponentRef Id="BaudShortcut" />
     </Feature>
 

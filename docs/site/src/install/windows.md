@@ -11,7 +11,7 @@ Both distributed artifacts are statically linked against the MSVC C runtime, so 
 
 ## Portable zip
 
-Download `baud-<version>-windows-x64.zip` from the [Releases page](https://github.com/KarloZ7715/Baud/releases), extract it anywhere, and run `baud.exe`. No installation or admin rights required.
+Download `baud-<version>-windows-x64.zip` from the [Releases page](https://github.com/KarloZ7715/Baud/releases), extract it anywhere, and run `baud.exe`. Keep `conpty.dll` and `OpenConsole.exe` next to `baud.exe`; without that pair Baud uses the OS console host instead. No installation or admin rights required.
 
 ## MSI installer
 

@@ -9,7 +9,10 @@ $RepoRoot = Resolve-Path (Join-Path $ScriptDir '..\..')
 $DistDir = Join-Path $RepoRoot 'dist'
 $Binary = Join-Path $RepoRoot 'target\release\baud.exe'
 $LicenseSrc = Join-Path $RepoRoot 'LICENSE'
+$ThirdPartySrc = Join-Path $RepoRoot 'LICENSES-THIRD-PARTY'
 $CargoToml = Join-Path $RepoRoot 'Cargo.toml'
+$BundleDir = Join-Path $RepoRoot 'target\conpty-bundle'
+$FetchScript = Join-Path $ScriptDir 'fetch_conpty_bundle.ps1'
 
 if (-not (Test-Path $Binary)) {
     Write-Error "Release binary not found at $Binary. Run 'cargo build --release' first."
@@ -17,6 +20,17 @@ if (-not (Test-Path $Binary)) {
 
 if (-not (Test-Path $LicenseSrc)) {
     Write-Error "LICENSE not found at $LicenseSrc."
+}
+
+if (-not (Test-Path $ThirdPartySrc)) {
+    Write-Error "LICENSES-THIRD-PARTY not found at $ThirdPartySrc."
+}
+
+& $FetchScript -OutDir $BundleDir
+$ConptyDll = Join-Path $BundleDir 'conpty.dll'
+$OpenConsole = Join-Path $BundleDir 'OpenConsole.exe'
+if (-not (Test-Path $ConptyDll) -or -not (Test-Path $OpenConsole)) {
+    Write-Error "ConPTY bundle missing after fetch ($ConptyDll / $OpenConsole)."
 }
 
 $versionMatch = Select-String -Path $CargoToml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
@@ -35,6 +49,9 @@ New-Item -ItemType Directory -Path $PackageDir -Force | Out-Null
 try {
     Copy-Item $Binary (Join-Path $PackageDir 'baud.exe')
     Copy-Item $LicenseSrc (Join-Path $PackageDir 'LICENSE')
+    Copy-Item $ThirdPartySrc (Join-Path $PackageDir 'LICENSES-THIRD-PARTY')
+    Copy-Item $ConptyDll (Join-Path $PackageDir 'conpty.dll')
+    Copy-Item $OpenConsole (Join-Path $PackageDir 'OpenConsole.exe')
 
     $readme = @"
 Baud $Version - Windows portable build

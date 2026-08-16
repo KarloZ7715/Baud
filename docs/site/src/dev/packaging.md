@@ -20,7 +20,7 @@ Checksums: `dist/SHA256SUMS` lists digests for AppImage, deb, rpm, and tar.gz.
 | Portable zip | `build_windows_portable.ps1` | `baud-<ver>-windows-x64.zip` |
 | MSI | `build_windows_msi.ps1` | WiX 4.x installer |
 
-Checksums: `dist/SHA256SUMS-windows` over zip and MSI. Builds use static CRT (`RUSTFLAGS=-C target-feature=+crt-static`). There is no Ed25519 self-update path on Windows.
+Checksums: `dist/SHA256SUMS-windows` over zip and MSI. Builds use static CRT (`RUSTFLAGS=-C target-feature=+crt-static`). There is no Ed25519 self-update path on Windows. Both artifacts include the pinned `conpty.dll` + `OpenConsole.exe` pair from `fetch_conpty_bundle.ps1` and `LICENSES-THIRD-PARTY`.
 
 ## Update manifest (Linux desktop bundle)
 

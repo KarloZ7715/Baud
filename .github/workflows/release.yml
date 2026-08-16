@@ -235,6 +235,10 @@ jobs:
       - name: Build release binary (static CRT)
         run: cargo build --release --locked
 
+      - name: Fetch pinned ConPTY bundle
+        shell: pwsh
+        run: ./tools/packaging/fetch_conpty_bundle.ps1 -OutDir target/conpty-bundle
+
       - name: Build portable zip
         shell: pwsh
         run: ./tools/packaging/build_windows_portable.ps1

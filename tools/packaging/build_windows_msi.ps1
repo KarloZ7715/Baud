@@ -12,7 +12,10 @@ $DistDir = Join-Path $RepoRoot 'dist'
 $WixSource = Join-Path $RepoRoot 'packaging\windows\wix\baud.wxs'
 $BinaryPath = Join-Path $RepoRoot 'target\release\baud.exe'
 $LicensePath = Join-Path $RepoRoot 'LICENSE'
+$ThirdPartyPath = Join-Path $RepoRoot 'LICENSES-THIRD-PARTY'
 $CargoToml = Join-Path $RepoRoot 'Cargo.toml'
+$BundleDir = Join-Path $RepoRoot 'target\conpty-bundle'
+$FetchScript = Join-Path $ScriptDir 'fetch_conpty_bundle.ps1'
 $IconPath = Join-Path $RepoRoot 'packaging\windows\baud.ico'
 $LicenseRtfPath = Join-Path $RepoRoot 'packaging\windows\wix\license.rtf'
 
@@ -22,6 +25,17 @@ if (-not (Get-Command 'wix' -ErrorAction SilentlyContinue)) {
 
 if (-not (Test-Path $BinaryPath)) {
     Write-Error "Release binary not found at $BinaryPath. Run 'cargo build --release' first."
+}
+
+if (-not (Test-Path $ThirdPartyPath)) {
+    Write-Error "LICENSES-THIRD-PARTY not found at $ThirdPartyPath."
+}
+
+& $FetchScript -OutDir $BundleDir
+$ConptyDllPath = Join-Path $BundleDir 'conpty.dll'
+$OpenConsolePath = Join-Path $BundleDir 'OpenConsole.exe'
+if (-not (Test-Path $ConptyDllPath) -or -not (Test-Path $OpenConsolePath)) {
+    Write-Error "ConPTY bundle missing after fetch ($ConptyDllPath / $OpenConsolePath)."
 }
 
 $versionMatch = Select-String -Path $CargoToml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
@@ -42,6 +56,9 @@ $MsiPath = Join-Path $DistDir "baud-$Version-windows-x64.msi"
     -d "BaudVersion=$MsiVersion" `
     -d "BaudExePath=$BinaryPath" `
     -d "BaudLicensePath=$LicensePath" `
+    -d "BaudThirdPartyLicensePath=$ThirdPartyPath" `
+    -d "BaudConptyDllPath=$ConptyDllPath" `
+    -d "BaudOpenConsolePath=$OpenConsolePath" `
     -d "BaudIconPath=$IconPath" `
     -d "BaudLicenseRtfPath=$LicenseRtfPath" `
     -out $MsiPath
