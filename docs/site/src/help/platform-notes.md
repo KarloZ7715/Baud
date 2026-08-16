@@ -23,6 +23,18 @@ Windows uses `window.decorations = "custom"` by default, which renders Baud's ow
 
 Baud always writes a rotating log file, independent of `--verbose` or any config setting — see [diagnostics.log_level](../reference/config.md#config-diagnostics-log_level). On Windows it lives at `%LOCALAPPDATA%\baud\logs\baud.log.<date>` (on Linux, `~/.local/state/baud/logs/`), rotated daily with the last 3 days kept. It's the first thing to check — or attach — when reporting an issue without a live repro.
 
+### ConPTY: what's structural
+
+On Windows, Baud does not sit on a kernel PTY. The child talks to an intermediate console host that owns its own buffer, interprets what the child writes, and re-emits VT to Baud. Official zip and MSI builds load `conpty.dll` + `OpenConsole.exe` from next to `baud.exe` when those files are present (the log line is `conpty: usando el par empaquetado`). A source build, or any layout that omits that pair, uses the console host that shipped with the OS (`conpty: usando el ConPTY del sistema operativo`). Both paths still go through that intermediate host.
+
+These behaviors come from that host. Changing Baud will not remove them:
+
+- **DCS from the child does not reach Baud.** The host consumes Device Control String sequences instead of forwarding them. That is tracked on the console host side as [microsoft/terminal#17313](https://github.com/microsoft/terminal/issues/17313); a passthrough design lives in [microsoft/terminal#1173](https://github.com/microsoft/terminal/issues/1173).
+- **Repaints can be full-buffer.** The host may rewrite a screen as a complete paint even when the child only moved the cursor or changed a cell.
+- **Cursor and buffer state are the host's.** Baud sees the VT the host emits after it has applied the child's output to its own buffer.
+
+If a Windows-only glitch is one of those three, it is not a Baud parser or renderer bug. Attach the log so it is clear whether the session used the bundled pair or the OS host.
+
 ## Wayland vs X11
 
 Baud detects your session's display backend at startup and adjusts a few behaviors — see [Troubleshooting: Display quirks](troubleshooting.md#display-quirks) for the full table. The practical points:
