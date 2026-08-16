@@ -1,0 +1,25 @@
+[package]
+name = "baud-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.baud]
+path = ".."
+
+# Use independent workspace for fuzzers
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "parser_feed"
+path = "fuzz_targets/parser_feed.rs"
+test = false
+doc = false
+bench = false

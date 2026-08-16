@@ -740,6 +740,17 @@ impl Term {
         Self::new_with_scrollback(crate::grid::DEFAULT_MAX_SCROLLBACK)
     }
 
+    /// Alimenta bytes crudos al parser VT.
+    ///
+    /// Cada llamada crea un parser nuevo: no conserva estado de escape
+    /// entre invocaciones. Quien intercale `feed` con otras mutaciones
+    /// (p. ej. resize) debe reutilizar un `vte::Parser` y llamar
+    /// `parser.advance(self, data)`.
+    pub fn feed(&mut self, data: &[u8]) {
+        let mut parser = vte::Parser::new();
+        parser.advance(self, data);
+    }
+
     /// Crea un terminal con límite de scrollback configurable.
     pub fn new_with_scrollback(max_scrollback: usize) -> Self {
         Self::new_sized(DEFAULT_ROWS, DEFAULT_COLS, max_scrollback)
