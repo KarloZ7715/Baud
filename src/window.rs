@@ -2039,6 +2039,13 @@ impl App {
     }
 
     fn remove_pane_session(&mut self, closed_id: SessionId) {
+        if self
+            .pending_paste
+            .as_ref()
+            .is_some_and(|p| p.session == closed_id)
+        {
+            self.pending_paste = None;
+        }
         if let Some(idx) = self.session_by_id(closed_id) {
             let mut host = self.sessions.remove(idx);
             host.shutdown_pty();
@@ -2413,11 +2420,17 @@ impl App {
         self.spawn_clipboard_get(true, UserEvent::PasteReady);
     }
 
+    /// Overlay modal: no se arma un paste nuevo ni se pega por debajo.
+    fn paste_request_blocked(&self) -> bool {
+        self.pending_paste.is_some() || self.theme_picker.is_some()
+    }
+
     /// Decide si el paste va directo al PTY o queda pendiente de overlay.
     fn request_paste(&mut self, text: &str) {
-        if text.is_empty() {
+        if text.is_empty() || self.paste_request_blocked() {
             return;
         }
+        let target = self.focused_session().id;
         let bracketed = self
             .focused_term()
             .lock()
@@ -2425,15 +2438,15 @@ impl App {
             .map(|t| t.bracketed_paste)
             .unwrap_or(false);
         if bracketed || self.config.paste.confirm == PasteConfirm::Never {
-            self.paste_text(text);
+            self.paste_text_to(target, text);
             return;
         }
         let risk = classify_paste(text);
         if risk == PasteRisk::Safe {
-            self.paste_text(text);
+            self.paste_text_to(target, text);
             return;
         }
-        self.pending_paste = Some(PendingPaste::new(text.to_string(), risk));
+        self.pending_paste = Some(PendingPaste::new(text.to_string(), risk, target));
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -2441,7 +2454,7 @@ impl App {
 
     fn confirm_pending_paste(&mut self) {
         if let Some(pending) = self.pending_paste.take() {
-            self.paste_text(&pending.text);
+            self.paste_text_to(pending.session, &pending.text);
         }
     }
 
@@ -2453,8 +2466,9 @@ impl App {
             return;
         }
         let text = collapse_paste_lines(&pending.text);
+        let session = pending.session;
         self.pending_paste = None;
-        self.paste_text(&text);
+        self.paste_text_to(session, &text);
     }
 
     fn cancel_pending_paste(&mut self) {
@@ -2477,8 +2491,8 @@ impl App {
         true
     }
 
-    /// Filtra y envía texto pegado al PTY (con bracketing si aplica).
-    fn paste_text(&mut self, text: &str) {
+    /// Filtra y envía texto pegado al PTY de `id` (con bracketing si aplica).
+    fn paste_text_to(&mut self, id: SessionId, text: &str) {
         if text.is_empty() {
             tracing::debug!("paste_text: vacio, ignorar");
             return;
@@ -2489,8 +2503,12 @@ impl App {
             &text[..text.len().min(60)]
         );
         let text = text.trim_end_matches('\n').to_string();
-        let bracketed = self
-            .focused_term()
+        let Some(idx) = self.session_by_id(id) else {
+            return;
+        };
+        let bracketed = self.sessions[idx]
+            .session
+            .term
             .lock()
             .ok()
             .map(|t| t.bracketed_paste)
@@ -2500,13 +2518,20 @@ impl App {
         } else {
             crate::input::paste_text(&text)
         };
-        self.send_input(filtered);
+        self.send_input_to(id, filtered);
     }
 
     /// Envia bytes de input al hilo PTY para escribirlos en el master fd.
     /// Para sesiones en hold el input se ignora (el proceso hijo ya termino).
     fn send_input(&self, bytes: Vec<u8>) {
-        let session = self.focused_session();
+        self.send_input_to(self.focused_session().id, bytes);
+    }
+
+    fn send_input_to(&self, id: SessionId, bytes: Vec<u8>) {
+        let Some(idx) = self.session_by_id(id) else {
+            return;
+        };
+        let session = &self.sessions[idx].session;
         if session.hold {
             return;
         }
@@ -2515,7 +2540,7 @@ impl App {
         // antes de pintar el eco; si no, lo aplica about_to_wait. Un lock
         // bloqueante aqui congelaria el event loop compitiendo con el parseo.
         session.input_reset_pending.store(true, Ordering::Release);
-        if let Ok(mut guard) = self.focused_term().try_lock() {
+        if let Ok(mut guard) = session.term.try_lock() {
             guard.apply_input_reset();
             session.input_reset_pending.store(false, Ordering::Release);
         }
@@ -2912,6 +2937,9 @@ impl App {
     fn toggle_theme_picker(&mut self) {
         if let Some(picker) = self.theme_picker.take() {
             self.cancel_theme_picker(picker);
+            return;
+        }
+        if self.pending_paste.is_some() {
             return;
         }
         let saved_copy_mode = self
@@ -5098,7 +5126,9 @@ impl ApplicationHandler<UserEvent> for App {
 
                 // Middle-click: pegar primary selection.
                 if button == MouseButton::Middle && state == ElementState::Pressed {
-                    self.handle_paste_primary();
+                    if !self.paste_request_blocked() {
+                        self.handle_paste_primary();
+                    }
                     return;
                 }
 
@@ -5365,16 +5395,6 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
-                if self.pending_paste.is_some() {
-                    if self.handle_pending_paste_key(&event) {
-                        if let Some(window) = &self.window {
-                            window.request_redraw();
-                        }
-                        return;
-                    }
-                    return;
-                }
-
                 if self.theme_picker.is_some() {
                     if let Some(k) = winit_to_key(&event.logical_key) {
                         let k_norm = normalize_binding_key(k, mods);
@@ -5392,6 +5412,16 @@ impl ApplicationHandler<UserEvent> for App {
                         return;
                     }
                     if self.handle_theme_picker_key(&event, shift) {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                        return;
+                    }
+                    return;
+                }
+
+                if self.pending_paste.is_some() {
+                    if self.handle_pending_paste_key(&event) {
                         if let Some(window) = &self.window {
                             window.request_redraw();
                         }
@@ -5876,6 +5906,101 @@ mod tests {
         app.request_paste("a\nb");
         assert!(app.pending_paste.is_none());
         assert_eq!(drain_pty_input(&rx), b"a\nb");
+    }
+
+    #[test]
+    fn paste_seguro_con_overlay_activo_no_despega_el_riesgoso() {
+        let (mut app, rx) = test_app_with_pty(Arc::new(Mutex::new(Term::new())));
+        app.request_paste("rm -rf /\n");
+        app.request_paste("hola");
+        assert!(app.pending_paste.is_some());
+        assert!(
+            drain_pty_input(&rx).is_empty(),
+            "un paste seguro no debe colarse al PTY mientras el overlay pide confirmacion"
+        );
+        app.confirm_pending_paste();
+        assert_eq!(drain_pty_input(&rx), b"rm -rf /");
+    }
+
+    fn test_app_with_two_ptys() -> (App, mpsc::Receiver<PtyCommand>, mpsc::Receiver<PtyCommand>) {
+        let wakeup_a = crate::pty::create_wake().expect("wake a");
+        let wakeup_b = crate::pty::create_wake().expect("wake b");
+        let (tx_a, rx_a) = mpsc::channel();
+        let (tx_b, rx_b) = mpsc::channel();
+        let session_a = Session {
+            id: SessionId::next(),
+            term: Arc::new(Mutex::new(Term::new())),
+            pty_tx: PtyCommandSender::new_for_test(tx_a, wakeup_a),
+            title: String::new(),
+            dirty: false,
+            hold: false,
+            close_on_exit: false,
+            has_activity: false,
+            foreground_probe: None,
+            foreground_cache: None,
+            input_reset_pending: Arc::new(AtomicBool::new(false)),
+            echo_pending: Arc::new(AtomicBool::new(false)),
+        };
+        let session_b = Session {
+            id: SessionId::next(),
+            term: Arc::new(Mutex::new(Term::new())),
+            pty_tx: PtyCommandSender::new_for_test(tx_b, wakeup_b),
+            title: String::new(),
+            dirty: false,
+            hold: false,
+            close_on_exit: false,
+            has_activity: false,
+            foreground_probe: None,
+            foreground_cache: None,
+            input_reset_pending: Arc::new(AtomicBool::new(false)),
+            echo_pending: Arc::new(AtomicBool::new(false)),
+        };
+        let id_a = session_a.id;
+        let app = App::new(
+            vec![SessionHost::test(session_a), SessionHost::test(session_b)],
+            Config::default(),
+            test_config_watch(),
+            None,
+            BlinkFocus::new(id_a),
+            ConfigSource::Ok,
+            EventLoopWatchdog::noop(),
+            None,
+            None,
+        );
+        (app, rx_a, rx_b)
+    }
+
+    #[test]
+    fn confirmar_paste_va_a_la_sesion_que_lo_pidio() {
+        let (mut app, rx_a, rx_b) = test_app_with_two_ptys();
+        app.request_paste("echo a\necho b");
+        app.focus_session(1);
+        app.confirm_pending_paste();
+        assert_eq!(drain_pty_input(&rx_a), b"echo a\necho b");
+        assert!(
+            drain_pty_input(&rx_b).is_empty(),
+            "el paste no debe ir a la sesion enfocada despues de cambiar de tab"
+        );
+    }
+
+    #[test]
+    fn paste_con_theme_picker_abierto_no_queda_pendiente() {
+        let (mut app, rx) = test_app_with_pty(Arc::new(Mutex::new(Term::new())));
+        app.theme_picker = Some(ThemePickerState::open(
+            &app.config.theme,
+            Some("dracula"),
+            None,
+            crate::config::ColorMode::Dark,
+            SchemeSource::Fallback,
+            None,
+            None,
+        ));
+        app.request_paste("rm -rf /\n");
+        assert!(
+            app.pending_paste.is_none(),
+            "el picker tapa el overlay: no se debe armar un paste invisible"
+        );
+        assert!(drain_pty_input(&rx).is_empty());
     }
 
     #[test]

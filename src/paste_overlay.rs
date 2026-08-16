@@ -5,6 +5,7 @@ use glyphon::{Attrs, Buffer, Color, FontSystem, Shaping, TextArea, TextBounds};
 use crate::config::{parse_hex, ThemeConfig};
 use crate::input::PasteRisk;
 use crate::renderer::{resolve_family, ContrastCache, SOLID_MASK_GLYPH_ID};
+use crate::session::SessionId;
 
 const LAYER_OVERLAY: usize = 3;
 const MIN_DIM_CONTRAST: f64 = 4.5;
@@ -16,11 +17,17 @@ const SIDE_PAD_CELLS: f32 = 0.5;
 pub struct PendingPaste {
     pub text: String,
     pub risk: PasteRisk,
+    /// Sesión que pidió el paste; la confirmación no sigue el foco.
+    pub session: SessionId,
 }
 
 impl PendingPaste {
-    pub fn new(text: String, risk: PasteRisk) -> Self {
-        Self { text, risk }
+    pub fn new(text: String, risk: PasteRisk, session: SessionId) -> Self {
+        Self {
+            text,
+            risk,
+            session,
+        }
     }
 }
 
