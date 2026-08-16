@@ -6,9 +6,10 @@ use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::OnceLock;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, LocalFree, ERROR_BROKEN_PIPE, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING,
+    CloseHandle, FreeLibrary, LocalFree, ERROR_BROKEN_PIPE, ERROR_IO_INCOMPLETE, ERROR_IO_PENDING,
     ERROR_PIPE_NOT_CONNECTED, FALSE, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, S_OK, TRUE,
     WAIT_OBJECT_0,
 };
@@ -23,6 +24,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Console::{
     ClosePseudoConsole, CreatePseudoConsole, ResizePseudoConsole, COORD, HPCON,
 };
+use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_sys::Win32::System::Pipes::{
     CreateNamedPipeW, CreatePipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
@@ -39,6 +41,116 @@ use super::{ProcessConfig, SessionKind};
 
 const DEFAULT_ROWS: i16 = 24;
 const DEFAULT_COLS: i16 = 80;
+
+type CreatePseudoConsoleFn =
+    unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> i32;
+type ResizePseudoConsoleFn = unsafe extern "system" fn(HPCON, COORD) -> i32;
+type ClosePseudoConsoleFn = unsafe extern "system" fn(HPCON);
+
+/// De dónde salió la API ConPTY en uso.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConptySource {
+    /// `conpty.dll` junto al ejecutable (la versión empaquetada por Baud).
+    Bundled,
+    /// kernel32/kernelbase del sistema operativo.
+    Os,
+}
+
+/// Resolución de Create/Resize/Close: par empaquetado o API del OS.
+///
+/// `load` no falla: si no hay dll o no exporta los símbolos, se usa el OS.
+pub struct ConptyApi {
+    create: CreatePseudoConsoleFn,
+    resize: ResizePseudoConsoleFn,
+    close: ClosePseudoConsoleFn,
+    source: ConptySource,
+}
+
+impl ConptyApi {
+    /// Busca `conpty.dll` junto al ejecutable. Una sola vez al arrancar
+    /// (`OnceLock`); el resto del módulo llama a través de esta API.
+    pub fn load() -> &'static ConptyApi {
+        static API: OnceLock<ConptyApi> = OnceLock::new();
+        API.get_or_init(|| {
+            if let Some(bundled) = Self::try_load_bundled() {
+                tracing::info!("conpty: usando el par empaquetado (conpty.dll)");
+                return bundled;
+            }
+            tracing::info!("conpty: usando el ConPTY del sistema operativo");
+            Self::os_api()
+        })
+    }
+
+    pub fn source(&self) -> ConptySource {
+        self.source
+    }
+
+    fn os_api() -> Self {
+        Self {
+            create: CreatePseudoConsole,
+            resize: ResizePseudoConsole,
+            close: ClosePseudoConsole,
+            source: ConptySource::Os,
+        }
+    }
+
+    /// Carga `conpty.dll` con ruta absoluta junto al exe. El nombre suelto
+    /// buscaría en PATH y podría resolver otra dll.
+    fn try_load_bundled() -> Option<Self> {
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(err) => {
+                tracing::debug!("conpty: current_exe fallo: {err}");
+                return None;
+            }
+        };
+        let dir = exe.parent()?;
+        let dll_path = dir.join("conpty.dll");
+        if !dll_path.is_file() {
+            tracing::debug!("conpty: no hay conpty.dll junto al ejecutable");
+            return None;
+        }
+        // Sin OpenConsole.exe la dll empaquetada no puede alojar la sesión.
+        if !dir.join("OpenConsole.exe").is_file() {
+            tracing::debug!("conpty: conpty.dll presente sin OpenConsole.exe; se ignora");
+            return None;
+        }
+
+        let wide = wide_null(dll_path.as_os_str());
+        let module = unsafe { LoadLibraryW(wide.as_ptr()) };
+        if module.is_null() {
+            tracing::debug!("conpty: LoadLibraryW fallo: {}", io::Error::last_os_error());
+            return None;
+        }
+
+        let create = unsafe { GetProcAddress(module, b"CreatePseudoConsole\0".as_ptr()) };
+        let resize = unsafe { GetProcAddress(module, b"ResizePseudoConsole\0".as_ptr()) };
+        let close = unsafe { GetProcAddress(module, b"ClosePseudoConsole\0".as_ptr()) };
+        match (create, resize, close) {
+            (Some(create), Some(resize), Some(close)) => {
+                // No FreeLibrary: los punteros viven tanto como el proceso.
+                let _keep_loaded = module;
+                // SAFETY: conpty.dll exporta estas tres con la misma firma
+                // que kernel32.
+                Some(Self {
+                    create: unsafe { mem::transmute::<_, CreatePseudoConsoleFn>(create) },
+                    resize: unsafe { mem::transmute::<_, ResizePseudoConsoleFn>(resize) },
+                    close: unsafe { mem::transmute::<_, ClosePseudoConsoleFn>(close) },
+                    source: ConptySource::Bundled,
+                })
+            }
+            _ => {
+                tracing::debug!(
+                    "conpty: GetProcAddress no resolvio los simbolos; se ignora la dll"
+                );
+                unsafe {
+                    let _ = FreeLibrary(module);
+                }
+                None
+            }
+        }
+    }
+}
 
 /// Sesión respaldada por ConPTY.
 pub struct Pty {
@@ -186,7 +298,7 @@ impl Pty {
             X: cols as i16,
             Y: rows as i16,
         };
-        let hr = unsafe { ResizePseudoConsole(self.hpcon, size) };
+        let hr = unsafe { (ConptyApi::load().resize)(self.hpcon, size) };
         if hr != S_OK {
             Err(io::Error::from_raw_os_error(hr))
         } else {
@@ -324,7 +436,7 @@ impl Drop for Pty {
         }
         if self.hpcon != 0 {
             unsafe {
-                ClosePseudoConsole(self.hpcon);
+                (ConptyApi::load().close)(self.hpcon);
             }
             self.hpcon = 0;
         }
@@ -427,8 +539,9 @@ pub fn spawn_with(cfg: &ProcessConfig) -> io::Result<Pty> {
         }
     };
 
+    let api = ConptyApi::load();
     let mut hpcon: HPCON = 0;
-    let hr = unsafe { CreatePseudoConsole(size, conin_read, conout_write, 0, &mut hpcon) };
+    let hr = unsafe { (api.create)(size, conin_read, conout_write, 0, &mut hpcon) };
     if hr != S_OK {
         unsafe {
             CloseHandle(conin_read);
@@ -448,7 +561,7 @@ pub fn spawn_with(cfg: &ProcessConfig) -> io::Result<Pty> {
         Ok(p) => p,
         Err(e) => {
             unsafe {
-                ClosePseudoConsole(hpcon);
+                (api.close)(hpcon);
                 CloseHandle(conin_write);
                 CloseHandle(conout_read);
             }
@@ -466,7 +579,7 @@ pub fn spawn_with(cfg: &ProcessConfig) -> io::Result<Pty> {
     let ok = unsafe { InitializeProcThreadAttributeList(attr_list, 1, 0, &mut attr_size) };
     if ok == FALSE {
         unsafe {
-            ClosePseudoConsole(hpcon);
+            (api.close)(hpcon);
             CloseHandle(conin_write);
             CloseHandle(conout_read);
         }
@@ -487,7 +600,7 @@ pub fn spawn_with(cfg: &ProcessConfig) -> io::Result<Pty> {
     if ok == FALSE {
         unsafe {
             DeleteProcThreadAttributeList(attr_list);
-            ClosePseudoConsole(hpcon);
+            (api.close)(hpcon);
             CloseHandle(conin_write);
             CloseHandle(conout_read);
         }
@@ -551,7 +664,7 @@ pub fn spawn_with(cfg: &ProcessConfig) -> io::Result<Pty> {
 
     if ok == FALSE {
         unsafe {
-            ClosePseudoConsole(hpcon);
+            (api.close)(hpcon);
             CloseHandle(conin_write);
             CloseHandle(conout_read);
         }
@@ -776,5 +889,19 @@ mod tests {
         quote_arg(&mut s, r"C:\Program Files\pwsh.exe");
         assert!(s.starts_with('"'));
         assert!(s.ends_with('"'));
+    }
+
+    #[test]
+    fn sin_dll_junto_al_exe_se_usa_el_conpty_del_os() {
+        // En el runner de CI no hay conpty.dll junto al binario de test.
+        let api = ConptyApi::load();
+        assert_eq!(api.source(), ConptySource::Os);
+    }
+
+    #[test]
+    #[ignore = "requiere conpty.dll y OpenConsole.exe junto al binario de test"]
+    fn con_dll_junto_al_exe_se_usa_el_par_empaquetado() {
+        let api = ConptyApi::load();
+        assert_eq!(api.source(), ConptySource::Bundled);
     }
 }

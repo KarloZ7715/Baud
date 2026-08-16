@@ -17,7 +17,7 @@ Each session talks to a shell through a `SessionBackend` and a `WakeSource`. The
 
 ## Windows ConPTY
 
-`src/pty/windows.rs` uses the ConPTY API (`CreatePseudoConsole`, pipes, `CreateProcessW` with the pseudo-console attribute). `ConPtyWake` plus pipe peeking implements `WakeSource` and readiness waits. Session conformance tests exercise this path in CI (soft gate today).
+`src/pty/windows.rs` uses the ConPTY API (`CreatePseudoConsole`, pipes, `CreateProcessW` with the pseudo-console attribute). The three ConPTY entry points are resolved at startup: `conpty.dll` next to the executable if present, otherwise the OS. `ConPtyWake` plus pipe peeking implements `WakeSource` and readiness waits. Session conformance tests exercise this path in CI (soft gate today).
 
 ## WSL profile
 

@@ -9,8 +9,8 @@ Workflows live under `.github/workflows/`.
 | `checks` | `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, `cargo run --bin docs-gen -- --check` |
 | `test` | `cargo test --all --verbose` |
 | `build` | `cargo build --release --locked` |
-| `windows-compile` | Windows `cargo check --all-targets` and `cargo build --locked` |
-| `windows-conpty` | ConPTY session tests (soft gate: `continue-on-error`, retries, long timeout) |
+| `windows-compile` | Windows `cargo check --all-targets`, `cargo build --locked`, and ConPTY OS-fallback unit tests |
+| `windows-conpty` | ConPTY session tests plus OS-fallback and bundled-dll resolution (soft gate: `continue-on-error`, retries, long timeout) |
 | `xvfb-smoke` | X11 smoke via `tools/linux_session_smoke.sh --xvfb --build` (soft gate) |
 | `release-policy` | `tools/ci/verify_release_policy.sh` (manual version bumps need the `release:manual-version` label) |
 | `shell-fixtures` | `desktop-file-validate`, `tools/ci/test_release_assets.sh`, `tools/ci/test_install_release.sh` |

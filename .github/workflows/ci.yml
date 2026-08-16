@@ -137,6 +137,9 @@ jobs:
       - name: Tests de auth/framing del control remoto
         run: cargo test --lib remote::server -- --test-threads=1
 
+      - name: Tests de resolución ConPTY (fallback OS)
+        run: cargo test --lib pty::windows -- --test-threads=1
+
   # Job 5: gate blando de runtime ConPTY en Windows. Headless, sin winit.
   # Soft gate: continue-on-error hasta la ventana de estabilidad.
   windows-conpty:
@@ -175,6 +178,23 @@ jobs:
             Write-Host "Los tests de sesión ConPTY fallaron tras ${maxIntentos} intentos"
           }
           exit $codigo
+
+      - name: Tests de resolución ConPTY (fallback OS)
+        run: cargo test --lib pty::windows -- --test-threads=1 --nocapture
+
+      - name: Descargar par ConPTY pinneado
+        shell: pwsh
+        run: ./tools/packaging/fetch_conpty_bundle.ps1 -OutDir target/conpty-bundle
+
+      - name: Test de resolución ConPTY empaquetado
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $deps = "target/debug/deps"
+          New-Item -ItemType Directory -Force -Path $deps | Out-Null
+          Copy-Item "target/conpty-bundle/conpty.dll" $deps
+          Copy-Item "target/conpty-bundle/OpenConsole.exe" $deps
+          cargo test --lib con_dll_junto_al_exe_se_usa_el_par_empaquetado -- --ignored --exact --nocapture
 
       - name: Activar WER LocalDumps
         shell: pwsh
