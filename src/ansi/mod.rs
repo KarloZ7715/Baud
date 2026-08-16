@@ -1576,12 +1576,16 @@ impl Term {
         let allow_osc52_read = self.allow_osc52_read;
         let notifications_enabled = self.notifications_enabled;
         let blink_interval_ms = self.blink_interval_ms;
+        let cursor_style = self.cursor_style;
+        let cursor_blink_enabled = self.cursor_blink_enabled;
         *self = Self::new_sized(rows, cols, max_scrollback);
         self.default_colors = default_colors;
         self.config_cursor_color = config_cursor_color;
         self.allow_osc52_read = allow_osc52_read;
         self.notifications_enabled = notifications_enabled;
         self.blink_interval_ms = blink_interval_ms;
+        self.cursor_style = cursor_style;
+        self.cursor_blink_enabled = cursor_blink_enabled;
     }
 
     /// Cambia el tamano del grid primario y alt grid.
@@ -3463,6 +3467,18 @@ mod tests {
         let cell = &term.grid.rows[0][0];
         assert_eq!(cell.ch, 'x');
         assert_eq!(cell.attrs.fg(), Color::Default);
+    }
+
+    #[test]
+    fn reset_terminal_conserva_cursor_de_config() {
+        let mut term = Term::new();
+        term.cursor_style = CursorStyle::Bar;
+        term.cursor_blink_enabled = false;
+        feed(&mut term, b"\x1b[?1049h");
+        term.reset_terminal();
+        assert_eq!(term.cursor_style, CursorStyle::Bar);
+        assert!(!term.cursor_blink_enabled);
+        assert!(!term.alt_screen);
     }
 
     #[test]
