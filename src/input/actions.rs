@@ -25,7 +25,12 @@ pub enum Action {
     CloseTab,
     NextTab,
     PrevTab,
+    MoveTabLeft,
+    MoveTabRight,
     GotoTab(u8),
+    ClearScrollback,
+    ResetTerminal,
+    OpenConfig,
     SplitPane,
     ToggleSplit,
     SwapSplit,
@@ -93,11 +98,14 @@ impl Action {
             | Action::ScrollToBottom
             | Action::ScrollToTop
             | Action::JumpToPrevPrompt
-            | Action::JumpToNextPrompt => ActionFamily::Scrolling,
+            | Action::JumpToNextPrompt
+            | Action::ClearScrollback => ActionFamily::Scrolling,
             Action::NewTab
             | Action::CloseTab
             | Action::NextTab
             | Action::PrevTab
+            | Action::MoveTabLeft
+            | Action::MoveTabRight
             | Action::GotoTab(_) => ActionFamily::Tabs,
             Action::SplitPane
             | Action::ToggleSplit
@@ -126,7 +134,9 @@ impl Action {
             | Action::ToggleThemePicker
             | Action::ToggleFpsCounter
             | Action::ToggleFullscreen
-            | Action::SpawnWindow => ActionFamily::Appearance,
+            | Action::SpawnWindow
+            | Action::ResetTerminal
+            | Action::OpenConfig => ActionFamily::Appearance,
         }
     }
 
@@ -157,7 +167,12 @@ impl Action {
             Action::CloseTab => "close_tab".into(),
             Action::NextTab => "next_tab".into(),
             Action::PrevTab => "prev_tab".into(),
+            Action::MoveTabLeft => "move_tab_left".into(),
+            Action::MoveTabRight => "move_tab_right".into(),
             Action::GotoTab(n) => format!("goto_tab_{n}"),
+            Action::ClearScrollback => "clear_scrollback".into(),
+            Action::ResetTerminal => "reset_terminal".into(),
+            Action::OpenConfig => "open_config".into(),
             Action::SplitPane => "split_pane".into(),
             Action::ToggleSplit => "toggle_split".into(),
             Action::SwapSplit => "swap_split".into(),
@@ -335,6 +350,10 @@ fn base_bindings() -> Vec<(Key, Mods, Action)> {
         (Key::Char('w'), cs, Action::CloseTab),
         (Key::PageDown, ctrl, Action::NextTab),
         (Key::PageUp, ctrl, Action::PrevTab),
+        (Key::PageUp, cs, Action::MoveTabLeft),
+        (Key::PageDown, cs, Action::MoveTabRight),
+        (Key::Char('k'), cs, Action::ClearScrollback),
+        (Key::Delete, cs, Action::ClearScrollback),
         (Key::Up, cs, Action::ScrollLineUp),
         (Key::Down, cs, Action::ScrollLineDown),
         (Key::Up, alt, Action::ScrollPageUp),
@@ -487,6 +506,11 @@ pub fn parse_action(s: &str) -> Option<Action> {
         "close_tab" => Action::CloseTab,
         "next_tab" => Action::NextTab,
         "prev_tab" => Action::PrevTab,
+        "move_tab_left" => Action::MoveTabLeft,
+        "move_tab_right" => Action::MoveTabRight,
+        "clear_scrollback" => Action::ClearScrollback,
+        "reset_terminal" => Action::ResetTerminal,
+        "open_config" => Action::OpenConfig,
         s if let Some(n) = s.strip_prefix("goto_tab_").and_then(|d| d.parse().ok()) => {
             Action::GotoTab(n)
         }
@@ -567,7 +591,12 @@ mod tests {
         Action::CloseTab,
         Action::NextTab,
         Action::PrevTab,
+        Action::MoveTabLeft,
+        Action::MoveTabRight,
         Action::GotoTab(3),
+        Action::ClearScrollback,
+        Action::ResetTerminal,
+        Action::OpenConfig,
         Action::SplitPane,
         Action::ToggleSplit,
         Action::SwapSplit,
@@ -768,6 +797,13 @@ mod tests {
         };
         assert_eq!(kb.lookup(Key::PageDown, ctrl), Some(Action::NextTab));
         assert_eq!(kb.lookup(Key::PageUp, ctrl), Some(Action::PrevTab));
+        assert_eq!(kb.lookup(Key::PageUp, cs), Some(Action::MoveTabLeft));
+        assert_eq!(kb.lookup(Key::PageDown, cs), Some(Action::MoveTabRight));
+        assert_eq!(kb.lookup(Key::Char('k'), cs), Some(Action::ClearScrollback));
+        assert_eq!(kb.lookup(Key::Delete, cs), Some(Action::ClearScrollback));
+        assert_eq!(parse_action("reset_terminal"), Some(Action::ResetTerminal));
+        assert_eq!(parse_action("open_config"), Some(Action::OpenConfig));
+        assert_eq!(kb.lookup(Key::F(2), cs), None);
     }
 
     #[test]
@@ -1126,6 +1162,10 @@ mod tests {
             (Key::Char('w'), cs, Action::CloseTab),
             (Key::PageDown, ctrl, Action::NextTab),
             (Key::PageUp, ctrl, Action::PrevTab),
+            (Key::PageUp, cs, Action::MoveTabLeft),
+            (Key::PageDown, cs, Action::MoveTabRight),
+            (Key::Char('k'), cs, Action::ClearScrollback),
+            (Key::Delete, cs, Action::ClearScrollback),
             (Key::Up, cs, Action::ScrollLineUp),
             (Key::Down, cs, Action::ScrollLineDown),
             (Key::Up, alt, Action::ScrollPageUp),

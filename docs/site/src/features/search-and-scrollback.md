@@ -22,6 +22,8 @@ Scroll from the keyboard:
 | Scroll one line up/down | `ctrl+shift+up` / `ctrl+shift+down` |
 | Scroll one page up/down | `alt+up`/`down`, `shift+pageup`/`pagedown`, or plain `pageup`/`pagedown` |
 | Jump to bottom | `ctrl+end` |
+| Clear scrollback | `ctrl+shift+k` or `ctrl+shift+delete` |
+| Reset terminal | none by default — bind `reset_terminal` |
 
 ### Full-screen programs
 

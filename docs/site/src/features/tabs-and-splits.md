@@ -9,7 +9,9 @@ Each tab is an independent session. Its label comes from the shell's OSC window-
 | New tab | `ctrl+shift+t` |
 | Close tab | `ctrl+shift+w` |
 | Next / previous tab | `ctrl+pagedown` / `ctrl+pageup` |
+| Move tab left / right | `ctrl+shift+pageup` / `ctrl+shift+pagedown` |
 | Jump to tab `N` | none by default — bind `goto_tab_1`..`goto_tab_<N>`, see [Keybindings](../config/keybindings.md#discovering-action-names) |
+| Open config file | none by default — bind `open_config` |
 
 ## Splits
 

@@ -597,6 +597,15 @@ impl Grid {
         }
     }
 
+    /// Descarta la historia y cuenta las filas como recorte para que los
+    /// índices lógicos (marcas de prompt) se reconcilien.
+    pub fn clear_scrollback(&mut self) {
+        let dropped = self.scrollback.len() as u64;
+        self.scrollback.clear();
+        self.scrollback_trimmed = self.scrollback_trimmed.saturating_add(dropped);
+        self.damage.mark_all();
+    }
+
     /// Marca una fila como continuación de la anterior por soft-wrap (true)
     /// o como hard break / Enter explícito (false).
     pub fn set_continuation(&mut self, row: usize, val: bool) {
@@ -969,6 +978,19 @@ mod tests {
         assert_eq!(grid.scrollback.len(), 2);
         assert_eq!(grid.scrollback[0][0].ch, 'd');
         assert_eq!(grid.scrollback[1][0].ch, 'e');
+    }
+
+    #[test]
+    fn clear_scrollback_vacia_historia_y_cuenta_recorte() {
+        let mut grid = Grid::new_sized_with_scrollback(5, 10, 10);
+        for _ in 0..3 {
+            grid.scroll_up_region(1, 0, grid.rows_count - 1);
+        }
+        assert_eq!(grid.scrollback.len(), 3);
+        let trimmed_antes = grid.scrollback_trimmed;
+        grid.clear_scrollback();
+        assert!(grid.scrollback.is_empty());
+        assert_eq!(grid.scrollback_trimmed, trimmed_antes + 3);
     }
 
     #[test]

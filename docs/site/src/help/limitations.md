@@ -16,7 +16,6 @@ A consolidated list of things Baud does not do yet, gathered from the rest of th
 ## Input and URLs
 
 - **No keyboard-driven URL hint mode** (jump-label style navigation like foot's or kitty's) — `ctrl+click` is the only way to open a link; see [Notifications and URLs](../features/notifications-and-urls.md).
-- **No "clear scrollback" action.**
 - The kitty keyboard protocol doesn't implement the "report alternate keys" or "report associated text" flags; see the [Terminal API](../vt/index.md#kitty-keyboard-protocol) page.
 
 ## VT compatibility notes

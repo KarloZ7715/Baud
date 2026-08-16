@@ -1558,6 +1558,32 @@ impl Term {
         self.grid.scrollback.len()
     }
 
+    /// Descarta la historia primaria y vuelve la vista al fondo.
+    pub fn clear_scrollback(&mut self) {
+        self.grid.clear_scrollback();
+        self.scrollback_offset = 0;
+        self.reconcile_prompt_marks();
+        self.mark_dirty();
+    }
+
+    /// RIS: estado VT de fabrica, conservando tamano y ajustes de config.
+    pub fn reset_terminal(&mut self) {
+        let rows = self.grid.rows_count;
+        let cols = self.grid.cols_count;
+        let max_scrollback = self.grid.max_scrollback;
+        let default_colors = self.default_colors;
+        let config_cursor_color = self.config_cursor_color;
+        let allow_osc52_read = self.allow_osc52_read;
+        let notifications_enabled = self.notifications_enabled;
+        let blink_interval_ms = self.blink_interval_ms;
+        *self = Self::new_sized(rows, cols, max_scrollback);
+        self.default_colors = default_colors;
+        self.config_cursor_color = config_cursor_color;
+        self.allow_osc52_read = allow_osc52_read;
+        self.notifications_enabled = notifications_enabled;
+        self.blink_interval_ms = blink_interval_ms;
+    }
+
     /// Cambia el tamano del grid primario y alt grid.
     /// En pantalla primaria: aplica reflow de lineas antes de resize si `reflow` es true.
     /// Font zoom usa `reflow = false` para evitar reordenar el grid antes de SIGWINCH.
@@ -3080,6 +3106,7 @@ impl vte::Perform for Term {
             }
             0x3D => self.keypad_application_mode = true,
             0x3E => self.keypad_application_mode = false,
+            0x63 if intermediates.is_empty() => self.reset_terminal(),
             _ => {}
         }
     }
@@ -3382,6 +3409,70 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_owned()
+    }
+
+    fn screen_text(term: &Term) -> String {
+        term.grid
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|c| c.ch)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn term_con_scrollback(n: usize) -> Term {
+        let rows = 4;
+        let mut term = Term::new_sized(rows, 20, n + rows + 8);
+        for i in 0..n {
+            feed(&mut term, format!("h{i}\r\n").as_bytes());
+        }
+        for i in 0..rows {
+            feed(&mut term, format!("s{i}\r\n").as_bytes());
+        }
+        term
+    }
+
+    #[test]
+    fn clear_scrollback_borra_historia_y_conserva_pantalla() {
+        let mut term = term_con_scrollback(50);
+        assert!(term.scrollback_len() > 0);
+        let pantalla_antes = screen_text(&term);
+        term.clear_scrollback();
+        assert_eq!(term.scrollback_len(), 0);
+        assert_eq!(screen_text(&term), pantalla_antes);
+    }
+
+    #[test]
+    fn reset_terminal_es_estado_de_fabrica() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?1049h\x1b[31mrojo\x1b[?25l");
+        assert!(term.alt_screen);
+        assert!(!term.cursor_visible);
+        assert_eq!(term.attrs.fg, Color::Red);
+        term.reset_terminal();
+        assert!(!term.alt_screen);
+        assert!(term.cursor_visible);
+        assert_eq!(term.attrs, Attrs::default());
+        feed(&mut term, b"x");
+        let cell = &term.grid.rows[0][0];
+        assert_eq!(cell.ch, 'x');
+        assert_eq!(cell.attrs.fg(), Color::Default);
+    }
+
+    #[test]
+    fn esc_c_invoca_reset_terminal() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b[?25l");
+        assert!(!term.cursor_visible);
+        feed(&mut term, b"\x1bc");
+        assert!(term.cursor_visible);
+        assert!(!term.alt_screen);
     }
 
     #[test]

@@ -10,6 +10,8 @@ The same default bindings as the keybindings reference, grouped by what they're 
 
 | Chord | Action | Platform |
 | --- | --- | --- |
+| `ctrl+shift+k` | `clear_scrollback` | All |
+| `ctrl+shift+delete` | `clear_scrollback` | All |
 | `ctrl+shift+up` | `scroll_line_up` | All |
 | `ctrl+shift+down` | `scroll_line_down` | All |
 | `alt+up` | `scroll_page_up` | All |
@@ -31,6 +33,8 @@ The same default bindings as the keybindings reference, grouped by what they're 
 | `ctrl+shift+w` | `close_tab` | All |
 | `ctrl+pagedown` | `next_tab` | All |
 | `ctrl+pageup` | `prev_tab` | All |
+| `ctrl+shift+pageup` | `move_tab_left` | All |
+| `ctrl+shift+pagedown` | `move_tab_right` | All |
 
 ## Panes {#cheatsheet-panes}
 

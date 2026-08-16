@@ -479,6 +479,16 @@ pub struct App {
     followup_redraw: bool,
 }
 
+fn path_to_file_url(path: &std::path::Path) -> String {
+    let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let display = abs.to_string_lossy().replace('\\', "/");
+    if display.starts_with('/') {
+        format!("file://{display}")
+    } else {
+        format!("file:///{display}")
+    }
+}
+
 fn allowed_open_url(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
     ["http://", "https://", "ftp://", "file://", "mailto:"]
@@ -2149,6 +2159,39 @@ impl App {
         self.sync_after_tab_change();
     }
 
+    fn move_tab(&mut self, delta: isize) {
+        let len = self.tabs.len();
+        if len <= 1 {
+            return;
+        }
+        let from = self.focused;
+        let to = (from as isize + delta).rem_euclid(len as isize) as usize;
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.focused = to;
+        self.sync_blink_focus();
+        self.apply_focused_window_title();
+        self.sync_after_tab_change();
+    }
+
+    fn open_config(&mut self) {
+        let path = crate::config::persist::config_write_path();
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    tracing::warn!("open_config: no se pudo crear {}: {e}", parent.display());
+                    return;
+                }
+            }
+            if let Err(e) = std::fs::write(&path, "# Baud configuration\n") {
+                tracing::warn!("open_config: no se pudo crear {}: {e}", path.display());
+                return;
+            }
+        }
+        let url = path_to_file_url(&path);
+        open_url(&url);
+    }
+
     fn goto_tab(&mut self, n: u8) {
         let len = self.tabs.len();
         if len == 0 || n == 0 {
@@ -3206,7 +3249,20 @@ impl App {
             CloseTab => self.close_tab(),
             NextTab => self.next_tab(),
             PrevTab => self.prev_tab(),
+            MoveTabLeft => self.move_tab(-1),
+            MoveTabRight => self.move_tab(1),
             GotoTab(n) => self.goto_tab(n),
+            ClearScrollback => {
+                if let Ok(mut guard) = self.focused_term().lock() {
+                    guard.clear_scrollback();
+                }
+            }
+            ResetTerminal => {
+                if let Ok(mut guard) = self.focused_term().lock() {
+                    guard.reset_terminal();
+                }
+            }
+            OpenConfig => self.open_config(),
             SplitPane => self.split_pane(),
             ToggleSplit => self.toggle_split(),
             SwapSplit => self.swap_split(),
@@ -6695,6 +6751,42 @@ import = false
     }
 
     #[test]
+    fn move_tab_right_rota_con_wrap() {
+        use crate::input::actions::Action;
+        let s0 = test_session(Arc::new(Mutex::new(Term::new())));
+        let id0 = s0.id;
+        let s1 = test_session(Arc::new(Mutex::new(Term::new())));
+        let id1 = s1.id;
+        let s2 = test_session(Arc::new(Mutex::new(Term::new())));
+        let id2 = s2.id;
+        let mut app = App::new(
+            vec![
+                SessionHost::test(s0),
+                SessionHost::test(s1),
+                SessionHost::test(s2),
+            ],
+            Config::default(),
+            test_config_watch(),
+            None,
+            BlinkFocus::new(id0),
+            ConfigSource::Ok,
+            EventLoopWatchdog::noop(),
+            None,
+            None,
+        );
+        assert_eq!(app.tabs[0].leaves(), vec![id0]);
+        app.run_action(Action::MoveTabRight);
+        assert_eq!(app.focused, 1);
+        assert_eq!(app.tabs[0].leaves(), vec![id1]);
+        assert_eq!(app.tabs[1].leaves(), vec![id0]);
+        assert_eq!(app.tabs[2].leaves(), vec![id2]);
+        app.focused = 2;
+        app.run_action(Action::MoveTabRight);
+        assert_eq!(app.focused, 0);
+        assert_eq!(app.tabs[0].leaves(), vec![id2]);
+    }
+
+    #[test]
     fn extend_selection_word_ae2_uno_dos_tres() {
         use crate::input::actions::Action;
         let term = Arc::new(Mutex::new(Term::new()));
@@ -7131,6 +7223,14 @@ import = false
         assert!(allowed_open_url("ftp://files.example/resource"));
         assert!(allowed_open_url("file:///tmp/x"));
         assert!(allowed_open_url("mailto:user@example.com"));
+    }
+
+    #[test]
+    fn path_to_file_url_usa_esquema_file() {
+        let url = path_to_file_url(std::path::Path::new("/tmp/baud-config.toml"));
+        assert!(url.starts_with("file://"), "{url}");
+        assert!(url.contains("baud-config.toml"), "{url}");
+        assert!(allowed_open_url(&url));
     }
 
     #[test]
