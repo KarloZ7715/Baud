@@ -118,6 +118,8 @@ pub struct Config {
     #[serde(default)]
     pub remote_control: bool,
     #[serde(default)]
+    pub shell_integration: crate::pty::ShellIntegration,
+    #[serde(default)]
     pub process: ProcessSection,
     #[serde(default)]
     pub notifications: NotificationsConfig,
@@ -563,6 +565,8 @@ struct RawConfig {
     #[serde(default)]
     remote_control: bool,
     #[serde(default)]
+    shell_integration: crate::pty::ShellIntegration,
+    #[serde(default)]
     process: ProcessSection,
     #[serde(default)]
     notifications: NotificationsConfig,
@@ -786,6 +790,7 @@ impl From<RawConfig> for Config {
             bold_is_bright: raw.bold_is_bright,
             allow_osc52_read: raw.allow_osc52_read,
             remote_control: raw.remote_control,
+            shell_integration: raw.shell_integration,
             process: raw.process,
             notifications: raw.notifications,
             panes: raw.panes,
@@ -1517,6 +1522,7 @@ impl Config {
             kind: self.process.kind,
             distro: self.process.distro.clone(),
             wsl_cwd: self.process.wsl_cwd.clone(),
+            shell_integration: self.shell_integration,
         }
     }
 
@@ -1738,6 +1744,17 @@ mod tests {
     }
 
     #[test]
+    fn shell_integration_off_roundtrip() {
+        let parsed: Config = toml::from_str("shell_integration = \"off\"\n").unwrap();
+        assert_eq!(parsed.shell_integration, crate::pty::ShellIntegration::Off);
+        let serialized = toml::to_string(&parsed).unwrap();
+        let again: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(again.shell_integration, crate::pty::ShellIntegration::Off);
+        let pc = parsed.process_config();
+        assert_eq!(pc.shell_integration, crate::pty::ShellIntegration::Off);
+    }
+
+    #[test]
     fn test_config_process_config_usa_defaults() {
         let config = Config::default();
         let process = config.process_config();
@@ -1819,6 +1836,11 @@ mod tests {
         assert_eq!(roundtripped.paste.confirm, original.paste.confirm);
         assert!(!original.remote_control);
         assert_eq!(roundtripped.remote_control, original.remote_control);
+        assert_eq!(
+            original.shell_integration,
+            crate::pty::ShellIntegration::Auto
+        );
+        assert_eq!(roundtripped.shell_integration, original.shell_integration);
         assert_eq!(
             roundtripped.notifications.enabled,
             original.notifications.enabled

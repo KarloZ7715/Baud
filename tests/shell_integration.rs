@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use baud::pty::{spawn_with, ProcessConfig, SessionBackend};
+use baud::pty::{spawn_with, ProcessConfig, SessionBackend, ShellIntegration};
+
+#[cfg(unix)]
+static ZDOTDIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn read_until(
     master: &mut baud::pty::Pty,
@@ -128,6 +131,7 @@ fn zsh_script_emite_marcas_abcd() {
             ("HOME".into(), home.to_string_lossy().into_owned()),
             ("ZDOTDIR".into(), zdot.to_string_lossy().into_owned()),
         ],
+        shell_integration: ShellIntegration::Off,
         ..ProcessConfig::default()
     });
     assert_marks_in_order(&out);
@@ -154,6 +158,62 @@ fn bash_script_emite_marcas_abcd() {
         args: vec!["--rcfile".into(), rcfile.to_string_lossy().into_owned()],
         working_directory: Some(home.to_string_lossy().into_owned()),
         env: vec![("HOME".into(), home.to_string_lossy().into_owned())],
+        shell_integration: ShellIntegration::Off,
+        ..ProcessConfig::default()
+    });
+    assert_marks_in_order(&out);
+    let _ = std::fs::remove_dir_all(home);
+}
+
+/// Inyección automática: el spawn escribe scripts y fija ZDOTDIR; no se
+/// prepara ZDOTDIR a mano.
+#[cfg(unix)]
+#[test]
+fn zsh_auto_inyecta_marcas_abcd() {
+    let Some(zsh) = which("zsh") else {
+        eprintln!("skip: zsh no esta en el PATH");
+        return;
+    };
+    let home = temp_home("zsh-auto");
+    let _zdotdir_lock = ZDOTDIR_LOCK.lock().expect("zdotdir lock");
+    let prev_zdot = std::env::var("ZDOTDIR").ok();
+    unsafe {
+        std::env::remove_var("ZDOTDIR");
+    }
+    let out = run_interactive_and_echo(ProcessConfig {
+        shell: zsh.to_string_lossy().into_owned(),
+        args: Vec::new(),
+        working_directory: Some(home.to_string_lossy().into_owned()),
+        env: vec![("HOME".into(), home.to_string_lossy().into_owned())],
+        shell_integration: ShellIntegration::Auto,
+        ..ProcessConfig::default()
+    });
+    match prev_zdot {
+        Some(v) => unsafe {
+            std::env::set_var("ZDOTDIR", v);
+        },
+        None => unsafe {
+            std::env::remove_var("ZDOTDIR");
+        },
+    }
+    assert_marks_in_order(&out);
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[cfg(unix)]
+#[test]
+fn bash_auto_inyecta_marcas_abcd() {
+    let Some(bash) = which("bash") else {
+        eprintln!("skip: bash no esta en el PATH");
+        return;
+    };
+    let home = temp_home("bash-auto");
+    let out = run_interactive_and_echo(ProcessConfig {
+        shell: bash.to_string_lossy().into_owned(),
+        args: Vec::new(),
+        working_directory: Some(home.to_string_lossy().into_owned()),
+        env: vec![("HOME".into(), home.to_string_lossy().into_owned())],
+        shell_integration: ShellIntegration::Auto,
         ..ProcessConfig::default()
     });
     assert_marks_in_order(&out);

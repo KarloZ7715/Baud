@@ -202,6 +202,9 @@ pub fn spawn(shell: &str, args: &[&str]) -> nix::Result<Pty> {
 
 /// Lanza un proceso según [`ProcessConfig`].
 pub fn spawn_with(cfg: &ProcessConfig) -> nix::Result<Pty> {
+    let mut cfg = cfg.clone();
+    cfg.apply_shell_integration();
+    let cfg = &cfg;
     let result = nix::pty::openpty(None, None)?;
 
     {

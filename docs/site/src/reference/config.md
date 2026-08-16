@@ -34,6 +34,12 @@ Opens a local control socket so other processes on this machine can read the scr
 
 Type: `boolean`. Default: `false`.
 
+### shell_integration {#config-shell_integration}
+
+When "auto", Baud injects OSC 133 prompt marks into bash and zsh at spawn. "off" leaves the child environment byte-for-byte unchanged. PowerShell only sets BAUD_SHELL_INTEGRATION=1; add the documented line to your profile.
+
+Type: `string`. Default: `"auto"`.
+
 ## Theme {#config-section-theme}
 
 Sixteen ANSI colors plus cursor, selection, and contrast tuning for the active palette. Baud ships with the claude-dark preset; override any key here, or pick a different one with `theme = "name"`.

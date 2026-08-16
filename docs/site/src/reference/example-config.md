@@ -19,6 +19,8 @@ A fully commented `config.toml`, generated from the same defaults as the configu
 # bold_is_bright = false
 # Opens a local control socket so other processes on this machine can read the screen and inject keys. Off by default.
 # remote_control = false
+# When "auto", Baud injects OSC 133 prompt marks into bash and zsh at spawn. "off" leaves the child environment byte-for-byte unchanged. PowerShell only sets BAUD_SHELL_INTEGRATION=1; add the documented line to your profile.
+# shell_integration = "auto"
 
 [copy_mode]
 # Enables copy mode, letting its keybinding (Ctrl+Shift+X by default) take effect.

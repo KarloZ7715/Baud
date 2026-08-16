@@ -522,6 +522,9 @@ pub fn spawn(shell: &str, args: &[&str]) -> io::Result<Pty> {
 }
 
 pub fn spawn_with(cfg: &ProcessConfig) -> io::Result<Pty> {
+    let mut cfg = cfg.clone();
+    cfg.apply_shell_integration();
+    let cfg = &cfg;
     let size = COORD {
         X: DEFAULT_COLS,
         Y: DEFAULT_ROWS,

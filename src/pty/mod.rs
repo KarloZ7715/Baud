@@ -13,7 +13,10 @@ pub mod unix;
 pub mod windows;
 
 pub use channel::{PtyCommand, PtyCommandSender};
-pub use config::{ProcessConfig, SessionKind};
+pub use config::{
+    integration_plan, write_integration_scripts, InjectionPlan, ProcessConfig, SessionKind,
+    ShellIntegration,
+};
 pub use contract::{SessionBackend, WakeSource};
 
 #[cfg(unix)]
