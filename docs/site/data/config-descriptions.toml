@@ -28,7 +28,7 @@ debug = "Developer-facing toggles, off by default."
 render = "GPU redraw pacing."
 
 [descriptions]
-allow_osc52_read = "Allows the running program to read the clipboard via OSC 52; disable if you do not trust every program you run interactively."
+allow_osc52_read = "Lets the running program read the clipboard via OSC 52. Off by default so an untrusted or remote program cannot read the clipboard silently."
 bold_is_bright = "Maps SGR bold text to the bright variant of its ANSI color. Equivalent to `[theme].bold_is_bright`, and OR'd with it: either one being true enables the mapping."
 remote_control = "Opens a local control socket so other processes on this machine can read the screen and inject keys. Off by default."
 keys = "User-defined keybinding overrides, mapping a chord string to an action name; see the keybindings reference for the accepted values on both sides. Empty by default."

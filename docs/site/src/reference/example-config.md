@@ -13,7 +13,7 @@ A fully commented `config.toml`, generated from the same defaults as the configu
 # literal TOML value for "unset") — see the configuration reference for
 # their behavior when set.
 
-# Allows the running program to read the clipboard via OSC 52; disable if you do not trust every program you run interactively.
+# Lets the running program read the clipboard via OSC 52. Off by default so an untrusted or remote program cannot read the clipboard silently.
 # allow_osc52_read = false
 # Maps SGR bold text to the bright variant of its ANSI color. Equivalent to `[theme].bold_is_bright`, and OR'd with it: either one being true enables the mapping.
 # bold_is_bright = false

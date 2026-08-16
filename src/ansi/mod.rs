@@ -784,7 +784,7 @@ impl Term {
             hovered_link: None,
             clipboard_read_pending: None,
             clipboard_write_pending: Vec::new(),
-            allow_osc52_read: true,
+            allow_osc52_read: false,
             notifications_enabled: false,
             #[cfg(test)]
             last_notification: None,
@@ -4103,9 +4103,14 @@ mod tests {
     }
 
     #[test]
+    fn osc52_read_desactivado_por_defecto() {
+        let term = Term::new();
+        assert!(!term.allow_osc52_read);
+    }
+
+    #[test]
     fn test_osc_52_query_ignorada_si_lectura_desactivada() {
         let mut term = Term::new();
-        term.allow_osc52_read = false;
         feed(&mut term, b"\x1b]52;c;?\x07");
         assert!(term.clipboard_read_pending.is_none());
     }
@@ -4113,6 +4118,7 @@ mod tests {
     #[test]
     fn test_osc_52_query_marca_lectura_pendiente() {
         let mut term = Term::new();
+        term.allow_osc52_read = true;
         feed(&mut term, b"\x1b]52;c;?\x07");
         assert_eq!(term.clipboard_read_pending, Some((b'c', true)));
     }
@@ -4120,6 +4126,7 @@ mod tests {
     #[test]
     fn test_osc_52_query_guarda_terminador_st() {
         let mut term = Term::new();
+        term.allow_osc52_read = true;
         feed(&mut term, b"\x1b]52;c;?\x1b\\");
         assert_eq!(term.clipboard_read_pending, Some((b'c', false)));
     }

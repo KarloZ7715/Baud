@@ -34,4 +34,10 @@ Baud prefers [arboard](https://github.com/1Password/arboard) for clipboard acces
 
 ## OSC 52
 
-Programs can read and write the clipboard directly through the OSC 52 escape sequence, which matters over SSH where the program has no other way to reach your local clipboard. Writes (a program setting the clipboard) always go through. Reads (a program asking what's currently in the clipboard) are additionally gated by `allow_osc52_read`, since letting an arbitrary program read your clipboard is a real trust boundary — disable it if you run software you do not fully trust interactively. See the [configuration reference](../reference/config.md#config-allow_osc52_read) for the key.
+Programs can read and write the clipboard directly through the OSC 52 escape sequence, which matters over SSH where the program has no other way to reach your local clipboard. Writes (a program setting the clipboard) always go through. Reads (a program asking what's currently in the clipboard) are gated by `allow_osc52_read`, which is **off by default**: any program that can write to the terminal — including one over SSH, or a `cat` of a hostile file — could otherwise read the clipboard silently. To allow reads:
+
+```toml
+allow_osc52_read = true
+```
+
+See the [configuration reference](../reference/config.md#config-allow_osc52_read) for the key.

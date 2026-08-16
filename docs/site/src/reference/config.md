@@ -12,7 +12,7 @@ Options that live at the top level of the file, outside any `[section]`.
 
 ### allow_osc52_read {#config-allow_osc52_read}
 
-Allows the running program to read the clipboard via OSC 52; disable if you do not trust every program you run interactively.
+Lets the running program read the clipboard via OSC 52. Off by default so an untrusted or remote program cannot read the clipboard silently.
 
 Type: `boolean`. Default: `false`.
 

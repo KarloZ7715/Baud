@@ -110,7 +110,7 @@ pub struct Config {
     pub cursor: CursorConfig,
     #[serde(default)]
     pub bold_is_bright: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub allow_osc52_read: bool,
     /// Socket local de control (lectura de pantalla e inyeccion de teclas).
     #[serde(default)]
@@ -536,7 +536,7 @@ struct RawConfig {
     cursor: CursorConfig,
     #[serde(default)]
     bold_is_bright: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     allow_osc52_read: bool,
     #[serde(default)]
     remote_control: bool,
@@ -1683,6 +1683,18 @@ mod tests {
             ..ThemeConfig::default()
         };
         assert!(!claro.is_dark());
+    }
+
+    #[test]
+    fn config_por_defecto_no_permite_osc52_read() {
+        let cfg = Config::default();
+        assert!(!cfg.allow_osc52_read);
+    }
+
+    #[test]
+    fn toml_vacio_no_permite_osc52_read() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.allow_osc52_read);
     }
 
     #[test]
