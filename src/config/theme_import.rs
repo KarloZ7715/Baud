@@ -626,6 +626,11 @@ fn split_key_value(line: &str, sep: char) -> Option<(&str, &str)> {
 /// Devuelve `None` si no es hex (nombres de color, basura, etc.).
 pub fn parse_import_hex(s: &str) -> Option<(u8, u8, u8)> {
     let t = s.trim().trim_start_matches('#');
+    // `str::len` es en bytes: un UTF-8 de 6/8 bytes con combining marks
+    // no es hex y no se puede indexar en 2/4/6.
+    if !t.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
     let (r, g, b) = match t.len() {
         6 => (
             u8::from_str_radix(&t[0..2], 16).ok()?,
@@ -776,6 +781,22 @@ mod tests {
         assert_eq!(parse_import_hex("#ff0c0b0c"), Some((0x0c, 0x0b, 0x0c)));
         assert_eq!(parse_import_hex("red"), None);
         assert_eq!(parse_import_hex(""), None);
+    }
+
+    #[test]
+    fn parse_import_hex_utf8_de_6_bytes_no_panica() {
+        // 6 bytes, no 6 dígitos ASCII: un combining mark parte un índice.
+        let hex = "cfd\u{035f}d";
+        assert_eq!(hex.len(), 6);
+        assert_eq!(parse_import_hex(hex), None);
+        assert_eq!(parse_import_hex(&format!("#{hex}")), None);
+    }
+
+    #[test]
+    fn import_ghostty_hex_utf8_no_panica() {
+        let src = "palette = 7=#cfd\u{035f}d\n";
+        let err = import_from_str(src, Path::new("ghostty.conf")).unwrap_err();
+        assert_eq!(err, ImportError::Empty);
     }
 
     #[test]
