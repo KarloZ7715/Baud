@@ -332,6 +332,16 @@ Characters treated as word boundaries for a non-smart double-click selection.
 
 Type: `string`. Default: `` ",│`|:\"' ()[]{}<>\t" ``.
 
+## Paste {#config-section-paste}
+
+Confirmation before pasting text that would execute or hide control characters when the running program has not enabled bracketed paste.
+
+### paste.confirm {#config-paste-confirm}
+
+When to ask before pasting without bracketed paste: "risky" (default) confirms multiline or control-character pastes; "never" pastes immediately.
+
+Type: `string`. Default: `"risky"`.
+
 ## Copy mode {#config-section-copy_mode}
 
 Vim-style keyboard-driven selection mode.

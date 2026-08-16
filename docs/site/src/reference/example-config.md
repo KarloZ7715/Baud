@@ -78,6 +78,10 @@ A fully commented `config.toml`, generated from the same defaults as the configu
 # Hyprland-style `split_width_multiplier`: biases new splits wider or narrower than an even half.
 # split_width_multiplier = 1.0
 
+[paste]
+# When to ask before pasting without bracketed paste: "risky" (default) confirms multiline or control-character pastes; "never" pastes immediately.
+# confirm = "risky"
+
 [process]
 # Extra arguments passed to the shell on launch.
 # args = []

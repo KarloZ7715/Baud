@@ -21,7 +21,7 @@ The theme picker (see [Themes](themes.md)) writes to this same file. To avoid th
 
 ## Sections at a glance
 
-The reference groups every key by its TOML section: `[theme]`, `[font]`, `[window]`, `[selection]`, `[copy_mode]`, `[scrollback]`, `[cursor]`, `[process]`, `[notifications]`, `[panes]`, `[status]`, `[diagnostics]`, `[debug]`, `[render]`, plus the root-level `allow_osc52_read`, `bold_is_bright` and the `[keys]` table. Feature pages under [Features](../features/tabs-and-splits.md) link to the specific keys that control each one; start there if you are looking for a particular behavior rather than browsing the whole reference.
+The reference groups every key by its TOML section: `[theme]`, `[font]`, `[window]`, `[selection]`, `[paste]`, `[copy_mode]`, `[scrollback]`, `[cursor]`, `[process]`, `[notifications]`, `[panes]`, `[status]`, `[diagnostics]`, `[debug]`, `[render]`, plus the root-level `allow_osc52_read`, `bold_is_bright` and the `[keys]` table. Feature pages under [Features](../features/tabs-and-splits.md) link to the specific keys that control each one; start there if you are looking for a particular behavior rather than browsing the whole reference.
 
 ## Related pages
 

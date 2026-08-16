@@ -103,6 +103,8 @@ pub struct Config {
     #[serde(default)]
     pub selection: SelectionConfig,
     #[serde(default)]
+    pub paste: PasteConfig,
+    #[serde(default)]
     pub copy_mode: CopyModeConfig,
     #[serde(default)]
     pub scrollback: ScrollbackConfig,
@@ -302,6 +304,24 @@ pub struct SelectionConfig {
     /// Delimitadores de palabra para doble clic no-semantico.
     #[serde(default = "default_word_delimiters")]
     pub word_delimiters: String,
+}
+
+/// Cuándo pedir confirmación al pegar sin bracketed paste.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PasteConfirm {
+    /// Overlay si el texto trae saltos de línea o controles.
+    #[default]
+    Risky,
+    /// Pegar siempre, sin overlay.
+    Never,
+}
+
+/// Política de confirmación al pegar.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PasteConfig {
+    #[serde(default)]
+    pub confirm: PasteConfirm,
 }
 
 /// Configuración del copy mode.
@@ -528,6 +548,8 @@ struct RawConfig {
     window: WindowConfig,
     #[serde(default)]
     selection: SelectionConfig,
+    #[serde(default)]
+    paste: PasteConfig,
     #[serde(default)]
     copy_mode: CopyModeConfig,
     #[serde(default)]
@@ -757,6 +779,7 @@ impl From<RawConfig> for Config {
             font,
             window,
             selection: raw.selection,
+            paste: raw.paste,
             copy_mode: raw.copy_mode,
             scrollback: raw.scrollback,
             cursor: raw.cursor,
@@ -1686,6 +1709,23 @@ mod tests {
     }
 
     #[test]
+    fn paste_confirm_por_defecto_es_risky() {
+        let cfg = Config::default();
+        assert_eq!(cfg.paste.confirm, PasteConfirm::Risky);
+        let empty: Config = toml::from_str("").unwrap();
+        assert_eq!(empty.paste.confirm, PasteConfirm::Risky);
+    }
+
+    #[test]
+    fn paste_confirm_roundtrip_never() {
+        let parsed: Config = toml::from_str("[paste]\nconfirm = \"never\"\n").unwrap();
+        assert_eq!(parsed.paste.confirm, PasteConfirm::Never);
+        let serialized = toml::to_string(&parsed).unwrap();
+        let again: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(again.paste.confirm, PasteConfirm::Never);
+    }
+
+    #[test]
     fn config_por_defecto_no_permite_osc52_read() {
         let cfg = Config::default();
         assert!(!cfg.allow_osc52_read);
@@ -1776,6 +1816,7 @@ mod tests {
         assert_eq!(roundtripped.cursor.style, original.cursor.style);
         assert_eq!(roundtripped.bold_is_bright, original.bold_is_bright);
         assert_eq!(roundtripped.allow_osc52_read, original.allow_osc52_read);
+        assert_eq!(roundtripped.paste.confirm, original.paste.confirm);
         assert!(!original.remote_control);
         assert_eq!(roundtripped.remote_control, original.remote_control);
         assert_eq!(

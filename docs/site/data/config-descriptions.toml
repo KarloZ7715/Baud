@@ -16,6 +16,7 @@ theme = "Sixteen ANSI colors plus cursor, selection, and contrast tuning for the
 font = "Typeface, size, and glyph placement used by the GPU text renderer."
 window = "Startup size, decorations, opacity, and padding of the terminal window."
 selection = "Mouse selection behavior: what counts as a word, when selecting also copies, and which modifiers bypass the running program's own mouse reporting."
+paste = "Confirmation before pasting text that would execute or hide control characters when the running program has not enabled bracketed paste."
 copy_mode = "Vim-style keyboard-driven selection mode."
 scrollback = "How much terminal history is kept, and how fast the mouse wheel moves through it."
 cursor = "Cursor color, shape, and blink timing."
@@ -76,6 +77,8 @@ keys = "User-defined keybinding overrides, mapping a chord string to an action n
 "window.width" = "Initial window width in logical pixels. Only applies when `startup` is \"windowed\"."
 "window.height" = "Initial window height in logical pixels. Only applies when `startup` is \"windowed\"."
 "window.app_id" = "Wayland app_id and X11 WM_CLASS instance/class. Applied when the window is created. Default \"baud\". The --app-id CLI flag overrides this value. Changing it requires a restart."
+
+"paste.confirm" = "When to ask before pasting without bracketed paste: \"risky\" (default) confirms multiline or control-character pastes; \"never\" pastes immediately."
 
 "selection.copy_on_select" = "Copies the selection to the clipboard automatically when the left mouse button is released."
 "selection.copy_on_select_target" = "Clipboard destination for copy-on-select: \"primary\", \"clipboard\", or \"both\"."
