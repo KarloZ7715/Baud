@@ -39,6 +39,14 @@ pub fn classify_paste(text: &str) -> PasteRisk {
     PasteRisk::Safe
 }
 
+/// Une líneas con espacios: pega el contenido sin ejecutarlo línea a línea.
+pub fn collapse_paste_lines(text: &str) -> String {
+    text.split(['\n', '\r'])
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Envuelve el texto en marcadores de bracketed paste si el flag esta activo.
 /// Si no, retorna el texto sin cambios (solo filtrado).
 // ponytail: wrapping para DEC 2004, anidamiento no permitido por xterm.
@@ -104,5 +112,11 @@ mod tests {
     #[test]
     fn multiline_gana_a_control() {
         assert_eq!(classify_paste("a\x03b\nc"), PasteRisk::Multiline);
+    }
+
+    #[test]
+    fn collapse_une_lineas_con_espacios() {
+        assert_eq!(collapse_paste_lines("a\nb\n"), "a b");
+        assert_eq!(collapse_paste_lines("a\r\nb"), "a b");
     }
 }

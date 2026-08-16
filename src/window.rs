@@ -19,7 +19,7 @@ use crate::color_scheme::{self, SchemeSource};
 use crate::config::watch::WatchState;
 use crate::config::{
     persist, preset_polarity, ColorMode, ColorScheme, Config, ConfigSource, DecorationsKind,
-    ProcessSection, StartupState,
+    PasteConfirm, ProcessSection, StartupState,
 };
 use crate::copy_mode::CopyModeState;
 use crate::diagnostics::latency::LatencyTracker;
@@ -29,7 +29,9 @@ use crate::grid::Cell;
 use crate::input::actions::{normalize_binding_key, Action, Keybindings};
 use crate::input::keymap::{self, Key as KKey, KeyEventKind, KeyModes, Mods};
 use crate::input::wheel::{self, WheelIntent, WheelOwnerHint};
+use crate::input::{classify_paste, collapse_paste_lines, PasteRisk};
 use crate::layout::{Rect as LayoutRect, TabLayout};
+use crate::paste_overlay::PendingPaste;
 use crate::pty::PtyCommand;
 use crate::renderer::{
     compute_layout, PaneRender, PreeditState, Renderer, TabBarLayout, TitleBarHit, TitleBarLayout,
@@ -372,6 +374,8 @@ pub struct App {
     copy_on_select_deadline: Option<Instant>,
     /// Selector interactivo de temas (exclusivo con copy mode).
     theme_picker: Option<ThemePickerState>,
+    /// Paste riesgoso a la espera de confirmación (sin bracketed paste).
+    pending_paste: Option<PendingPaste>,
     /// Esquema de color del SO resuelto (None = sin señal, cae a oscuro).
     system_color_scheme: Option<ColorScheme>,
     /// Origen del esquema del SO (portal/winit/fallback) — info para el picker.
@@ -589,6 +593,7 @@ impl App {
             selection_redraw_pending: false,
             copy_on_select_deadline: None,
             theme_picker: None,
+            pending_paste: None,
             system_color_scheme: None,
             system_scheme_source: SchemeSource::default(),
             consent_prompt_active: false,
@@ -871,7 +876,7 @@ impl App {
                 self.send_input(response);
             }
             UserEvent::PasteReady(text) => {
-                self.paste_text(&text);
+                self.request_paste(&text);
             }
             UserEvent::PasteSearchReady(text) => {
                 if text.is_empty() {
@@ -2406,6 +2411,70 @@ impl App {
     fn handle_paste_primary(&mut self) {
         tracing::debug!("handle_paste_primary: lectura detached");
         self.spawn_clipboard_get(true, UserEvent::PasteReady);
+    }
+
+    /// Decide si el paste va directo al PTY o queda pendiente de overlay.
+    fn request_paste(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let bracketed = self
+            .focused_term()
+            .lock()
+            .ok()
+            .map(|t| t.bracketed_paste)
+            .unwrap_or(false);
+        if bracketed || self.config.paste.confirm == PasteConfirm::Never {
+            self.paste_text(text);
+            return;
+        }
+        let risk = classify_paste(text);
+        if risk == PasteRisk::Safe {
+            self.paste_text(text);
+            return;
+        }
+        self.pending_paste = Some(PendingPaste::new(text.to_string(), risk));
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    fn confirm_pending_paste(&mut self) {
+        if let Some(pending) = self.pending_paste.take() {
+            self.paste_text(&pending.text);
+        }
+    }
+
+    fn confirm_pending_paste_one_line(&mut self) {
+        let Some(pending) = self.pending_paste.as_ref() else {
+            return;
+        };
+        if pending.risk != PasteRisk::Multiline {
+            return;
+        }
+        let text = collapse_paste_lines(&pending.text);
+        self.pending_paste = None;
+        self.paste_text(&text);
+    }
+
+    fn cancel_pending_paste(&mut self) {
+        self.pending_paste = None;
+    }
+
+    /// Consume toda tecla mientras el overlay de paste está activo.
+    fn handle_pending_paste_key(&mut self, event: &winit::event::KeyEvent) -> bool {
+        if self.pending_paste.is_none() {
+            return false;
+        }
+        match &event.logical_key {
+            Key::Named(NamedKey::Enter) => self.confirm_pending_paste(),
+            Key::Named(NamedKey::Escape) => self.cancel_pending_paste(),
+            Key::Character(c) if c.eq_ignore_ascii_case("e") => {
+                self.confirm_pending_paste_one_line();
+            }
+            _ => {}
+        }
+        true
     }
 
     /// Filtra y envía texto pegado al PTY (con bracketing si aplica).
@@ -4403,6 +4472,7 @@ impl ApplicationHandler<UserEvent> for App {
                     && !consent_active
                     && !search_active
                     && !self.fps_overlay_visible
+                    && self.pending_paste.is_none()
                     && preedit_empty
                 {
                     tracing::debug!("RedrawRequested: skip (nothing dirty)");
@@ -4472,6 +4542,7 @@ impl ApplicationHandler<UserEvent> for App {
                     bold,
                     self.config.window.opacity,
                     picker,
+                    self.pending_paste.as_ref(),
                     preedit,
                     tab_layout.as_ref(),
                     title_bar_layout.as_ref(),
@@ -5294,6 +5365,16 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 }
 
+                if self.pending_paste.is_some() {
+                    if self.handle_pending_paste_key(&event) {
+                        if let Some(window) = &self.window {
+                            window.request_redraw();
+                        }
+                        return;
+                    }
+                    return;
+                }
+
                 if self.theme_picker.is_some() {
                     if let Some(k) = winit_to_key(&event.logical_key) {
                         let k_norm = normalize_binding_key(k, mods);
@@ -5699,6 +5780,102 @@ mod tests {
             None,
             None,
         )
+    }
+
+    fn test_app_with_pty(term: Arc<Mutex<Term>>) -> (App, mpsc::Receiver<PtyCommand>) {
+        let (tx, rx) = mpsc::channel();
+        let wakeup = crate::pty::create_wake().expect("wake para test");
+        let session = Session {
+            id: SessionId::next(),
+            term,
+            pty_tx: PtyCommandSender::new_for_test(tx, wakeup),
+            title: String::new(),
+            dirty: false,
+            hold: false,
+            close_on_exit: false,
+            has_activity: false,
+            foreground_probe: None,
+            foreground_cache: None,
+            input_reset_pending: Arc::new(AtomicBool::new(false)),
+            echo_pending: Arc::new(AtomicBool::new(false)),
+        };
+        let id = session.id;
+        let app = App::new(
+            vec![SessionHost::test(session)],
+            Config::default(),
+            test_config_watch(),
+            None,
+            BlinkFocus::new(id),
+            ConfigSource::Ok,
+            EventLoopWatchdog::noop(),
+            None,
+            None,
+        );
+        (app, rx)
+    }
+
+    fn drain_pty_input(rx: &mpsc::Receiver<PtyCommand>) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            if let PtyCommand::Input(bytes) = cmd {
+                out.extend(bytes);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn paste_multilinea_sin_bracketed_queda_pendiente() {
+        let (mut app, rx) = test_app_with_pty(Arc::new(Mutex::new(Term::new())));
+        app.request_paste("rm -rf /\n");
+        assert!(app.pending_paste.is_some());
+        assert!(drain_pty_input(&rx).is_empty());
+    }
+
+    #[test]
+    fn confirmar_el_paste_lo_envia_integro() {
+        let (mut app, rx) = test_app_with_pty(Arc::new(Mutex::new(Term::new())));
+        app.request_paste("echo a\necho b");
+        app.confirm_pending_paste();
+        assert!(app.pending_paste.is_none());
+        assert_eq!(drain_pty_input(&rx), b"echo a\necho b");
+    }
+
+    #[test]
+    fn cancelar_no_envia_nada() {
+        let (mut app, rx) = test_app_with_pty(Arc::new(Mutex::new(Term::new())));
+        app.request_paste("echo a\necho b");
+        app.cancel_pending_paste();
+        assert!(app.pending_paste.is_none());
+        assert!(drain_pty_input(&rx).is_empty());
+    }
+
+    #[test]
+    fn con_bracketed_paste_no_hay_overlay() {
+        let mut term = Term::new();
+        term.bracketed_paste = true;
+        let (mut app, rx) = test_app_with_pty(Arc::new(Mutex::new(term)));
+        app.request_paste("hola\nmundo");
+        assert!(app.pending_paste.is_none());
+        assert_eq!(drain_pty_input(&rx), b"\x1b[200~hola\nmundo\x1b[201~");
+    }
+
+    #[test]
+    fn pegar_como_una_linea_une_con_espacios() {
+        let (mut app, rx) = test_app_with_pty(Arc::new(Mutex::new(Term::new())));
+        app.request_paste("echo a\necho b");
+        app.confirm_pending_paste_one_line();
+        assert!(app.pending_paste.is_none());
+        assert_eq!(drain_pty_input(&rx), b"echo a echo b");
+    }
+
+    #[test]
+    fn paste_confirm_never_no_pide_overlay() {
+        let (mut app, rx) = test_app_with_pty(Arc::new(Mutex::new(Term::new())));
+        app.config.paste.confirm = PasteConfirm::Never;
+        app.request_paste("a\nb");
+        assert!(app.pending_paste.is_none());
+        assert_eq!(drain_pty_input(&rx), b"a\nb");
     }
 
     #[test]

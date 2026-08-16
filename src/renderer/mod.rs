@@ -190,6 +190,7 @@ use crate::config::{
     parse_hex, FontConfig, GlyphOffset, StatusConfig, ThemeConfig, MIN_LEGIBLE_CONTRAST,
 };
 use crate::grid::{Cell, DamageSnapshot, GridDamage};
+use crate::paste_overlay::PendingPaste;
 use crate::session::SessionId;
 use crate::theme_picker::ThemePickerState;
 use glyphon::cosmic_text::Hinting;
@@ -271,6 +272,8 @@ pub struct Renderer {
     overlay_buffer: glyphon::Buffer,
     /// Buffer para la barra inferior de busqueda.
     search_bar_buffer: glyphon::Buffer,
+    /// Buffer del overlay de confirmación de paste.
+    paste_overlay_buffer: glyphon::Buffer,
     /// Buffers del theme picker overlay.
     picker_list_buffer: glyphon::Buffer,
     picker_detail_buffer: glyphon::Buffer,
@@ -437,6 +440,12 @@ impl Renderer {
             &mut self.search_bar_buffer,
             self.cell_w,
         );
+        self.paste_overlay_buffer = glyphon::Buffer::new(&mut self.font_system, metrics);
+        Self::configure_buffer(
+            &mut self.font_system,
+            &mut self.paste_overlay_buffer,
+            self.cell_w,
+        );
 
         let picker_m =
             crate::theme_picker::picker_cell_metrics(&mut self.font_system, &self.font_family);
@@ -592,6 +601,8 @@ impl Renderer {
         Self::configure_buffer(&mut font_system, &mut overlay_buffer, cell_w);
         let mut search_bar_buffer = glyphon::Buffer::new(&mut font_system, metrics);
         Self::configure_buffer(&mut font_system, &mut search_bar_buffer, cell_w);
+        let mut paste_overlay_buffer = glyphon::Buffer::new(&mut font_system, metrics);
+        Self::configure_buffer(&mut font_system, &mut paste_overlay_buffer, cell_w);
 
         let picker_m = crate::theme_picker::picker_cell_metrics(&mut font_system, &font_family);
         let picker_metrics = glyphon::Metrics::new(picker_m.font_size, picker_m.cell_h);
@@ -636,6 +647,7 @@ impl Renderer {
             swash_cache,
             overlay_buffer,
             search_bar_buffer,
+            paste_overlay_buffer,
             picker_list_buffer,
             picker_detail_buffer,
             picker_footer_buffer,
@@ -978,6 +990,7 @@ impl Renderer {
         bold_is_bright: bool,
         window_opacity: f32,
         picker: Option<&ThemePickerState>,
+        pending_paste: Option<&PendingPaste>,
         preedit: Option<PreeditState>,
         tabs: Option<&TabBarLayout>,
         tbar_layout: Option<&TitleBarLayout>,
@@ -1083,6 +1096,7 @@ impl Renderer {
                 theme,
                 bold_is_bright,
                 window_opacity,
+                pending_paste,
                 preedit,
                 tabs,
                 tbar_layout,
@@ -1117,6 +1131,7 @@ impl Renderer {
         theme: &ThemeConfig,
         bold_is_bright: bool,
         window_opacity: f32,
+        pending_paste: Option<&PendingPaste>,
         preedit: Option<PreeditState>,
         tabs: Option<&TabBarLayout>,
         tbar_layout: Option<&TitleBarLayout>,
@@ -1395,6 +1410,31 @@ impl Renderer {
                     );
                 }
             }
+        }
+
+        if let Some(pending) = pending_paste {
+            crate::paste_overlay::fill_buffer(
+                pending,
+                &mut self.font_system,
+                &self.font_family,
+                &mut self.paste_overlay_buffer,
+                cell_w,
+                self.config.width as f32,
+                self.cell_h * 5.0,
+                theme,
+                &mut self.contrast_cache,
+            );
+            crate::paste_overlay::push_overlay(
+                pending,
+                &self.paste_overlay_buffer,
+                &mut extra_areas,
+                &mut all_custom_glyphs,
+                self.config.width,
+                self.config.height,
+                self.cell_h,
+                theme,
+                &mut self.contrast_cache,
+            );
         }
 
         debug_assert_custom_glyphs_bounded(&all_custom_glyphs);

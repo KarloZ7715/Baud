@@ -20,6 +20,7 @@ pub mod grid;
 pub mod input;
 pub mod installation;
 pub mod layout;
+pub mod paste_overlay;
 pub mod pty;
 pub mod remote;
 pub mod renderer;

@@ -20,6 +20,15 @@ Extend an existing selection from the keyboard:
 
 `ctrl+shift+v` pastes from the clipboard. `shift+insert` pastes from the primary selection (X11/Wayland's separate "last selected text" buffer); on Windows, where there is no primary selection, it falls back to the regular clipboard instead of doing nothing.
 
+If the running program has not enabled bracketed paste (DEC 2004) and the clipboard text contains newlines or control characters, Baud shows a confirmation overlay first: a short preview, then `enter` to paste, `esc` to cancel, and — for multiline text — `e` to paste as a single line (newlines become spaces). Safe single-line text pastes immediately. Programs that requested bracketed paste receive the text unchanged, with no overlay.
+
+To disable the confirmation:
+
+```toml
+[paste]
+confirm = "never"
+```
+
 ## Bypassing mouse reporting
 
 Programs that request mouse reporting (like `less` or full-screen editors) normally intercept mouse clicks themselves. Hold one of the modifiers listed in `selection.bypass_mouse_reporting_modifiers` (`shift`, `alt`, or `ctrl`) while clicking to select text with the mouse anyway, bypassing the program's own handling for that click.
