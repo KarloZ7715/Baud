@@ -17,6 +17,15 @@ Workflows live under `.github/workflows/`.
 
 Treat green `checks`, `test`, `build`, `windows-compile`, `release-policy`, and `shell-fixtures` as required for a first PR. Soft gates can fail without blocking merge; still fix ConPTY or smoke failures when your change touches those paths.
 
+## `fuzz.yml` — parser and config input
+
+| Job | What it protects |
+| --- | --- |
+| `fuzz-smoke` | 60 s libFuzzer per target on PRs that touch `src/ansi/`, `src/grid/`, `src/config/`, or `fuzz/` |
+| `fuzz-weekly` | 30 min per target every Monday 06:00 UTC; caches `fuzz/corpus/`, uploads crash artifacts, opens `fuzz: crash in <target>` |
+
+See [Testing](testing.md#fuzzing) for local commands and what to do with a trophy.
+
 ## `docs.yml` — documentation site
 
 | Job | What it protects |

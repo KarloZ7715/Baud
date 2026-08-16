@@ -1,0 +1,143 @@
+name: Fuzz
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "src/ansi/**"
+      - "src/grid/**"
+      - "src/config/**"
+      - "fuzz/**"
+      - ".github/workflows/fuzz.yml"
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-smoke:
+    name: fuzz smoke
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Instalar toolchain nightly
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - name: Instalar cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Humo de 60 s por target
+        run: |
+          set -eu
+          fail=0
+          for t in parser_feed feed_and_resize theme_import config_toml; do
+            echo "::group::$t"
+            if ! cargo fuzz run "$t" -- -max_total_time=60; then
+              echo "::error::crash en $t"
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$fail"
+
+  fuzz-weekly:
+    name: fuzz weekly
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Instalar toolchain nightly
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: nightly
+          components: rust-src
+
+      - name: Instalar cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Restaurar corpus cacheado
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-
+
+      - name: Fuzz 30 min por target
+        id: fuzz
+        run: |
+          set -eu
+          fail=0
+          crashed=
+          for t in parser_feed feed_and_resize theme_import config_toml; do
+            echo "::group::$t"
+            if ! cargo fuzz run "$t" -- -max_total_time=1800; then
+              echo "::error::crash en $t"
+              crashed="${crashed} ${t}"
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          echo "crashed=${crashed# }" >> "$GITHUB_OUTPUT"
+          exit "$fail"
+
+      - name: Subir reproducers
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+      - name: Abrir issue por crash
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          shopt -s nullglob
+          for t in parser_feed feed_and_resize theme_import config_toml; do
+            crashes=(fuzz/artifacts/"$t"/crash-*)
+            if [ ${#crashes[@]} -eq 0 ]; then
+              continue
+            fi
+            title="fuzz: crash in ${t}"
+            existing="$(gh issue list --search "in:title ${title}" --state open --json number --jq '.[0].number // empty')"
+            if [ -n "$existing" ]; then
+              echo "Issue ya abierto: #${existing} (${title})"
+              continue
+            fi
+            repro="${crashes[0]}"
+            gh issue create --title "$title" --body "$(cat <<EOF
+          Weekly fuzz found a crash in \`${t}\`.
+
+          Reproducer (first artifact): \`${repro}\`
+
+          Reproduce locally:
+
+          \`\`\`
+          cargo +nightly fuzz run ${t} ${repro}
+          \`\`\`
+
+          Convert the trophy into a regression test before fixing.
+          Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+          )"
+          done
