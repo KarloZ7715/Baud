@@ -13,7 +13,7 @@ Marks are ignored while an alternate-screen program is active, so they never poi
 
 By default (`shell_integration = "auto"`), Baud injects integration for **bash** and **zsh** when it launches the shell:
 
-- **zsh** — sets `ZDOTDIR` to a small runtime directory whose `.zshrc` sources yours and then emits the marks. If you already had `ZDOTDIR` set, it is preserved as `BAUD_ORIG_ZDOTDIR`.
+- **zsh** — sets `ZDOTDIR` to a small runtime directory whose `.zshenv` / `.zprofile` / `.zshrc` / `.zlogin` source the matching files from your original `ZDOTDIR` (or `$HOME`). After startup, `ZDOTDIR` is restored so plugins do not write into Baud's runtime dir. If you already had `ZDOTDIR` set, it is preserved as `BAUD_ORIG_ZDOTDIR`.
 - **bash** — starts the shell with `--rcfile` pointing at a wrapper that sources `~/.bashrc` and then emits the marks. This is skipped when `[process].args` is non-empty or `process.login = true`, because `--rcfile` would fight those.
 - **PowerShell** — only sets `BAUD_SHELL_INTEGRATION=1` and `BAUD_SHELL_INTEGRATION_SCRIPT` to the embedded snippet. Add this line to your `$PROFILE`:
 
@@ -49,11 +49,15 @@ The same scripts Baud injects are written to the state directory on first launch
 With `shell_integration = "off"`, source `bash/baud.bash` from `~/.bashrc` or `zsh/baud.zsh` from `~/.zshrc`. A compact zsh form if you prefer not to source the file:
 
 ```sh
-__baud_precmd() { print -Pn "\e]133;D;$?\a\e]133;A\a" }
+__baud_b=$'\033]133;B\a'
+__baud_precmd() {
+  print -Pn "\e]133;D;$?\a\e]133;A\a"
+  PS1=${PS1//$'%{\033]133;B\a%}'/}
+  PS1="${PS1}%{${__baud_b}%}"
+}
 __baud_preexec() { print -Pn "\e]133;C\a" }
 precmd_functions+=(__baud_precmd)
 preexec_functions+=(__baud_preexec)
-PS1="${PS1}%{$(print -Pn "\e]133;B\a")%}"
 ```
 
 Capturing `$?` as the first thing in the precmd hook is what makes the exit-code mark reflect the command that just finished.

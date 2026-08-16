@@ -59,15 +59,35 @@ impl InjectionPlan {
 }
 
 const ZSH_SCRIPT: &str = include_str!("../../assets/shell/baud.zsh");
+const ZSH_ZDOT_LIB: &str = include_str!("../../assets/shell/baud-zdot.zsh");
 const BASH_SCRIPT: &str = include_str!("../../assets/shell/baud.bash");
 const PWSH_SCRIPT: &str = include_str!("../../assets/shell/baud.ps1");
 
-const ZSH_WRAPPER: &str = "\
-# Baud ZDOTDIR wrapper: user rc first, then marks.
-if [[ -f \"${BAUD_ORIG_ZDOTDIR:-$HOME}/.zshrc\" ]]; then
-  source \"${BAUD_ORIG_ZDOTDIR:-$HOME}/.zshrc\"
+const ZSHENV_WRAPPER: &str = "\
+source \"${ZDOTDIR}/baud-zdot.zsh\"
+__baud_source_user .zshenv
+__baud_stay_injected
+";
+
+const ZPROFILE_WRAPPER: &str = "\
+source \"${ZDOTDIR}/baud-zdot.zsh\"
+__baud_source_user .zprofile
+__baud_stay_injected
+";
+
+const ZSHRC_WRAPPER: &str = "\
+source \"${ZDOTDIR}/baud-zdot.zsh\"
+__baud_restore_user_zdot
+if [[ -r \"${__baud_user_zdot}/.zshrc\" ]]; then
+  source \"${__baud_user_zdot}/.zshrc\"
 fi
-source \"${ZDOTDIR}/baud.zsh\"
+source \"${__baud_inject_zdot}/baud.zsh\"
+";
+
+const ZLOGIN_WRAPPER: &str = "\
+source \"${ZDOTDIR}/baud-zdot.zsh\"
+__baud_source_user .zlogin
+__baud_restore_user_zdot
 ";
 
 const BASH_WRAPPER: &str = "\
@@ -154,7 +174,11 @@ pub fn write_integration_scripts(scripts_dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(&bash_dir)?;
     std::fs::create_dir_all(&pwsh_dir)?;
     std::fs::write(zsh_dir.join("baud.zsh"), ZSH_SCRIPT)?;
-    std::fs::write(zsh_dir.join(".zshrc"), ZSH_WRAPPER)?;
+    std::fs::write(zsh_dir.join("baud-zdot.zsh"), ZSH_ZDOT_LIB)?;
+    std::fs::write(zsh_dir.join(".zshenv"), ZSHENV_WRAPPER)?;
+    std::fs::write(zsh_dir.join(".zprofile"), ZPROFILE_WRAPPER)?;
+    std::fs::write(zsh_dir.join(".zshrc"), ZSHRC_WRAPPER)?;
+    std::fs::write(zsh_dir.join(".zlogin"), ZLOGIN_WRAPPER)?;
     std::fs::write(bash_dir.join("baud.bash"), BASH_SCRIPT)?;
     std::fs::write(bash_dir.join("rcfile"), BASH_WRAPPER)?;
     std::fs::write(pwsh_dir.join("baud.ps1"), PWSH_SCRIPT)?;
@@ -362,6 +386,31 @@ mod tests {
             Path::new("/tmp/baud-scripts"),
         );
         assert!(plan.is_empty());
+    }
+
+    #[test]
+    fn write_integration_scripts_cubre_arranke_zsh() {
+        let dir = std::env::temp_dir().join(format!(
+            "baud-int-scripts-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        write_integration_scripts(&dir).expect("write");
+        let zsh = dir.join("zsh");
+        for name in [
+            "baud.zsh",
+            "baud-zdot.zsh",
+            ".zshenv",
+            ".zprofile",
+            ".zshrc",
+            ".zlogin",
+        ] {
+            assert!(zsh.join(name).is_file(), "falta {name}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(windows)]
