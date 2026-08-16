@@ -1,0 +1,117 @@
+
+        let sel =
+            crate::selection::Selection::new(crate::selection::SelectionPoint { row: 0, col: 1 });
+        term.selection = Some(sel);
+
+        assert!(term.is_selected(0, 1));
+        assert!(!term.is_selected(0, 0));
+        assert!(!term.is_selected(0, 2));
+        assert!(!term.is_selected(1, 0));
+    }
+
+    #[test]
+    fn test_selection_multiline() {
+        let mut term = Term::new();
+        feed(&mut term, b"abc");
+        term.cursor.move_to(1, 0);
+        feed(&mut term, b"def");
+        term.cursor.move_to(2, 0);
+        feed(&mut term, b"ghi");
+
+        // Seleccionar desde (0,1) hasta (2,1)
+        let mut sel =
+            crate::selection::Selection::new(crate::selection::SelectionPoint { row: 0, col: 1 });
+        sel.update_end(crate::selection::SelectionPoint { row: 2, col: 1 });
+        term.selection = Some(sel);
+
+        // Primera fila
+        assert!(!term.is_selected(0, 0));
+        assert!(term.is_selected(0, 1));
+        assert!(term.is_selected(0, 2));
+        // Segunda fila completa
+        assert!(term.is_selected(1, 0));
+        assert!(term.is_selected(1, 1));
+        assert!(term.is_selected(1, 2));
+        // Tercera fila, solo col 0-1
+        assert!(term.is_selected(2, 0));
+        assert!(term.is_selected(2, 1));
+        assert!(!term.is_selected(2, 2));
+    }
+
+    #[test]
+    fn test_selection_reversed() {
+        let mut term = Term::new();
+        feed(&mut term, b"abc");
+
+        // Seleccion invertida: end antes que start
+        let mut sel =
+            crate::selection::Selection::new(crate::selection::SelectionPoint { row: 0, col: 2 });
+        sel.update_end(crate::selection::SelectionPoint { row: 0, col: 0 });
+        term.selection = Some(sel);
+
+        // Debe normalizar a (0,0)-(0,2)
+        assert!(term.is_selected(0, 0));
+        assert!(term.is_selected(0, 1));
+        assert!(term.is_selected(0, 2));
+        assert!(!term.is_selected(0, 3));
+    }
+
+    #[test]
+    fn test_no_selection_returns_false() {
+        let term = Term::new();
+        assert!(!term.is_selected(0, 0));
+        assert_eq!(term.selected_text(), "");
+    }
+
+    #[test]
+    fn test_clear_selection() {
+        let mut term = Term::new();
+        feed(&mut term, b"abc");
+
+        // Create a selection and verify it is active
+        let sel =
+            crate::selection::Selection::new(crate::selection::SelectionPoint { row: 0, col: 0 });
+        term.selection = Some(sel);
+        assert!(term.selection.is_some());
+        assert!(term.is_selected(0, 0));
+        assert!(!term.selected_text().is_empty());
+
+        // Clear selection and verify everything is reset
+        term.clear_selection();
+        assert!(term.selection.is_none());
+        assert!(!term.is_selected(0, 0));
+        assert!(!term.is_selected(5, 0));
+        assert_eq!(term.selected_text(), "");
+    }
+
+    #[test]
+    fn test_selected_text_single_line() {
+        let mut term = Term::new();
+        feed(&mut term, b"hello");
+
+        let mut sel =
+            crate::selection::Selection::new(crate::selection::SelectionPoint { row: 0, col: 1 });
+        sel.update_end(crate::selection::SelectionPoint { row: 0, col: 3 });
+        term.selection = Some(sel);
+
+        assert_eq!(term.selected_text(), "ell");
+    }
+
+    #[test]
+    fn test_selected_text_multiline() {
+        let mut term = Term::new();
+        feed(&mut term, b"abc");
+        term.cursor.move_to(1, 0);
+        feed(&mut term, b"def");
+        term.cursor.move_to(2, 0);
+        feed(&mut term, b"ghi");
+        term.cursor.move_to(3, 0);
+        feed(&mut term, b"jkl");
+
+        // Partial selection across 3 lines: (0,1) to (2,1)
+        let mut sel =
+            crate::selection::Selection::new(crate::selection::SelectionPoint { row: 0, col: 1 });
+        sel.update_end(crate::selection::SelectionPoint { row: 2, col: 1 });
+        term.selection = Some(sel);
+
+        // (0,1)-(0,2)=

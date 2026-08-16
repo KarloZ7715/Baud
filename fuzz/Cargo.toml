@@ -9,6 +9,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+toml = "1"
+vte = "0.15"
 
 [dependencies.baud]
 path = ".."
@@ -20,6 +22,27 @@ members = ["."]
 [[bin]]
 name = "parser_feed"
 path = "fuzz_targets/parser_feed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "feed_and_resize"
+path = "fuzz_targets/feed_and_resize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "theme_import"
+path = "fuzz_targets/theme_import.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
 test = false
 doc = false
 bench = false

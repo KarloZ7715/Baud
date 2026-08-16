@@ -20,7 +20,7 @@
 //! se ajustan al límite con un warning.
 
 pub mod persist;
-mod theme_import;
+pub mod theme_import;
 mod themes;
 pub mod watch;
 

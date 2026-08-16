@@ -1,0 +1,7 @@
+);
+    }
+
+    #[test]
+    fn osc_66_sin_texto_no_hace_nada() {
+        let mut term = Term::new();
+        feed(&mut term, b

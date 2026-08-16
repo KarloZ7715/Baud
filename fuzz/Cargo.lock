@@ -333,6 +333,8 @@ version = "0.0.0"
 dependencies = [
  "baud",
  "libfuzzer-sys",
+ "toml",
+ "vte",
 ]
 
 [[package]]
