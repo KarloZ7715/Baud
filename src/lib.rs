@@ -29,6 +29,7 @@ pub mod search_overlay;
 pub mod selection;
 pub mod session;
 pub mod smart_select;
+pub mod spawn;
 pub mod theme_picker;
 pub mod updater;
 pub mod watchdog;
