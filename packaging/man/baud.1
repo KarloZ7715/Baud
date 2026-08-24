@@ -36,6 +36,21 @@ Set the Wayland app_id / X11 WM_CLASS instance
 \fB\-\-hold\fR
 Keep the window open after the command exits
 .TP
+\fB\-\-config <path>\fR
+Load config from this file instead of the default search path
+.TP
+\fB\-o <key=value>\fR
+Override a config key (repeatable); invalid keys are skipped
+.TP
+\fB\-\-window\-size <COLSxROWS>\fR
+Set the initial window size in terminal cells
+.TP
+\fB\-\-maximized\fR
+Start the window maximized
+.TP
+\fB\-\-fullscreen\fR
+Start the window in borderless fullscreen
+.TP
 \fB\-v, \-\-version\fR
 Print the installed Baud version
 .TP
@@ -48,5 +63,14 @@ or ~/.config/baud/config.toml on Linux; %APPDATA%\\baud\\config.toml on Windows.
 .TP
 .I ./baud.toml
 Working\-directory fallback, checked if the file above is not found.
+.PP
+If \-\-config is given, that file replaces this search path and is the one watched for hot\-reload. CLI \-o overrides are re\-applied after every reload.
+.SH ENVIRONMENT
+.TP
+.I TERM
+Forced to xterm-256color in the child process.
+.TP
+.I COLORTERM
+Forced to truecolor in the child process.
 .SH SEE ALSO
 Full documentation: \fIhttps://github.com/KarloZ7715/Baud\fR

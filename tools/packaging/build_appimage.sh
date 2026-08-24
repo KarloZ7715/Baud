@@ -70,6 +70,19 @@ mkdir -p "$APPDIR/usr/share/icons/hicolor/48x48/apps"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 mkdir -p "$APPDIR/usr/share/doc/baud"
 mkdir -p "$APPDIR/usr/share/man/man1"
+mkdir -p "$APPDIR/usr/share/bash-completion/completions"
+mkdir -p "$APPDIR/usr/share/zsh/site-functions"
+mkdir -p "$APPDIR/usr/share/fish/vendor_completions.d"
+
+COMP_BASH="$REPO_ROOT/packaging/completions/baud.bash"
+COMP_ZSH="$REPO_ROOT/packaging/completions/baud.zsh"
+COMP_FISH="$REPO_ROOT/packaging/completions/baud.fish"
+for src in "$COMP_BASH" "$COMP_ZSH" "$COMP_FISH"; do
+    if [[ ! -f "$src" ]]; then
+        echo "Error: completion file not found: $src" >&2
+        exit 1
+    fi
+done
 
 cp "$BINARY" "$APPDIR/usr/bin/baud"
 cp "$DESKTOP_FILE" "$APPDIR/usr/share/applications/baud.desktop"
@@ -77,6 +90,9 @@ cp "$ICON_48" "$APPDIR/usr/share/icons/hicolor/48x48/apps/baud.png"
 cp "$ICON_256" "$APPDIR/usr/share/icons/hicolor/256x256/apps/baud.png"
 cp "$LICENSE_FILE" "$APPDIR/usr/share/doc/baud/LICENSE"
 cp "$MAN_FILE" "$APPDIR/usr/share/man/man1/baud.1"
+cp "$COMP_BASH" "$APPDIR/usr/share/bash-completion/completions/baud"
+cp "$COMP_ZSH" "$APPDIR/usr/share/zsh/site-functions/_baud"
+cp "$COMP_FISH" "$APPDIR/usr/share/fish/vendor_completions.d/baud.fish"
 
 LINUXDEPLOY="$REPO_ROOT/tools/packaging/.cache/linuxdeploy-x86_64.AppImage"
 if [[ ! -f "$LINUXDEPLOY" ]]; then

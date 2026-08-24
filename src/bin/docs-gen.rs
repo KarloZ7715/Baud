@@ -732,6 +732,16 @@ fn render_man_page() -> String {
         out.push_str(&format!(".I {}\n", escape_roff(path)));
         out.push_str(&format!("{}\n", escape_roff(note)));
     }
+    out.push_str(".PP\n");
+    out.push_str(&escape_roff(
+        "If --config is given, that file replaces this search path and is the one watched \
+         for hot-reload. CLI -o overrides are re-applied after every reload.\n",
+    ));
+    out.push_str(".SH ENVIRONMENT\n");
+    out.push_str(".TP\n.I TERM\n");
+    out.push_str("Forced to xterm-256color in the child process.\n");
+    out.push_str(".TP\n.I COLORTERM\n");
+    out.push_str("Forced to truecolor in the child process.\n");
     out.push_str(".SH SEE ALSO\n");
     out.push_str(&format!(
         "Full documentation: \\fI{}\\fR\n",
@@ -868,6 +878,7 @@ mod tests {
             ".SH DESCRIPTION",
             ".SH OPTIONS",
             ".SH FILES",
+            ".SH ENVIRONMENT",
             ".SH SEE ALSO",
         ] {
             assert!(rendered.contains(section), "falta la seccion '{section}'");

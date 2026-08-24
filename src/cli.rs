@@ -583,6 +583,41 @@ mod tests {
     }
 
     #[test]
+    fn completions_cubren_todos_los_flags() {
+        let flags = [
+            "--working-directory",
+            "--title",
+            "--app-id",
+            "--hold",
+            "--config",
+            "--window-size",
+            "--maximized",
+            "--fullscreen",
+            "-o",
+            "-e",
+        ];
+        let root = env!("CARGO_MANIFEST_DIR");
+        for f in [
+            "packaging/completions/baud.bash",
+            "packaging/completions/baud.zsh",
+            "packaging/completions/baud.fish",
+            "packaging/man/baud.1",
+        ] {
+            let path = format!("{root}/{f}");
+            let cuerpo = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("no se pudo leer {path}: {e}"));
+            let haystack = if f.ends_with("baud.1") {
+                cuerpo.replace('\\', "")
+            } else {
+                cuerpo
+            };
+            for flag in flags {
+                assert!(haystack.contains(flag), "{f} no menciona {flag}");
+            }
+        }
+    }
+
+    #[test]
     fn run_devuelve_outcome_correcto() {
         // Los subcomandos informativos se resuelen internamente y retornan Exit(0).
         let outcome = run_from(vec!["baud", "help"]);

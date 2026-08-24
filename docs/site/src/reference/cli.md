@@ -21,6 +21,11 @@ Options:
       --title <text>                 Set the initial window title
       --app-id <id>                  Set the Wayland app_id / X11 WM_CLASS instance
       --hold                         Keep the window open after the command exits
+      --config <path>                Load config from this file instead of the default search path
+  -o <key=value>                     Override a config key (repeatable); invalid keys are skipped
+      --window-size <COLSxROWS>      Set the initial window size in terminal cells
+      --maximized                    Start the window maximized
+      --fullscreen                   Start the window in borderless fullscreen
 
   mcp options:
       --socket <path>                Control socket (default: newest instance in the runtime dir)
