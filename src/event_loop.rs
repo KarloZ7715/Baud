@@ -802,6 +802,21 @@ fn apply_cli_overrides(cfg: &mut Config, overrides: &[String], to_stderr: bool) 
     }
 }
 
+/// CLI gana a archivo y a `-o`. `--fullscreen` gana a `--maximized`.
+fn apply_window_launch_flags(cfg: &mut Config, opts: &LaunchOptions) {
+    if let Some((cols, rows)) = opts.window_size {
+        let (w, h) = cfg.window.size_from_cells(&cfg.font, cols, rows);
+        cfg.window.width = w;
+        cfg.window.height = h;
+    }
+    if opts.maximized {
+        cfg.window.startup = crate::config::StartupState::Maximized;
+    }
+    if opts.fullscreen {
+        cfg.window.startup = crate::config::StartupState::Fullscreen;
+    }
+}
+
 fn load_config(config_path: Option<&str>) -> crate::config::LoadResult {
     match config_path {
         Some(path) => Config::load_from_explicit(Path::new(path)),
@@ -831,6 +846,7 @@ pub fn run(opts: LaunchOptions) -> Result<(), Box<dyn std::error::Error>> {
     let load_result = load_config(opts.config_path.as_deref());
     let mut app_config = load_result.config;
     apply_cli_overrides(&mut app_config, &opts.overrides, true);
+    apply_window_launch_flags(&mut app_config, &opts);
     crate::diagnostics::logging::apply_log_level(app_config.diagnostics.log_level.as_deref());
     let process_cfg = merge_launch_options(&app_config, &opts);
     let startup_command = process_cfg.startup_command.clone();
@@ -862,6 +878,9 @@ pub fn run(opts: LaunchOptions) -> Result<(), Box<dyn std::error::Error>> {
 
     let watch_path: Option<PathBuf> = opts.config_path.as_deref().map(PathBuf::from);
     let watch_overrides = opts.overrides.clone();
+    let watch_window_size = opts.window_size;
+    let watch_maximized = opts.maximized;
+    let watch_fullscreen = opts.fullscreen;
     let config_watch = Arc::new(Mutex::new(crate::config::watch::WatchState::new(
         config_watch_mtime(watch_path.as_deref()),
     )));
@@ -878,6 +897,15 @@ pub fn run(opts: LaunchOptions) -> Result<(), Box<dyn std::error::Error>> {
                 match reload_config(watch_path.as_deref()) {
                     Ok(mut cfg) => {
                         apply_cli_overrides(&mut cfg, &watch_overrides, false);
+                        apply_window_launch_flags(
+                            &mut cfg,
+                            &LaunchOptions {
+                                window_size: watch_window_size,
+                                maximized: watch_maximized,
+                                fullscreen: watch_fullscreen,
+                                ..LaunchOptions::default()
+                            },
+                        );
                         let _ = proxy_cfg.send_event(UserEvent::ConfigReloaded(Box::new(cfg)));
                     }
                     Err(msg) => {
@@ -1072,6 +1100,33 @@ mod tests {
         assert_eq!(pc.args, default.args);
         assert_eq!(pc.working_directory, default.working_directory);
         assert_eq!(pc.login_shell, default.login_shell);
+    }
+
+    #[test]
+    fn window_size_cli_gana_a_config() {
+        let mut cfg = Config::default();
+        cfg.window.width = 800;
+        cfg.window.height = 600;
+        let opts = LaunchOptions {
+            window_size: Some((100, 30)),
+            ..LaunchOptions::default()
+        };
+        apply_window_launch_flags(&mut cfg, &opts);
+        let expected = cfg.window.size_from_cells(&cfg.font, 100, 30);
+        assert_eq!((cfg.window.width, cfg.window.height), expected);
+        assert_ne!(cfg.window.width, 800);
+    }
+
+    #[test]
+    fn fullscreen_gana_a_maximized() {
+        let mut cfg = Config::default();
+        let opts = LaunchOptions {
+            maximized: true,
+            fullscreen: true,
+            ..LaunchOptions::default()
+        };
+        apply_window_launch_flags(&mut cfg, &opts);
+        assert_eq!(cfg.window.startup, crate::config::StartupState::Fullscreen);
     }
 
     #[cfg(unix)]

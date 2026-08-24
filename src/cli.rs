@@ -15,7 +15,7 @@ pub const EXIT_ERR: i32 = 1;
 
 /// Texto de ayuda mostrado por `baud help` y ante un comando desconocido.
 pub const HELP_TEXT: &str =
-    "Usage: baud [OPTIONS] [COMMAND]\n\nCommands:\n  update    Update Baud to the latest release\n  version   Print the installed Baud version\n  mcp       Speak MCP over stdio to a running Baud instance\n  help      Show this help message\n\nOptions:\n  -e <command> [args...]            Execute command and its arguments in the PTY\n      --working-directory <dir>      Set the initial working directory for the child process\n      --title <text>                 Set the initial window title\n      --app-id <id>                  Set the Wayland app_id / X11 WM_CLASS instance\n      --hold                         Keep the window open after the command exits\n      --config <path>                Load config from this file instead of the default search path\n  -o <key=value>                     Override a config key (repeatable); invalid keys are skipped\n\n  mcp options:\n      --socket <path>                Control socket (default: newest instance in the runtime dir)\n      --list-tools                   Print the MCP tool catalog as JSON and exit\n\nAliases:\n  -v, --version    Print the installed Baud version\n  -h, --help       Show this help message\n";
+    "Usage: baud [OPTIONS] [COMMAND]\n\nCommands:\n  update    Update Baud to the latest release\n  version   Print the installed Baud version\n  mcp       Speak MCP over stdio to a running Baud instance\n  help      Show this help message\n\nOptions:\n  -e <command> [args...]            Execute command and its arguments in the PTY\n      --working-directory <dir>      Set the initial working directory for the child process\n      --title <text>                 Set the initial window title\n      --app-id <id>                  Set the Wayland app_id / X11 WM_CLASS instance\n      --hold                         Keep the window open after the command exits\n      --config <path>                Load config from this file instead of the default search path\n  -o <key=value>                     Override a config key (repeatable); invalid keys are skipped\n      --window-size <COLSxROWS>      Set the initial window size in terminal cells\n      --maximized                    Start the window maximized\n      --fullscreen                   Start the window in borderless fullscreen\n\n  mcp options:\n      --socket <path>                Control socket (default: newest instance in the runtime dir)\n      --list-tools                   Print the MCP tool catalog as JSON and exit\n\nAliases:\n  -v, --version    Print the installed Baud version\n  -h, --help       Show this help message\n";
 
 /// Mensaje de error ante un subcomando o flag no reconocido.
 pub const UNKNOWN_COMMAND: &str = "Error: unknown command. Run `baud help` for usage.\n";
@@ -51,6 +51,12 @@ pub struct LaunchOptions {
     pub config_path: Option<String>,
     /// Pares `clave=valor` de `-o`, en orden de aparición.
     pub overrides: Vec<String>,
+    /// Tamaño inicial en celdas (`COLSxROWS`).
+    pub window_size: Option<(u16, u16)>,
+    /// Arrancar maximizado.
+    pub maximized: bool,
+    /// Arrancar en pantalla completa sin bordes.
+    pub fullscreen: bool,
 }
 
 /// Comando interpretado a partir de los argumentos del proceso.
@@ -140,6 +146,17 @@ fn parse_flags(mut iter: impl Iterator<Item = OsString>) -> Command {
                 };
                 opts.overrides.push(value);
             }
+            "--window-size" => {
+                let Some(value) = iter.next().and_then(|s| s.into_string().ok()) else {
+                    return Command::Unknown;
+                };
+                let Some(size) = parse_window_size(&value) else {
+                    return Command::Unknown;
+                };
+                opts.window_size = Some(size);
+            }
+            "--maximized" => opts.maximized = true,
+            "--fullscreen" => opts.fullscreen = true,
             "-e" => {
                 let tail: Vec<String> = iter.map(|s| s.into_string().unwrap_or_default()).collect();
                 if tail.is_empty() {
@@ -159,6 +176,11 @@ fn parse_flags(mut iter: impl Iterator<Item = OsString>) -> Command {
                     opts.config_path = Some(value.to_string());
                 } else if let Some(value) = flag.strip_prefix("-o=") {
                     opts.overrides.push(value.to_string());
+                } else if let Some(value) = flag.strip_prefix("--window-size=") {
+                    let Some(size) = parse_window_size(value) else {
+                        return Command::Unknown;
+                    };
+                    opts.window_size = Some(size);
                 } else {
                     return Command::Unknown;
                 }
@@ -167,6 +189,17 @@ fn parse_flags(mut iter: impl Iterator<Item = OsString>) -> Command {
     }
 
     Command::LaunchGui(opts)
+}
+
+/// `COLSxROWS` en celdas; ambos lados enteros > 0. Solo `x` minúscula.
+fn parse_window_size(s: &str) -> Option<(u16, u16)> {
+    let (cols, rows) = s.split_once('x')?;
+    let cols: u16 = cols.parse().ok()?;
+    let rows: u16 = rows.parse().ok()?;
+    if cols == 0 || rows == 0 {
+        return None;
+    }
+    Some((cols, rows))
 }
 
 fn parse_mcp(mut iter: impl Iterator<Item = OsString>) -> Command {
@@ -330,6 +363,9 @@ mod tests {
         assert!(HELP_TEXT.contains("--app-id"));
         assert!(HELP_TEXT.contains("--config"));
         assert!(HELP_TEXT.contains("-o <key=value>"));
+        assert!(HELP_TEXT.contains("--window-size"));
+        assert!(HELP_TEXT.contains("--maximized"));
+        assert!(HELP_TEXT.contains("--fullscreen"));
         assert!(HELP_TEXT.contains("mcp"));
         assert!(HELP_TEXT.contains("--socket"));
     }
@@ -484,6 +520,45 @@ mod tests {
     #[test]
     fn o_sin_valor_es_unknown() {
         assert_eq!(parse_cmd(vec!["baud", "-o"]), Command::Unknown);
+    }
+
+    #[test]
+    fn window_size_en_ambas_formas() {
+        assert_eq!(
+            launch_opts(vec!["baud", "--window-size", "120x40"]).window_size,
+            Some((120, 40))
+        );
+        assert_eq!(
+            launch_opts(vec!["baud", "--window-size=80x24"]).window_size,
+            Some((80, 24))
+        );
+    }
+
+    #[test]
+    fn window_size_invalido_es_unknown() {
+        assert_eq!(
+            parse_cmd(vec!["baud", "--window-size", "120"]),
+            Command::Unknown
+        );
+        assert_eq!(
+            parse_cmd(vec!["baud", "--window-size", "120X40"]),
+            Command::Unknown
+        );
+        assert_eq!(
+            parse_cmd(vec!["baud", "--window-size", "0x40"]),
+            Command::Unknown
+        );
+        assert_eq!(parse_cmd(vec!["baud", "--window-size"]), Command::Unknown);
+    }
+
+    #[test]
+    fn maximized_y_fullscreen_parsean() {
+        let opts = launch_opts(vec!["baud", "--maximized"]);
+        assert!(opts.maximized);
+        assert!(!opts.fullscreen);
+        let opts = launch_opts(vec!["baud", "--fullscreen"]);
+        assert!(opts.fullscreen);
+        assert!(!opts.maximized);
     }
 
     #[test]

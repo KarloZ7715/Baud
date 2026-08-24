@@ -965,6 +965,20 @@ fn default_window_app_id() -> String {
 }
 
 impl WindowConfig {
+    /// Píxeles lógicos para un tamaño en celdas, usando la fuente ya cargada.
+    ///
+    /// El alto de celda es `font.size * line_height`. El ancho se aproxima a
+    /// 0.6 em (monoespaciada típica) para no bloquear el arranque esperando
+    /// al FontSystem.
+    pub fn size_from_cells(&self, font: &FontConfig, cols: u16, rows: u16) -> (u32, u32) {
+        const MONO_EM_WIDTH: f32 = 0.6;
+        let cell_h = f32::from(font.size) * font.line_height.max(0.1);
+        let cell_w = f32::from(font.size) * MONO_EM_WIDTH;
+        let w = (f32::from(cols) * cell_w + 2.0 * f32::from(self.padding_x)).round();
+        let h = (f32::from(rows) * cell_h + 2.0 * f32::from(self.padding_y)).round();
+        (w.max(1.0) as u32, h.max(1.0) as u32)
+    }
+
     /// CLI no vacia > config no vacia > `"baud"`. Nunca devuelve cadena vacia.
     pub fn resolve_app_id(&self, cli: Option<&str>) -> String {
         if let Some(id) = cli.map(str::trim).filter(|s| !s.is_empty()) {
@@ -2741,6 +2755,23 @@ import = "/ruta/que/no/existe/foot.ini"
         let toml = "[status]\nduration_ms = 4000\n";
         let p: Config = toml::from_str(toml).unwrap();
         assert_eq!(p.status.duration_ms, 4000);
+    }
+
+    #[test]
+    fn size_from_cells_usa_fuente_y_padding() {
+        let font = FontConfig {
+            size: 10,
+            line_height: 1.0,
+            ..FontConfig::default()
+        };
+        let window = WindowConfig {
+            padding_x: 2,
+            padding_y: 4,
+            ..WindowConfig::default()
+        };
+        let (w, h) = window.size_from_cells(&font, 10, 5);
+        // 10 * (10 * 0.6) + 4 = 64; 5 * 10 + 8 = 58
+        assert_eq!((w, h), (64, 58));
     }
 
     #[test]
