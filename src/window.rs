@@ -91,6 +91,11 @@ pub enum UserEvent {
         crate::remote::Request,
         std::sync::mpsc::Sender<crate::remote::Response>,
     ),
+    /// Pedido de tab (o primera ventana) desde el socket de spawn.
+    SpawnTab {
+        params: crate::spawn::SpawnParams,
+        tx: std::sync::mpsc::Sender<crate::remote::Response>,
+    },
 }
 
 fn winit_to_key(k: &Key) -> Option<KKey> {
@@ -936,6 +941,13 @@ impl App {
                 self.reconcile_theme();
             }
             UserEvent::Remote(req, tx) => self.handle_remote(req, tx),
+            UserEvent::SpawnTab { params: _, tx } => {
+                let _ = tx.send(crate::remote::Response::err(
+                    0,
+                    "not_ready",
+                    "spawn handler not wired",
+                ));
+            }
         }
         self.poll_remote_waits();
     }
@@ -5640,6 +5652,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::ConfigReloadFailed(_) => "UserEvent::ConfigReloadFailed",
             UserEvent::SystemColorScheme(_) => "UserEvent::SystemColorScheme",
             UserEvent::Remote(_, _) => "UserEvent::Remote",
+            UserEvent::SpawnTab { .. } => "UserEvent::SpawnTab",
         };
         let _guard = self.watchdog.enter(phase);
         self.dispatch_user_event(event);
