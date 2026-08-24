@@ -20,6 +20,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             std::process::exit(code)
         }
+        baud::cli::CliOutcome::SpawnClient(opts) => {
+            baud::diagnostics::hooks::install_panic_hook();
+            let _log_guard = baud::diagnostics::logging::init(attached_console);
+            tracing::info!("baud starting");
+            baud::event_loop::run(opts)?;
+            Ok(())
+        }
+        baud::cli::CliOutcome::RunServer {
+            config_path,
+            overrides,
+        } => {
+            baud::diagnostics::hooks::install_panic_hook();
+            let _log_guard = baud::diagnostics::logging::init(attached_console);
+            tracing::info!("baud starting");
+            let opts = baud::cli::LaunchOptions {
+                config_path,
+                overrides,
+                ..baud::cli::LaunchOptions::default()
+            };
+            baud::event_loop::run(opts)?;
+            Ok(())
+        }
         baud::cli::CliOutcome::LaunchGui(opts) => {
             baud::diagnostics::hooks::install_panic_hook();
             let _log_guard = baud::diagnostics::logging::init(attached_console);

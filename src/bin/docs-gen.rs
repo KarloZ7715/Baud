@@ -714,7 +714,7 @@ fn render_man_page() -> String {
     out.push_str(".SH DESCRIPTION\n");
     out.push_str(&format!("{}\n", escape_roff(description)));
     out.push_str(
-        "With no arguments, baud launches the graphical terminal. The commands and \
+        "With no arguments, baud asks the session daemon to open a tab. The commands and \
          options below are resolved before the graphical backend starts, so they also \
          work in a broken graphical session.\n",
     );

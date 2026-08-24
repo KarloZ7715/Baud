@@ -10,6 +10,8 @@ _arguments -s -S \
   '--window-size[Set the initial window size in terminal cells]:COLSxROWS:' \
   '--maximized[Start the window maximized]' \
   '--fullscreen[Start the window in borderless fullscreen]' \
+  '--server[Run the session daemon in the foreground]' \
+  '--new-instance[Open a GUI that does not talk to the daemon]' \
   '*-o[Override a config key (repeatable)]:key=value:' \
   '(-v --version)'{-v,--version}'[Print the installed Baud version]' \
   '(-h --help)'{-h,--help}'[Show this help message]' \

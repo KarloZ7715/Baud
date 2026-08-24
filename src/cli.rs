@@ -1,6 +1,6 @@
 //! Interfaz de linea de comandos no interactiva de Baud.
 //!
-//! `baud` sin argumentos continua lanzando la interfaz grafica. Los comandos
+//! `baud` sin argumentos es un cliente corto del daemon de sesion. Los comandos
 //! `update`, `version` y `help` (y sus alias) se resuelen antes de inicializar
 //! winit, tracing o el reportador de panics, para que funcionen en sesiones
 //! graficas rotas y nunca abran una ventana.
@@ -15,17 +15,24 @@ pub const EXIT_ERR: i32 = 1;
 
 /// Texto de ayuda mostrado por `baud help` y ante un comando desconocido.
 pub const HELP_TEXT: &str =
-    "Usage: baud [OPTIONS] [COMMAND]\n\nCommands:\n  update    Update Baud to the latest release\n  version   Print the installed Baud version\n  mcp       Speak MCP over stdio to a running Baud instance\n  help      Show this help message\n\nOptions:\n  -e <command> [args...]            Execute command and its arguments in the PTY\n      --working-directory <dir>      Set the initial working directory for the child process\n      --title <text>                 Set the initial window title\n      --app-id <id>                  Set the Wayland app_id / X11 WM_CLASS instance\n      --hold                         Keep the window open after the command exits\n      --config <path>                Load config from this file instead of the default search path\n  -o <key=value>                     Override a config key (repeatable); invalid keys are skipped\n      --window-size <COLSxROWS>      Set the initial window size in terminal cells\n      --maximized                    Start the window maximized\n      --fullscreen                   Start the window in borderless fullscreen\n\n  mcp options:\n      --socket <path>                Control socket (default: newest instance in the runtime dir)\n      --list-tools                   Print the MCP tool catalog as JSON and exit\n\nAliases:\n  -v, --version    Print the installed Baud version\n  -h, --help       Show this help message\n";
+    "Usage: baud [OPTIONS] [COMMAND]\n\nCommands:\n  update    Update Baud to the latest release\n  version   Print the installed Baud version\n  mcp       Speak MCP over stdio to a running Baud instance\n  help      Show this help message\n\nOptions:\n  -e <command> [args...]            Execute command and its arguments in the PTY\n      --working-directory <dir>      Set the initial working directory for the child process\n      --title <text>                 Set the initial window title\n      --app-id <id>                  Set the Wayland app_id / X11 WM_CLASS instance\n      --hold                         Keep the window open after the command exits\n      --config <path>                Load config from this file instead of the default search path\n  -o <key=value>                     Override a config key (repeatable); invalid keys are skipped\n      --window-size <COLSxROWS>      Set the initial window size in terminal cells\n      --maximized                    Start the window maximized\n      --fullscreen                   Start the window in borderless fullscreen\n      --server                       Run the session daemon in the foreground\n      --new-instance                 Open a GUI that does not talk to the daemon\n\n  mcp options:\n      --socket <path>                Control socket (default: newest instance in the runtime dir)\n      --list-tools                   Print the MCP tool catalog as JSON and exit\n\nAliases:\n  -v, --version    Print the installed Baud version\n  -h, --help       Show this help message\n";
 
 /// Mensaje de error ante un subcomando o flag no reconocido.
 pub const UNKNOWN_COMMAND: &str = "Error: unknown command. Run `baud help` for usage.\n";
 
-/// Resultado de evaluar la CLI: salir inmediatamente o lanzar la GUI.
+/// Resultado de evaluar la CLI: salir, hablar con el daemon, o lanzar GUI.
 #[derive(Debug, PartialEq, Eq)]
 pub enum CliOutcome {
     /// Salir del proceso con el codigo indicado.
     Exit(i32),
-    /// Lanzar la aplicacion grafica con las opciones de arranque dadas.
+    /// Cliente corto: pide una tab al daemon y sale.
+    SpawnClient(LaunchOptions),
+    /// Daemon de sesion en primer plano (`--server`).
+    RunServer {
+        config_path: Option<String>,
+        overrides: Vec<String>,
+    },
+    /// Lanzar la aplicacion grafica sin hablar con el daemon (`--new-instance`).
     LaunchGui(LaunchOptions),
     /// Hablar MCP por stdio contra una instancia con remote_control.
     RunMcp {
@@ -57,6 +64,8 @@ pub struct LaunchOptions {
     pub maximized: bool,
     /// Arrancar en pantalla completa sin bordes.
     pub fullscreen: bool,
+    /// No hablar con el daemon: proceso GUI clasico.
+    pub new_instance: bool,
 }
 
 /// Comando interpretado a partir de los argumentos del proceso.
@@ -74,6 +83,11 @@ pub enum Command {
     Mcp {
         socket: Option<String>,
         list_tools: bool,
+    },
+    /// Daemon de sesion en primer plano.
+    Server {
+        config_path: Option<String>,
+        overrides: Vec<String>,
     },
     /// Subcomando o flag no reconocido.
     Unknown,
@@ -108,6 +122,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Command {
 
 fn parse_flags(mut iter: impl Iterator<Item = OsString>) -> Command {
     let mut opts = LaunchOptions::default();
+    let mut server = false;
 
     while let Some(arg) = iter.next() {
         let Some(flag) = arg.to_str() else {
@@ -157,13 +172,15 @@ fn parse_flags(mut iter: impl Iterator<Item = OsString>) -> Command {
             }
             "--maximized" => opts.maximized = true,
             "--fullscreen" => opts.fullscreen = true,
+            "--server" => server = true,
+            "--new-instance" => opts.new_instance = true,
             "-e" => {
                 let tail: Vec<String> = iter.map(|s| s.into_string().unwrap_or_default()).collect();
                 if tail.is_empty() {
                     return Command::Unknown;
                 }
                 opts.command = Some(tail);
-                return Command::LaunchGui(opts);
+                break;
             }
             _ => {
                 if let Some(value) = flag.strip_prefix("--working-directory=") {
@@ -188,6 +205,12 @@ fn parse_flags(mut iter: impl Iterator<Item = OsString>) -> Command {
         }
     }
 
+    if server {
+        return Command::Server {
+            config_path: opts.config_path,
+            overrides: opts.overrides,
+        };
+    }
     Command::LaunchGui(opts)
 }
 
@@ -231,12 +254,24 @@ fn parse_mcp(mut iter: impl Iterator<Item = OsString>) -> Command {
 
 /// Ejecuta el comando correspondiente a los argumentos del proceso.
 ///
-/// Devuelve `Ok(CliOutcome::Exit(code))` cuando el comando termina el proceso
-/// sin iniciar la GUI, y `Ok(CliOutcome::LaunchGui(opts))` cuando debe continuar
-/// el lanzamiento grafico.
+/// Devuelve `Exit` cuando el comando termina el proceso, `SpawnClient` para
+/// `baud` sin `--new-instance`, `RunServer` para `--server`, y `LaunchGui`
+/// para el escape `--new-instance`.
 pub fn run() -> Result<CliOutcome, Box<dyn std::error::Error>> {
-    match parse(env::args_os()) {
-        Command::LaunchGui(opts) => Ok(CliOutcome::LaunchGui(opts)),
+    outcome_from(parse(env::args_os()))
+}
+
+fn outcome_from(cmd: Command) -> Result<CliOutcome, Box<dyn std::error::Error>> {
+    match cmd {
+        Command::LaunchGui(opts) if opts.new_instance => Ok(CliOutcome::LaunchGui(opts)),
+        Command::LaunchGui(opts) => Ok(CliOutcome::SpawnClient(opts)),
+        Command::Server {
+            config_path,
+            overrides,
+        } => Ok(CliOutcome::RunServer {
+            config_path,
+            overrides,
+        }),
         Command::Help => {
             print!("{}", HELP_TEXT);
             Ok(CliOutcome::Exit(EXIT_OK))
@@ -366,8 +401,37 @@ mod tests {
         assert!(HELP_TEXT.contains("--window-size"));
         assert!(HELP_TEXT.contains("--maximized"));
         assert!(HELP_TEXT.contains("--fullscreen"));
+        assert!(HELP_TEXT.contains("--server"));
+        assert!(HELP_TEXT.contains("--new-instance"));
         assert!(HELP_TEXT.contains("mcp"));
         assert!(HELP_TEXT.contains("--socket"));
+    }
+
+    #[test]
+    fn server_flag_should_select_server_command() {
+        assert!(matches!(
+            parse_cmd(vec!["baud", "--server"]),
+            Command::Server { .. }
+        ));
+    }
+
+    #[test]
+    fn new_instance_flag_should_set_launch_option() {
+        let opts = launch_opts(vec!["baud", "--new-instance"]);
+        assert!(opts.new_instance);
+    }
+
+    #[test]
+    fn run_without_flags_should_be_spawn_client() {
+        assert!(matches!(run_from(vec!["baud"]), CliOutcome::SpawnClient(_)));
+    }
+
+    #[test]
+    fn server_flag_wins_over_new_instance() {
+        assert!(matches!(
+            parse_cmd(vec!["baud", "--server", "--new-instance"]),
+            Command::Server { .. }
+        ));
     }
 
     #[test]
@@ -593,6 +657,8 @@ mod tests {
             "--window-size",
             "--maximized",
             "--fullscreen",
+            "--server",
+            "--new-instance",
             "-o",
             "-e",
         ];
@@ -631,13 +697,9 @@ mod tests {
     }
 
     fn run_from(args: Vec<&str>) -> CliOutcome {
-        match parse(args.into_iter().map(OsString::from).collect::<Vec<_>>()) {
-            Command::LaunchGui(opts) => CliOutcome::LaunchGui(opts),
-            Command::Help => CliOutcome::Exit(EXIT_OK),
-            Command::Version => CliOutcome::Exit(EXIT_OK),
-            Command::Unknown => CliOutcome::Exit(EXIT_ERR),
-            Command::Update => CliOutcome::Exit(EXIT_OK),
-            Command::Mcp { socket, list_tools } => CliOutcome::RunMcp { socket, list_tools },
-        }
+        outcome_from(parse(
+            args.into_iter().map(OsString::from).collect::<Vec<_>>(),
+        ))
+        .expect("outcome")
     }
 }

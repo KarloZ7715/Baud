@@ -29,7 +29,7 @@ _baud() {
     esac
 
     if [[ "$cur" == -* ]]; then
-        COMPREPLY=($(compgen -W "-e --working-directory --title --app-id --hold --config --window-size --maximized --fullscreen -o -v --version -h --help --socket --list-tools" -- "$cur"))
+        COMPREPLY=($(compgen -W "-e --working-directory --title --app-id --hold --config --window-size --maximized --fullscreen --server --new-instance -o -v --version -h --help --socket --list-tools" -- "$cur"))
         return 0
     fi
 

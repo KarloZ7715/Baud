@@ -6,7 +6,7 @@ baud \- A fast, feature\-rich, GPU\-accelerated, cross\-platform terminal emulat
 [\fIOPTIONS\fR] [\fICOMMAND\fR]
 .SH DESCRIPTION
 A fast, feature\-rich, GPU\-accelerated, cross\-platform terminal emulator
-With no arguments, baud launches the graphical terminal. The commands and options below are resolved before the graphical backend starts, so they also work in a broken graphical session.
+With no arguments, baud asks the session daemon to open a tab. The commands and options below are resolved before the graphical backend starts, so they also work in a broken graphical session.
 .SH OPTIONS
 .TP
 \fBupdate\fR
@@ -50,6 +50,12 @@ Start the window maximized
 .TP
 \fB\-\-fullscreen\fR
 Start the window in borderless fullscreen
+.TP
+\fB\-\-server\fR
+Run the session daemon in the foreground
+.TP
+\fB\-\-new\-instance\fR
+Open a GUI that does not talk to the daemon
 .TP
 \fB\-v, \-\-version\fR
 Print the installed Baud version

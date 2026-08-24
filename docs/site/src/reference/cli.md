@@ -26,6 +26,8 @@ Options:
       --window-size <COLSxROWS>      Set the initial window size in terminal cells
       --maximized                    Start the window maximized
       --fullscreen                   Start the window in borderless fullscreen
+      --server                       Run the session daemon in the foreground
+      --new-instance                 Open a GUI that does not talk to the daemon
 
   mcp options:
       --socket <path>                Control socket (default: newest instance in the runtime dir)

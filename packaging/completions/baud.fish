@@ -1,5 +1,5 @@
 # fish completion for baud
-# -e --working-directory --title --app-id --hold --config --window-size --maximized --fullscreen -o
+# -e --working-directory --title --app-id --hold --config --window-size --maximized --fullscreen --server --new-instance -o
 
 function __baud_no_e
     not contains -- -e (commandline -opc)
@@ -19,6 +19,8 @@ complete -c baud -n __baud_no_e -l config -d "Load config from this file" -r
 complete -c baud -n __baud_no_e -l window-size -d "Set the initial window size in terminal cells" -r
 complete -c baud -n __baud_no_e -l maximized -d "Start the window maximized"
 complete -c baud -n __baud_no_e -l fullscreen -d "Start the window in borderless fullscreen"
+complete -c baud -n __baud_no_e -l server -d "Run the session daemon in the foreground"
+complete -c baud -n __baud_no_e -l new-instance -d "Open a GUI that does not talk to the daemon"
 complete -c baud -n __baud_no_e -s o -d "Override a config key (repeatable)" -r
 complete -c baud -n __baud_no_e -s v -l version -d "Print the installed Baud version"
 complete -c baud -n __baud_no_e -s h -l help -d "Show this help message"
