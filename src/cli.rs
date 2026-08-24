@@ -15,7 +15,7 @@ pub const EXIT_ERR: i32 = 1;
 
 /// Texto de ayuda mostrado por `baud help` y ante un comando desconocido.
 pub const HELP_TEXT: &str =
-    "Usage: baud [OPTIONS] [COMMAND]\n\nCommands:\n  update    Update Baud to the latest release\n  version   Print the installed Baud version\n  mcp       Speak MCP over stdio to a running Baud instance\n  help      Show this help message\n\nOptions:\n  -e <command> [args...]            Execute command and its arguments in the PTY\n      --working-directory <dir>      Set the initial working directory for the child process\n      --title <text>                 Set the initial window title\n      --app-id <id>                  Set the Wayland app_id / X11 WM_CLASS instance\n      --hold                         Keep the window open after the command exits\n\n  mcp options:\n      --socket <path>                Control socket (default: newest instance in the runtime dir)\n      --list-tools                   Print the MCP tool catalog as JSON and exit\n\nAliases:\n  -v, --version    Print the installed Baud version\n  -h, --help       Show this help message\n";
+    "Usage: baud [OPTIONS] [COMMAND]\n\nCommands:\n  update    Update Baud to the latest release\n  version   Print the installed Baud version\n  mcp       Speak MCP over stdio to a running Baud instance\n  help      Show this help message\n\nOptions:\n  -e <command> [args...]            Execute command and its arguments in the PTY\n      --working-directory <dir>      Set the initial working directory for the child process\n      --title <text>                 Set the initial window title\n      --app-id <id>                  Set the Wayland app_id / X11 WM_CLASS instance\n      --hold                         Keep the window open after the command exits\n      --config <path>                Load config from this file instead of the default search path\n  -o <key=value>                     Override a config key (repeatable); invalid keys are skipped\n\n  mcp options:\n      --socket <path>                Control socket (default: newest instance in the runtime dir)\n      --list-tools                   Print the MCP tool catalog as JSON and exit\n\nAliases:\n  -v, --version    Print the installed Baud version\n  -h, --help       Show this help message\n";
 
 /// Mensaje de error ante un subcomando o flag no reconocido.
 pub const UNKNOWN_COMMAND: &str = "Error: unknown command. Run `baud help` for usage.\n";
@@ -47,6 +47,10 @@ pub struct LaunchOptions {
     pub app_id: Option<String>,
     /// Mantener la ventana abierta tras salir el proceso hijo.
     pub hold: bool,
+    /// Ruta explícita de config (`--config`). None = búsqueda por defecto.
+    pub config_path: Option<String>,
+    /// Pares `clave=valor` de `-o`, en orden de aparición.
+    pub overrides: Vec<String>,
 }
 
 /// Comando interpretado a partir de los argumentos del proceso.
@@ -124,6 +128,18 @@ fn parse_flags(mut iter: impl Iterator<Item = OsString>) -> Command {
                 opts.app_id = Some(value);
             }
             "--hold" => opts.hold = true,
+            "--config" => {
+                let Some(value) = iter.next().and_then(|s| s.into_string().ok()) else {
+                    return Command::Unknown;
+                };
+                opts.config_path = Some(value);
+            }
+            "-o" => {
+                let Some(value) = iter.next().and_then(|s| s.into_string().ok()) else {
+                    return Command::Unknown;
+                };
+                opts.overrides.push(value);
+            }
             "-e" => {
                 let tail: Vec<String> = iter.map(|s| s.into_string().unwrap_or_default()).collect();
                 if tail.is_empty() {
@@ -139,6 +155,10 @@ fn parse_flags(mut iter: impl Iterator<Item = OsString>) -> Command {
                     opts.title = Some(value.to_string());
                 } else if let Some(value) = flag.strip_prefix("--app-id=") {
                     opts.app_id = Some(value.to_string());
+                } else if let Some(value) = flag.strip_prefix("--config=") {
+                    opts.config_path = Some(value.to_string());
+                } else if let Some(value) = flag.strip_prefix("-o=") {
+                    opts.overrides.push(value.to_string());
                 } else {
                     return Command::Unknown;
                 }
@@ -308,6 +328,8 @@ mod tests {
         assert!(HELP_TEXT.contains("--working-directory"));
         assert!(HELP_TEXT.contains("--title"));
         assert!(HELP_TEXT.contains("--app-id"));
+        assert!(HELP_TEXT.contains("--config"));
+        assert!(HELP_TEXT.contains("-o <key=value>"));
         assert!(HELP_TEXT.contains("mcp"));
         assert!(HELP_TEXT.contains("--socket"));
     }
@@ -422,6 +444,46 @@ mod tests {
     fn hold_flag_parsea() {
         let opts = launch_opts(vec!["baud", "--hold"]);
         assert!(opts.hold);
+    }
+
+    #[test]
+    fn config_flag_en_ambas_formas() {
+        assert_eq!(
+            launch_opts(vec!["baud", "--config", "/tmp/a.toml"])
+                .config_path
+                .as_deref(),
+            Some("/tmp/a.toml")
+        );
+        assert_eq!(
+            launch_opts(vec!["baud", "--config=/tmp/a.toml"])
+                .config_path
+                .as_deref(),
+            Some("/tmp/a.toml")
+        );
+    }
+
+    #[test]
+    fn config_sin_valor_es_unknown() {
+        assert_eq!(parse_cmd(vec!["baud", "--config"]), Command::Unknown);
+    }
+
+    #[test]
+    fn overrides_repetibles_en_orden() {
+        let opts = launch_opts(vec![
+            "baud",
+            "-o",
+            "window.opacity=1.0",
+            "-o",
+            "font.size=13",
+        ]);
+        assert_eq!(opts.overrides, vec!["window.opacity=1.0", "font.size=13"]);
+        let opts = launch_opts(vec!["baud", "-o=window.opacity=0.5"]);
+        assert_eq!(opts.overrides, vec!["window.opacity=0.5"]);
+    }
+
+    #[test]
+    fn o_sin_valor_es_unknown() {
+        assert_eq!(parse_cmd(vec!["baud", "-o"]), Command::Unknown);
     }
 
     #[test]

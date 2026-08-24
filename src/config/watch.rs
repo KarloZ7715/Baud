@@ -64,6 +64,11 @@ impl WatchState {
     }
 }
 
+/// mtime de un archivo concreto, si existe y el SO lo reporta.
+pub fn mtime_of(path: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
+}
+
 /// mtime del primer archivo de config existente (mismo orden que [`super::Config::load`]).
 pub fn config_mtime() -> Option<SystemTime> {
     let paths = [
@@ -72,14 +77,7 @@ pub fn config_mtime() -> Option<SystemTime> {
             .unwrap_or_default(),
         std::path::PathBuf::from("baud.toml"),
     ];
-    for path in &paths {
-        if let Ok(meta) = std::fs::metadata(path) {
-            if let Ok(mtime) = meta.modified() {
-                return Some(mtime);
-            }
-        }
-    }
-    None
+    paths.iter().find_map(|path| mtime_of(path))
 }
 
 #[cfg(test)]

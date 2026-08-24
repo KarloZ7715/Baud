@@ -8,6 +8,7 @@
 
 use std::collections::VecDeque;
 use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -789,13 +790,47 @@ fn merge_launch_options(cfg: &Config, opts: &LaunchOptions) -> ProcessConfig {
     process_cfg
 }
 
+/// Aplica `-o` sobre la config cargada. Los errores van a stderr en arranque
+/// y a tracing en recarga; nunca abortan.
+fn apply_cli_overrides(cfg: &mut Config, overrides: &[String], to_stderr: bool) {
+    for err in cfg.apply_overrides(overrides) {
+        let msg = format!("config override '{}': {}", err.pair, err.message);
+        if to_stderr {
+            eprintln!("Error: {msg}");
+        }
+        tracing::warn!("{msg}");
+    }
+}
+
+fn load_config(config_path: Option<&str>) -> crate::config::LoadResult {
+    match config_path {
+        Some(path) => Config::load_from_explicit(Path::new(path)),
+        None => Config::load(),
+    }
+}
+
+fn reload_config(config_path: Option<&Path>) -> Result<Config, String> {
+    match config_path {
+        Some(path) => Config::try_load_from_explicit(path),
+        None => Config::try_load_from_disk(),
+    }
+}
+
+fn config_watch_mtime(config_path: Option<&Path>) -> Option<std::time::SystemTime> {
+    match config_path {
+        Some(path) => crate::config::watch::mtime_of(path),
+        None => crate::config::watch::config_mtime(),
+    }
+}
+
 /// Punto de entrada del event loop.
 ///
 /// Crea el PTY, lanza el shell configurado, y arranca los hilos necesarios.
 /// Retorna cuando se cierra la ventana (event_loop.exit()).
 pub fn run(opts: LaunchOptions) -> Result<(), Box<dyn std::error::Error>> {
-    let load_result = Config::load();
-    let app_config = load_result.config;
+    let load_result = load_config(opts.config_path.as_deref());
+    let mut app_config = load_result.config;
+    apply_cli_overrides(&mut app_config, &opts.overrides, true);
     crate::diagnostics::logging::apply_log_level(app_config.diagnostics.log_level.as_deref());
     let process_cfg = merge_launch_options(&app_config, &opts);
     let startup_command = process_cfg.startup_command.clone();
@@ -825,8 +860,10 @@ pub fn run(opts: LaunchOptions) -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&blink_focus),
     );
 
+    let watch_path: Option<PathBuf> = opts.config_path.as_deref().map(PathBuf::from);
+    let watch_overrides = opts.overrides.clone();
     let config_watch = Arc::new(Mutex::new(crate::config::watch::WatchState::new(
-        crate::config::watch::config_mtime(),
+        config_watch_mtime(watch_path.as_deref()),
     )));
     if let Ok(mut watch) = config_watch.lock() {
         watch.set_import_targets(app_config.theme_import_watch_paths.clone());
@@ -835,11 +872,12 @@ pub fn run(opts: LaunchOptions) -> Result<(), Box<dyn std::error::Error>> {
     let proxy_cfg = proxy.clone();
     thread::spawn(move || loop {
         thread::sleep(Duration::from_millis(1000));
-        let now = crate::config::watch::config_mtime();
+        let now = config_watch_mtime(watch_path.as_deref());
         if let Ok(mut state) = watch_for_thread.lock() {
             if state.changed(now) {
-                match Config::try_load_from_disk() {
-                    Ok(cfg) => {
+                match reload_config(watch_path.as_deref()) {
+                    Ok(mut cfg) => {
+                        apply_cli_overrides(&mut cfg, &watch_overrides, false);
                         let _ = proxy_cfg.send_event(UserEvent::ConfigReloaded(Box::new(cfg)));
                     }
                     Err(msg) => {

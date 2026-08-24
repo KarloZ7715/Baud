@@ -19,6 +19,7 @@
 //! `4.5` piso de cuerpo de texto (WCAG AA). Rango útil 1.0–21.0, valores fuera
 //! se ajustan al límite con un warning.
 
+mod overrides;
 pub mod persist;
 pub mod theme_import;
 mod themes;
@@ -30,6 +31,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 pub use crate::color::contrast_ratio_hex as contrast_ratio;
+pub use overrides::OverrideError;
 pub use themes::MIN_COMMENT_CONTRAST;
 pub use themes::{
     available_presets, preset, preset_entries, preset_polarity, try_preset, PresetError,
@@ -1616,6 +1618,11 @@ impl Config {
         Self::load_from_paths(&paths)
     }
 
+    /// Carga solo desde `path`. No busca en las rutas por defecto.
+    pub fn load_from_explicit(path: &std::path::Path) -> LoadResult {
+        Self::load_from_paths(&[path.to_path_buf()])
+    }
+
     /// Carga config desde una lista de paths en orden de prioridad.
     pub fn load_from_paths(paths: &[std::path::PathBuf]) -> LoadResult {
         for path in paths {
@@ -1690,6 +1697,21 @@ impl Config {
         }
 
         Ok(Self::default())
+    }
+
+    /// Recarga desde una ruta explícita (`--config`). Si el archivo no existe
+    /// o falla, el llamante conserva la config en memoria.
+    pub fn try_load_from_explicit(path: &std::path::Path) -> Result<Self, String> {
+        if path.as_os_str().is_empty() {
+            return Err("ruta de config vacia".into());
+        }
+        if !path.exists() {
+            return Err(format!("no se pudo leer '{}': no existe", path.display()));
+        }
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("no se pudo leer '{}': {e}", path.display()))?;
+        toml::from_str::<Config>(&content)
+            .map_err(|e| format!("error al parsear '{}': {e}", path.display()))
     }
 }
 
@@ -2740,6 +2762,12 @@ import = "/ruta/que/no/existe/foot.ini"
         writeln!(f, "theme = \"claude-dark\"").unwrap();
         let r = Config::load_from_paths(&[valid]);
         assert!(matches!(r.source, ConfigSource::Ok));
+    }
+
+    #[test]
+    fn load_from_explicit_no_cae_a_otras_rutas() {
+        let r = Config::load_from_explicit(std::path::Path::new("/tmp/baud_no_existe.toml"));
+        assert!(matches!(r.source, ConfigSource::NotFound));
     }
 
     #[test]
