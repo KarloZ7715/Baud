@@ -1426,8 +1426,11 @@ impl App {
         if let Ok(mut watch) = self.config_watch.lock() {
             watch.set_import_targets(self.config.theme_import_watch_paths.clone());
         }
-        if let Ok(mut guard) = self.focused_term().try_lock() {
-            guard.mark_dirty();
+        // Sin tabs (daemon a la espera o parked) no hay term que marcar.
+        if !self.tabs.is_empty() {
+            if let Ok(mut guard) = self.focused_term().try_lock() {
+                guard.mark_dirty();
+            }
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -6111,10 +6114,9 @@ mod tests {
         )
     }
 
-    #[test]
-    fn app_new_should_allow_zero_sessions() {
+    fn test_app_empty() -> App {
         let id = SessionId::next();
-        let app = App::new(
+        App::new(
             vec![],
             Config::default(),
             test_config_watch(),
@@ -6124,8 +6126,20 @@ mod tests {
             EventLoopWatchdog::noop(),
             None,
             None,
-        );
+        )
+    }
+
+    #[test]
+    fn app_new_should_allow_zero_sessions() {
+        assert_eq!(test_app_empty().session_count(), 0);
+    }
+
+    #[test]
+    fn reconcile_theme_con_cero_sesiones_no_paniquea() {
+        let mut app = test_app_empty();
+        app.dispatch_user_event(UserEvent::SystemColorScheme(ColorScheme::Dark));
         assert_eq!(app.session_count(), 0);
+        assert_eq!(app.system_color_scheme, Some(ColorScheme::Dark));
     }
 
     fn test_app_with_pty(term: Arc<Mutex<Term>>) -> (App, mpsc::Receiver<PtyCommand>) {
