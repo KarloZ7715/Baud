@@ -6,6 +6,36 @@ Full documentation is published at <https://karloz7715.github.io/Baud/>.
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/KarloZ7715/Baud/compare/v0.1.2...v0.1.3) - 2026-08-25
+
+### Added
+
+- *(cli)* add --config and repeatable -o key=value overrides
+- *(cli)* add --window-size, --maximized and --fullscreen
+- *(spawn)* add exclusive bind for the user spawn socket
+- *(spawn)* accept hello and new_tab on the spawn socket
+- *(cli)* add --server and --new-instance
+- *(spawn)* make baud a short-lived spawn client
+- *(spawn)* run a daemon event loop that waits for new_tab
+- *(spawn)* keep gpu and fonts when the last tab closes
+- *(graphics)* parse APC graphics protocol and store placements
+- *(renderer)* draw graphics placements as textured quads
+- *(pty)* report cell pixel size in winsize and CSI 14/16t
+- *(graphics)* document the supported subset and add a detection e2e
+
+### Fixed
+
+- *(spawn)* skip focused term when reconciling theme with no tabs
+- *(graphics)* ignore echoed protocol replies so they do not loop
+- *(ansi)* use slice fill for row continuations and tab stops
+- *(spawn)* launch GUI tests and smoke with --new-instance
+- *(grid)* stream reflow overflow instead of keeping every wrapped row
+
+### Packaging
+
+- *(packaging)* ship shell completions and a man page
+- *(packaging)* autostart the Baud daemon on login
+
 ## [0.1.2](https://github.com/KarloZ7715/Baud/compare/v0.1.1...v0.1.2) - 2026-08-16
 
 ### Added
