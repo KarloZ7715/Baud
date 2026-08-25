@@ -1755,9 +1755,7 @@ impl Term {
                 self.prompt_marks.clear();
                 self.last_reconciled_trim = self.grid.scrollback_trimmed;
             } else if !reflow && new_cols != old_cols {
-                for c in &mut self.grid.row_continuations {
-                    *c = false;
-                }
+                self.grid.row_continuations.fill(false);
             }
             let (from_top, pulled) =
                 self.grid
@@ -3091,9 +3089,7 @@ impl vte::Perform for Term {
                         }
                     }
                     3 => {
-                        for stop in &mut self.tab_stops {
-                            *stop = false;
-                        }
+                        self.tab_stops.fill(false);
                     }
                     _ => {}
                 }
