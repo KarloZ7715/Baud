@@ -488,6 +488,18 @@ pub struct App {
     font_thread: Option<std::thread::JoinHandle<glyphon::FontSystem>>,
     /// Listener de spawn. Vive con el event loop del daemon.
     spawn_server: Option<crate::spawn::server::SpawnServerHandle>,
+    /// GPU y fuentes retenidos a cero ventanas.
+    gpu: Option<GpuContext>,
+}
+
+/// Device, fuentes e instance vivos sin surface. `adapter` hace falta para
+/// reconfigurar una surface nueva; wgpu no lo expone desde el device.
+struct GpuContext {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    font_system: Option<glyphon::FontSystem>,
 }
 
 fn path_to_file_url(path: &std::path::Path) -> String {
@@ -660,6 +672,7 @@ impl App {
             linger: false,
             font_thread: None,
             spawn_server: None,
+            gpu: None,
         }
     }
 
@@ -829,8 +842,12 @@ impl App {
                                 ));
                             }
                         } else if close_on_exit {
-                            self.request_exit(ExitReason::SessionExited(code));
-                            return;
+                            if self.linger {
+                                self.close_tab_at(self.focused);
+                            } else {
+                                self.request_exit(ExitReason::SessionExited(code));
+                                return;
+                            }
                         } else if let Some(renderer) = &mut self.renderer {
                             renderer.set_status(&format!("[Proceso terminado: codigo {}]", code));
                         }
@@ -870,8 +887,12 @@ impl App {
                                 renderer.set_status("[process ended]");
                             }
                         } else if close_on_exit {
-                            self.request_exit(ExitReason::SessionExited(-1));
-                            return;
+                            if self.linger {
+                                self.close_tab_at(self.focused);
+                            } else {
+                                self.request_exit(ExitReason::SessionExited(-1));
+                                return;
+                            }
                         } else if let Some(renderer) = &mut self.renderer {
                             renderer.set_status("[process ended]");
                         }
@@ -1169,6 +1190,28 @@ impl App {
         self.remote_server.take();
         self.renderer.take();
         event_loop.exit();
+    }
+
+    /// Cierra sesiones y surface; retiene GPU y el socket de spawn.
+    fn park_window(&mut self) {
+        for host in &mut self.sessions {
+            host.shutdown_pty();
+        }
+        self.detached_hosts.append(&mut self.sessions);
+        self.tabs.clear();
+        self.focused = 0;
+        self.tab_hover = None;
+        self.tab_hover_display = None;
+        self.tab_close_tab = None;
+        if let Some(renderer) = self.renderer.take() {
+            let (_device, _queue, font_system) = renderer.dismantle();
+            if let Some(gpu) = &mut self.gpu {
+                gpu.font_system = Some(font_system);
+            }
+        }
+        self.window = None;
+        self.pending_exit = None;
+        self.occluded = false;
     }
 
     fn is_focused_session(&self, id: SessionId) -> bool {
@@ -1939,12 +1982,17 @@ impl App {
         // El escaneo de fuentes del sistema no depende de la GPU: arrancar el
         // hilo ya mismo lo solapa con la negociacion de adapter/device de wgpu
         // en vez de esperar a que termine antes de tocar wgpu.
-        let font_thread = self.font_thread.take().unwrap_or_else(|| {
-            let font_fallback = self.config.font.fallback.clone();
-            std::thread::spawn(move || {
-                crate::renderer::create_font_system_with_fallback(&font_fallback)
-            })
-        });
+        let reuse_fonts = self.gpu.as_ref().is_some_and(|g| g.font_system.is_some());
+        let font_thread = if reuse_fonts {
+            None
+        } else {
+            Some(self.font_thread.take().unwrap_or_else(|| {
+                let font_fallback = self.config.font.fallback.clone();
+                std::thread::spawn(move || {
+                    crate::renderer::create_font_system_with_fallback(&font_fallback)
+                })
+            }))
+        };
 
         // 1. Crear ventana.
         let t_window = Instant::now();
@@ -2052,208 +2100,261 @@ impl App {
             }
         }
 
-        // 2. Obtener display handle para wgpu (evita el lifetime de ActiveEventLoop).
-        let display_handle = event_loop.owned_display_handle();
-
-        // 3. Inicializar wgpu: instance, adapter, device, queue, surface, config.
-        //    wgpu 29 tiene API async (request_adapter, request_device retornan Future).
-        //    Usamos block_on() local (sin pollster) para bloquear en nativo.
-        // El mut solo se usa en la rama cfg(windows) de abajo.
-        #[cfg_attr(not(windows), allow(unused_mut))]
-        let mut instance_desc =
-            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display_handle));
-        // En DX12 la swapchain desde HWND solo ofrece alpha Opaque; el visual
-        // de DirectComposition es el unico camino a transparencia real (y a
-        // que el material Mica se vea). Solo aplica con opacidad < 1.0.
-        #[cfg(windows)]
-        if opacity < 1.0 {
-            instance_desc.backend_options.dx12.presentation_system =
-                wgpu::Dx12SwapchainKind::DxgiFromVisual;
-        }
-        let instance = wgpu::Instance::new(instance_desc);
-
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("no se pudo crear la surface wgpu");
-
-        let t_gpu_init = Instant::now();
-        tracing::info!("wgpu: solicitando adaptador GPU...");
-        let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }))
-        .expect("no se encontro adaptador GPU compatible");
-        tracing::info!(
-            "wgpu: adaptador listo en {}ms",
-            t_gpu_init.elapsed().as_millis()
-        );
-
-        let t_device = Instant::now();
-        tracing::info!("wgpu: solicitando device...");
-        // Performance es el default de wgpu; MemoryUsage pide bloques de
-        // suballocacion menores y el buffer de glifos se recrea a menudo.
-        let make_desc = |limits: wgpu::Limits| wgpu::DeviceDescriptor {
-            label: None,
-            required_features: wgpu::Features::empty(),
-            required_limits: limits,
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: wgpu::Trace::Off,
-        };
-        // downlevel_defaults() es el piso nativo garantizado; si una GPU vieja
-        // no lo satisface se degrada al piso WebGL2 en vez de paniquear.
-        let (device, queue) = match block_on(adapter.request_device(&make_desc(
-            wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
-        ))) {
-            Ok(pair) => pair,
-            Err(err) => {
-                tracing::warn!(
-                    "wgpu: device con downlevel_defaults fallo ({err}); \
-                     reintentando con el piso WebGL2"
-                );
-                block_on(adapter.request_device(&make_desc(
-                    wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
-                )))
-                .expect("no se pudo crear el device GPU")
-            }
-        };
-        tracing::info!(
-            "wgpu: device listo en {}ms (init GPU total {}ms)",
-            t_device.elapsed().as_millis(),
-            t_gpu_init.elapsed().as_millis()
-        );
-
-        let t_surface_cfg = Instant::now();
-        let size = window.inner_size();
-        let surface_w = size.width.clamp(1, 16_384);
-        let surface_h = size.height.clamp(1, 16_384);
-        let caps = surface.get_capabilities(&adapter);
-        let mut config = surface
-            .get_default_config(&adapter, surface_w, surface_h)
-            .expect("no se encontro formato de surface compatible");
-        // get_default_config toma el primer formato en el orden del driver,
-        // que varia entre backends y servidores graficos; se fija uno de la
-        // lista de preferencia para que el pipeline de color sea estable.
-        config.format = pick_surface_format(&caps.formats);
-        if !matches!(
-            config.format,
-            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
-        ) {
-            tracing::warn!(
-                "wgpu: surface sin formato no-sRGB de 8 bits; elegido {:?} \
-                 (soportados: {:?}). El pipeline de color queda en el camino \
-                 degradado",
-                config.format,
-                caps.formats,
-            );
-        }
-        // Las variantes Auto* degradan solas si el backend no soporta
-        // Mailbox/Immediate; las crudas pueden paniquear en configure.
-        config.present_mode = if self.config.render.vsync {
-            wgpu::PresentMode::AutoVsync
-        } else {
-            wgpu::PresentMode::AutoNoVsync
-        };
-        // wgpu traduce esto a `min_image_count = valor + 1`
-        // (wgpu-hal/src/vulkan/swapchain/native.rs). Con 1 el swapchain queda
-        // en 2 imagenes, que es el minimo absoluto para FIFO: cada `acquire`
-        // bloquea hasta que el compositor libera la anterior, y si tarda
-        // (workspace oculto, direct scanout de otra ventana, VRR) se agota el
-        // timeout interno de wgpu — 1000 ms con el event loop entero parado.
-        // 2 da 3 imagenes: un frame de cola a cambio de que el hilo GUI no se
-        // bloquee. El frame de latencia se recupera en el plan 002, que quita
-        // el throttle de max_fps del camino del eco.
-        config.desired_maximum_frame_latency = 2;
-        // Si hay transparencia, asegurar que el alpha mode sea compatible
-        if opacity < 1.0 {
-            match select_alpha_mode(opacity, &caps.alpha_modes) {
-                Some(mode) => {
+        let (device, queue, surface, config, font_system) = if reuse_fonts {
+            let gpu = self.gpu.as_mut().expect("gpu parked");
+            let surface = gpu
+                .instance
+                .create_surface(window.clone())
+                .expect("no se pudo crear la surface wgpu");
+            let size = window.inner_size();
+            let surface_w = size.width.clamp(1, 16_384);
+            let surface_h = size.height.clamp(1, 16_384);
+            let caps = surface.get_capabilities(&gpu.adapter);
+            let mut config = surface
+                .get_default_config(&gpu.adapter, surface_w, surface_h)
+                .expect("no se encontro formato de surface compatible");
+            config.format = pick_surface_format(&caps.formats);
+            config.present_mode = if self.config.render.vsync {
+                wgpu::PresentMode::AutoVsync
+            } else {
+                wgpu::PresentMode::AutoNoVsync
+            };
+            config.desired_maximum_frame_latency = 2;
+            if opacity < 1.0 {
+                if let Some(mode) = select_alpha_mode(opacity, &caps.alpha_modes) {
                     config.alpha_mode = mode;
                     config.view_formats = vec![config.format.add_srgb_suffix()];
                 }
-                // Sin swapchain translucida disponible la ventana queda
-                // opaca; mejor degradar que paniquear en configure.
-                None => tracing::warn!(
-                    "window.opacity < 1.0 pero el backend GPU no soporta \
-                     swapchain translucida (alpha modes: {:?}); \
-                     la ventana sera opaca",
-                    caps.alpha_modes
-                ),
             }
-        }
-        surface.configure(&device, &config);
-        tracing::info!(
-            "startup: surface config lista en {}ms",
-            t_surface_cfg.elapsed().as_millis()
-        );
-        // El formato de surface decide todo el pipeline de color del frame;
-        // se registra con las capacidades crudas para diagnosticar diferencias
-        // entre servidores graficos (Wayland vs X11) y drivers.
-        let adapter_info = adapter.get_info();
-        tracing::info!(
-            "wgpu: surface formato={:?} alpha_mode={:?} present_mode={:?} \
-             frame_latency={} backend={:?} adaptador={:?} \
-             formatos_soportados={:?}",
-            config.format,
-            config.alpha_mode,
-            config.present_mode,
-            config.desired_maximum_frame_latency,
-            adapter_info.backend,
-            adapter_info.name,
-            caps.formats,
-        );
+            surface.configure(&gpu.device, &config);
+            let font_system = gpu.font_system.take().expect("fuentes parked");
+            (
+                gpu.device.clone(),
+                gpu.queue.clone(),
+                surface,
+                config,
+                font_system,
+            )
+        } else {
+            // 2. Obtener display handle para wgpu (evita el lifetime de ActiveEventLoop).
+            let display_handle = event_loop.owned_display_handle();
 
-        // Pintar el fondo del tema y presentar ya: la ventana no queda vacia
-        // mientras el hilo de fuentes sigue escaneando en segundo plano.
-        let t_early_present = Instant::now();
-        let (bg_r, bg_g, bg_b) = crate::config::parse_hex(&self.config.theme.background);
-        let clear_color = crate::renderer::frame_clear_color(
-            (bg_r, bg_g, bg_b),
-            opacity,
-            config.format.is_srgb(),
-        );
-        if let wgpu::CurrentSurfaceTexture::Success(frame)
-        | wgpu::CurrentSurfaceTexture::Suboptimal(frame) = surface.get_current_texture()
-        {
-            let view = frame
-                .texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
-            let mut encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            {
-                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("early background clear"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(clear_color),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: None,
-                    ..Default::default()
+            // 3. Inicializar wgpu: instance, adapter, device, queue, surface, config.
+            //    wgpu 29 tiene API async (request_adapter, request_device retornan Future).
+            //    Usamos block_on() local (sin pollster) para bloquear en nativo.
+            // El mut solo se usa en la rama cfg(windows) de abajo.
+            #[cfg_attr(not(windows), allow(unused_mut))]
+            let mut instance_desc = wgpu::InstanceDescriptor::new_with_display_handle_from_env(
+                Box::new(display_handle),
+            );
+            // En DX12 la swapchain desde HWND solo ofrece alpha Opaque; el visual
+            // de DirectComposition es el unico camino a transparencia real (y a
+            // que el material Mica se vea). Solo aplica con opacidad < 1.0.
+            #[cfg(windows)]
+            if opacity < 1.0 {
+                instance_desc.backend_options.dx12.presentation_system =
+                    wgpu::Dx12SwapchainKind::DxgiFromVisual;
+            }
+            let instance = wgpu::Instance::new(instance_desc);
+
+            let surface = instance
+                .create_surface(window.clone())
+                .expect("no se pudo crear la surface wgpu");
+
+            let t_gpu_init = Instant::now();
+            tracing::info!("wgpu: solicitando adaptador GPU...");
+            let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                compatible_surface: Some(&surface),
+                ..Default::default()
+            }))
+            .expect("no se encontro adaptador GPU compatible");
+            tracing::info!(
+                "wgpu: adaptador listo en {}ms",
+                t_gpu_init.elapsed().as_millis()
+            );
+
+            let t_device = Instant::now();
+            tracing::info!("wgpu: solicitando device...");
+            // Performance es el default de wgpu; MemoryUsage pide bloques de
+            // suballocacion menores y el buffer de glifos se recrea a menudo.
+            let make_desc = |limits: wgpu::Limits| wgpu::DeviceDescriptor {
+                label: None,
+                required_features: wgpu::Features::empty(),
+                required_limits: limits,
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+            };
+            // downlevel_defaults() es el piso nativo garantizado; si una GPU vieja
+            // no lo satisface se degrada al piso WebGL2 en vez de paniquear.
+            let (device, queue) = match block_on(adapter.request_device(&make_desc(
+                wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            ))) {
+                Ok(pair) => pair,
+                Err(err) => {
+                    tracing::warn!(
+                        "wgpu: device con downlevel_defaults fallo ({err}); \
+                     reintentando con el piso WebGL2"
+                    );
+                    block_on(
+                        adapter.request_device(&make_desc(
+                            wgpu::Limits::downlevel_webgl2_defaults()
+                                .using_resolution(adapter.limits()),
+                        )),
+                    )
+                    .expect("no se pudo crear el device GPU")
+                }
+            };
+            tracing::info!(
+                "wgpu: device listo en {}ms (init GPU total {}ms)",
+                t_device.elapsed().as_millis(),
+                t_gpu_init.elapsed().as_millis()
+            );
+
+            if self.gpu.is_none() {
+                self.gpu = Some(GpuContext {
+                    instance: instance.clone(),
+                    adapter: adapter.clone(),
+                    device: device.clone(),
+                    queue: queue.clone(),
+                    font_system: None,
                 });
             }
-            queue.submit(std::iter::once(encoder.finish()));
-            frame.present();
-            tracing::info!(
-                "startup: ventana pintada (fondo) en {}ms",
-                t_early_present.elapsed().as_millis()
-            );
-        }
 
-        let t_font_join = Instant::now();
-        let font_system = match font_thread.join() {
-            Ok(font_system) => font_system,
-            Err(panic) => std::panic::resume_unwind(panic),
+            let t_surface_cfg = Instant::now();
+            let size = window.inner_size();
+            let surface_w = size.width.clamp(1, 16_384);
+            let surface_h = size.height.clamp(1, 16_384);
+            let caps = surface.get_capabilities(&adapter);
+            let mut config = surface
+                .get_default_config(&adapter, surface_w, surface_h)
+                .expect("no se encontro formato de surface compatible");
+            // get_default_config toma el primer formato en el orden del driver,
+            // que varia entre backends y servidores graficos; se fija uno de la
+            // lista de preferencia para que el pipeline de color sea estable.
+            config.format = pick_surface_format(&caps.formats);
+            if !matches!(
+                config.format,
+                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+            ) {
+                tracing::warn!(
+                    "wgpu: surface sin formato no-sRGB de 8 bits; elegido {:?} \
+                 (soportados: {:?}). El pipeline de color queda en el camino \
+                 degradado",
+                    config.format,
+                    caps.formats,
+                );
+            }
+            // Las variantes Auto* degradan solas si el backend no soporta
+            // Mailbox/Immediate; las crudas pueden paniquear en configure.
+            config.present_mode = if self.config.render.vsync {
+                wgpu::PresentMode::AutoVsync
+            } else {
+                wgpu::PresentMode::AutoNoVsync
+            };
+            // wgpu traduce esto a `min_image_count = valor + 1`
+            // (wgpu-hal/src/vulkan/swapchain/native.rs). Con 1 el swapchain queda
+            // en 2 imagenes, que es el minimo absoluto para FIFO: cada `acquire`
+            // bloquea hasta que el compositor libera la anterior, y si tarda
+            // (workspace oculto, direct scanout de otra ventana, VRR) se agota el
+            // timeout interno de wgpu — 1000 ms con el event loop entero parado.
+            // 2 da 3 imagenes: un frame de cola a cambio de que el hilo GUI no se
+            // bloquee. El frame de latencia se recupera en el plan 002, que quita
+            // el throttle de max_fps del camino del eco.
+            config.desired_maximum_frame_latency = 2;
+            // Si hay transparencia, asegurar que el alpha mode sea compatible
+            if opacity < 1.0 {
+                match select_alpha_mode(opacity, &caps.alpha_modes) {
+                    Some(mode) => {
+                        config.alpha_mode = mode;
+                        config.view_formats = vec![config.format.add_srgb_suffix()];
+                    }
+                    // Sin swapchain translucida disponible la ventana queda
+                    // opaca; mejor degradar que paniquear en configure.
+                    None => tracing::warn!(
+                        "window.opacity < 1.0 pero el backend GPU no soporta \
+                     swapchain translucida (alpha modes: {:?}); \
+                     la ventana sera opaca",
+                        caps.alpha_modes
+                    ),
+                }
+            }
+            surface.configure(&device, &config);
+            tracing::info!(
+                "startup: surface config lista en {}ms",
+                t_surface_cfg.elapsed().as_millis()
+            );
+            // El formato de surface decide todo el pipeline de color del frame;
+            // se registra con las capacidades crudas para diagnosticar diferencias
+            // entre servidores graficos (Wayland vs X11) y drivers.
+            let adapter_info = adapter.get_info();
+            tracing::info!(
+                "wgpu: surface formato={:?} alpha_mode={:?} present_mode={:?} \
+             frame_latency={} backend={:?} adaptador={:?} \
+             formatos_soportados={:?}",
+                config.format,
+                config.alpha_mode,
+                config.present_mode,
+                config.desired_maximum_frame_latency,
+                adapter_info.backend,
+                adapter_info.name,
+                caps.formats,
+            );
+
+            // Pintar el fondo del tema y presentar ya: la ventana no queda vacia
+            // mientras el hilo de fuentes sigue escaneando en segundo plano.
+            let t_early_present = Instant::now();
+            let (bg_r, bg_g, bg_b) = crate::config::parse_hex(&self.config.theme.background);
+            let clear_color = crate::renderer::frame_clear_color(
+                (bg_r, bg_g, bg_b),
+                opacity,
+                config.format.is_srgb(),
+            );
+            if let wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) = surface.get_current_texture()
+            {
+                let view = frame
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
+                let mut encoder =
+                    device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                {
+                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("early background clear"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(clear_color),
+                                store: wgpu::StoreOp::Store,
+                            },
+                            depth_slice: None,
+                        })],
+                        depth_stencil_attachment: None,
+                        ..Default::default()
+                    });
+                }
+                queue.submit(std::iter::once(encoder.finish()));
+                frame.present();
+                tracing::info!(
+                    "startup: ventana pintada (fondo) en {}ms",
+                    t_early_present.elapsed().as_millis()
+                );
+            }
+
+            let t_font_join = Instant::now();
+            let font_system = match font_thread.expect("hilo de fuentes").join() {
+                Ok(font_system) => font_system,
+                Err(panic) => std::panic::resume_unwind(panic),
+            };
+            tracing::info!(
+                "startup: join del hilo de fonts esperado {}ms",
+                t_font_join.elapsed().as_millis()
+            );
+
+            (device, queue, surface, config, font_system)
         };
-        tracing::info!(
-            "startup: join del hilo de fonts esperado {}ms",
-            t_font_join.elapsed().as_millis()
-        );
 
         // 4. Crear Renderer.
         let t_renderer = Instant::now();
@@ -2336,10 +2437,14 @@ impl App {
             return;
         }
         if self.tabs.len() <= 1 {
-            for host in &mut self.sessions {
-                host.shutdown_pty();
+            if self.linger {
+                self.park_window();
+            } else {
+                for host in &mut self.sessions {
+                    host.shutdown_pty();
+                }
+                self.request_exit(ExitReason::LastTabClosed);
             }
-            self.request_exit(ExitReason::LastTabClosed);
             return;
         }
         let leaf_ids = self.tabs[index].leaves();
@@ -4425,11 +4530,15 @@ impl ApplicationHandler<UserEvent> for App {
         let _phase = self.watchdog.enter(watchdog::window_event_phase(&event));
         match event {
             WindowEvent::CloseRequested => {
-                self.request_exit(ExitReason::CloseRequested);
-                for host in &mut self.sessions {
-                    host.shutdown_pty();
+                if self.linger {
+                    self.park_window();
+                } else {
+                    self.request_exit(ExitReason::CloseRequested);
+                    for host in &mut self.sessions {
+                        host.shutdown_pty();
+                    }
+                    self.begin_event_loop_exit(event_loop);
                 }
-                self.begin_event_loop_exit(event_loop);
             }
             WindowEvent::Occluded(hidden) => {
                 self.set_occluded(hidden);
@@ -5141,11 +5250,15 @@ impl ApplicationHandler<UserEvent> for App {
                                             window.set_maximized(!window.is_maximized());
                                         }
                                         TitleButtonKind::Close => {
-                                            self.request_exit(ExitReason::TitleBarButton);
-                                            for host in &mut self.sessions {
-                                                host.shutdown_pty();
+                                            if self.linger {
+                                                self.park_window();
+                                            } else {
+                                                self.request_exit(ExitReason::TitleBarButton);
+                                                for host in &mut self.sessions {
+                                                    host.shutdown_pty();
+                                                }
+                                                self.begin_event_loop_exit(event_loop);
                                             }
-                                            self.begin_event_loop_exit(event_loop);
                                         }
                                     }
                                     return;
@@ -6738,7 +6851,16 @@ import = false
     }
 
     #[test]
-    fn cerrar_la_ultima_pestana_registra_su_motivo() {
+    fn cerrar_la_ultima_pestana_en_linger_no_pide_salida() {
+        let mut app = test_app(Arc::new(Mutex::new(Term::new())));
+        app.set_linger(true);
+        app.close_tab_at(0);
+        assert!(app.pending_exit.is_none());
+        assert_eq!(app.session_count(), 0);
+    }
+
+    #[test]
+    fn cerrar_la_ultima_pestana_sin_linger_pide_salida() {
         let mut app = test_app(Arc::new(Mutex::new(Term::new())));
         app.close_tab_at(0);
         assert_eq!(app.pending_exit, Some(ExitReason::LastTabClosed));

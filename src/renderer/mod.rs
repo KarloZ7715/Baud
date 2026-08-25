@@ -711,6 +711,11 @@ impl Renderer {
         }
     }
 
+    /// Suelta surface y atlas; devuelve GPU y fuentes para reusarlos.
+    pub fn dismantle(self) -> (wgpu::Device, wgpu::Queue, glyphon::FontSystem) {
+        (self.device, self.queue, self.font_system)
+    }
+
     fn refresh_cell_metrics(&mut self) {
         let pad_x = self.cell_metrics.padding_x;
         let pad_y = self.cell_metrics.padding_y;
