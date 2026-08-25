@@ -482,6 +482,12 @@ pub struct App {
     /// True cuando el último frame dejó algún pane sin repintar (el `Term`
     /// estaba tomado). Obliga a un redraw de seguimiento.
     followup_redraw: bool,
+    /// Cerrar la ultima tab no sale del event loop (daemon).
+    linger: bool,
+    /// Escaneo de fuentes arrancado antes de la primera ventana.
+    font_thread: Option<std::thread::JoinHandle<glyphon::FontSystem>>,
+    /// Listener de spawn. Vive con el event loop del daemon.
+    spawn_server: Option<crate::spawn::server::SpawnServerHandle>,
 }
 
 fn path_to_file_url(path: &std::path::Path) -> String {
@@ -572,7 +578,6 @@ impl App {
         initial_title: Option<String>,
         app_id: Option<String>,
     ) -> Self {
-        debug_assert!(!sessions.is_empty(), "App requiere al menos una sesion");
         let font_size = config.font.size;
         let window_width = config.window.width as f32;
         let window_height = config.window.height as f32;
@@ -652,11 +657,31 @@ impl App {
             occluded: false,
             last_acquire_failure: None,
             followup_redraw: false,
+            linger: false,
+            font_thread: None,
+            spawn_server: None,
         }
     }
 
     pub fn set_redraw_interval_handle(&mut self, redraw_interval_nanos: Arc<AtomicU64>) {
         self.redraw_interval_nanos = redraw_interval_nanos;
+    }
+
+    pub fn set_linger(&mut self, linger: bool) {
+        self.linger = linger;
+    }
+
+    pub fn set_font_thread(&mut self, font_thread: std::thread::JoinHandle<glyphon::FontSystem>) {
+        self.font_thread = Some(font_thread);
+    }
+
+    pub fn set_spawn_server(&mut self, handle: crate::spawn::server::SpawnServerHandle) {
+        self.spawn_server = Some(handle);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_count(&self) -> usize {
+        self.sessions.len()
     }
 
     fn sync_blink_focus(&self) {
@@ -945,7 +970,7 @@ impl App {
                 let _ = tx.send(crate::remote::Response::err(
                     0,
                     "not_ready",
-                    "spawn handler not wired",
+                    "spawn handler needs the event loop",
                 ));
             }
         }
@@ -1780,43 +1805,83 @@ impl App {
     }
 
     fn new_tab(&mut self) {
-        let Some(proxy) = self.proxy.clone() else {
-            tracing::warn!("new_tab: proxy no disponible");
-            return;
-        };
         let cwd = self.focused_term().lock().ok().and_then(|t| t.cwd.clone());
         let cfg = self.config_with_cwd(cwd);
-        let (rows, cols) = self
-            .focused_term()
-            .lock()
-            .ok()
-            .map(|g| {
-                let grid = g.active_grid();
-                (grid.rows_count as u16, grid.cols_count as u16)
-            })
-            .unwrap_or((
+        if let Err(e) = self.spawn_and_push_tab(&cfg, &cfg.process_config(), false, false) {
+            tracing::warn!("new_tab: {e}");
+            if let Some(renderer) = &mut self.renderer {
+                renderer.set_status(&format!("[No se pudo abrir tab: {e}]"));
+            }
+        }
+    }
+
+    fn new_tab_with(&mut self, params: &crate::spawn::SpawnParams) -> Result<(), String> {
+        let cwd = if let Some(dir) = &params.working_directory {
+            Some(dir.clone())
+        } else if !self.sessions.is_empty() {
+            self.focused_term().lock().ok().and_then(|t| t.cwd.clone())
+        } else {
+            None
+        };
+        let cfg = self.config_with_cwd(cwd);
+        let launch = crate::cli::LaunchOptions {
+            command: params.command.clone(),
+            working_directory: params.working_directory.clone(),
+            title: params.title.clone(),
+            hold: params.hold,
+            app_id: params.app_id.clone(),
+            ..crate::cli::LaunchOptions::default()
+        };
+        let process_cfg = crate::event_loop::merge_launch_options(&cfg, &launch);
+        let close_on_exit = params.command.is_some();
+        self.spawn_and_push_tab(&cfg, &process_cfg, params.hold, close_on_exit)?;
+        if let Some(title) = &params.title {
+            if let Some(host) = self.sessions.last_mut() {
+                host.session.title = title.clone();
+            }
+        }
+        Ok(())
+    }
+
+    fn spawn_and_push_tab(
+        &mut self,
+        cfg: &Config,
+        process_cfg: &crate::pty::ProcessConfig,
+        hold: bool,
+        close_on_exit: bool,
+    ) -> Result<(), String> {
+        let Some(proxy) = self.proxy.clone() else {
+            return Err("proxy no disponible".into());
+        };
+        let (rows, cols) = if self.sessions.is_empty() {
+            (
                 crate::grid::DEFAULT_ROWS as u16,
                 crate::grid::DEFAULT_COLS as u16,
-            ));
-        let spawned = match crate::event_loop::spawn_session(
-            &cfg,
-            &cfg.process_config(),
+            )
+        } else {
+            self.focused_term()
+                .lock()
+                .ok()
+                .map(|g| {
+                    let grid = g.active_grid();
+                    (grid.rows_count as u16, grid.cols_count as u16)
+                })
+                .unwrap_or((
+                    crate::grid::DEFAULT_ROWS as u16,
+                    crate::grid::DEFAULT_COLS as u16,
+                ))
+        };
+        let spawned = crate::event_loop::spawn_session(
+            cfg,
+            process_cfg,
             rows,
             cols,
             proxy.clone(),
             Arc::clone(&self.redraw_interval_nanos),
-            false,
-            false,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("new_tab: spawn fallo: {e}");
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.set_status(&format!("[No se pudo abrir tab: {e}]"));
-                }
-                return;
-            }
-        };
+            hold,
+            close_on_exit,
+        )
+        .map_err(|e| e.to_string())?;
         crate::event_loop::spawn_blink_timer(
             Arc::clone(&spawned.session.term),
             proxy,
@@ -1837,6 +1902,429 @@ impl App {
         self.sync_blink_focus();
         self.apply_focused_window_title();
         self.sync_after_tab_change();
+        Ok(())
+    }
+
+    fn apply_spawn_tab(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        params: crate::spawn::SpawnParams,
+    ) -> Result<(), String> {
+        if let Some(title) = &params.title {
+            self.initial_title = Some(title.clone());
+        }
+        if let Some(app_id) = &params.app_id {
+            self.app_id = Some(app_id.clone());
+        }
+        if self.window.is_none() {
+            self.new_tab_with(&params)?;
+            self.ensure_window(event_loop);
+            Ok(())
+        } else {
+            self.new_tab_with(&params)
+        }
+    }
+
+    // Sin ventana o GPU no hay terminal: abortar en arranque es la politica.
+    #[allow(clippy::expect_used)]
+    fn ensure_window(&mut self, event_loop: &ActiveEventLoop) {
+        if self.window.is_some() {
+            return;
+        }
+
+        let t_start = Instant::now();
+        self.startup_instant = Some(t_start);
+        self.display_quirks = display_quirks::snapshot_for_event_loop(event_loop);
+
+        // El escaneo de fuentes del sistema no depende de la GPU: arrancar el
+        // hilo ya mismo lo solapa con la negociacion de adapter/device de wgpu
+        // en vez de esperar a que termine antes de tocar wgpu.
+        let font_thread = self.font_thread.take().unwrap_or_else(|| {
+            let font_fallback = self.config.font.fallback.clone();
+            std::thread::spawn(move || {
+                crate::renderer::create_font_system_with_fallback(&font_fallback)
+            })
+        });
+
+        // 1. Crear ventana.
+        let t_window = Instant::now();
+        let wcfg = &self.config.window;
+        let initial_title = self.initial_title.as_deref().unwrap_or("baud");
+        let decorations_kind = wcfg.decorations.kind();
+        let mut attrs = Window::default_attributes()
+            .with_title(initial_title)
+            .with_inner_size(winit::dpi::LogicalSize::new(wcfg.width, wcfg.height))
+            .with_decorations(decorations_kind != DecorationsKind::None);
+        #[cfg(windows)]
+        if decorations_kind == DecorationsKind::Custom {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs = attrs.with_undecorated_shadow(true);
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some(app_id) = &self.app_id {
+            // Los dos traits escriben en el mismo campo platform_specific.name,
+            // asi que el orden no importa; con valores iguales ambos lados quedan
+            // app_id para Wayland (general) y X11 (instance/class).
+            attrs = WindowAttributesExtWayland::with_name(attrs, app_id.clone(), app_id.clone());
+            attrs = WindowAttributesExtX11::with_name(attrs, app_id.clone(), app_id.clone());
+        }
+        match wcfg.startup {
+            StartupState::Maximized => {
+                tracing::info!("window: width/height del config no aplican con startup=maximized");
+                attrs = attrs.with_maximized(true);
+            }
+            StartupState::Fullscreen => {
+                tracing::info!("window: width/height del config no aplican con startup=fullscreen");
+                attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
+            }
+            StartupState::Windowed => {}
+        }
+        // Solo activar transparencia si la opacidad es < 1.0
+        let opacity = self.config.window.opacity;
+        let attrs = if opacity < 1.0 {
+            attrs.with_transparent(true)
+        } else {
+            attrs
+        };
+        // En Windows el alfa por framebuffer no basta para que el escritorio
+        // se vea a traves: se pide el material Mica al DWM. Ambas ramas leen
+        // el mismo umbral, y `restart_required_fields` ya marca el cruce.
+        #[cfg(windows)]
+        let attrs = match select_windows_backdrop(opacity) {
+            WindowsBackdropChoice::Mica => {
+                use winit::platform::windows::{BackdropType, WindowAttributesExtWindows};
+                attrs.with_system_backdrop(BackdropType::MainWindow)
+            }
+            WindowsBackdropChoice::None => attrs,
+        };
+        let window = Arc::new(
+            event_loop
+                .create_window(attrs)
+                .expect("no se pudo crear la ventana"),
+        );
+        self.window = Some(window.clone());
+        self.scale_factor = window.scale_factor();
+        // Esquema de color del SO vía winit (Win/Mac). En Linux winit devuelve
+        // None y el portal lo resuelve aparte; el `apply_config` final de
+        // `resumed` re-resuelve con lo que ya se conozca aquí.
+        if let Some(scheme) = color_scheme::system_color_scheme(&window) {
+            self.system_color_scheme = Some(scheme);
+            self.system_scheme_source = SchemeSource::Winit;
+        }
+        // Resolver el refresco del monitor para `max_fps` automático.
+        // current_monitor() devuelve None en algunos compositores Wayland y
+        // en headless; refresh_rate_millihertz() puede devolver None igualmente.
+        // El fallback a 60 Hz cubre ambos casos.
+        let monitor_hz = window
+            .current_monitor()
+            .and_then(|m| m.refresh_rate_millihertz())
+            .map(|millihz| millihz / 1000);
+        if let Some(hz) = monitor_hz {
+            tracing::info!("startup: monitor refresco {} Hz", hz);
+        } else {
+            tracing::info!("startup: monitor refresco desconocido, fallback 60 Hz");
+        }
+        self.monitor_refresh_hz = monitor_hz;
+        self.redraw_interval_nanos.store(
+            self.config
+                .render
+                .redraw_interval_nanos_for_monitor(monitor_hz),
+            Ordering::Relaxed,
+        );
+        window.set_ime_allowed(true);
+        tracing::info!(
+            "startup: ventana creada en {}ms",
+            t_window.elapsed().as_millis()
+        );
+        if self.config.remote_control {
+            if let Some(proxy) = self.proxy.clone() {
+                match crate::remote::server::spawn_with_proxy(proxy) {
+                    Ok(handle) => {
+                        tracing::info!(
+                            target: "baud::remote",
+                            "remote control listening on {}",
+                            handle.target()
+                        );
+                        self.remote_server = Some(handle);
+                    }
+                    Err(e) => tracing::error!("remote control failed to start: {e}"),
+                }
+            }
+        }
+
+        // 2. Obtener display handle para wgpu (evita el lifetime de ActiveEventLoop).
+        let display_handle = event_loop.owned_display_handle();
+
+        // 3. Inicializar wgpu: instance, adapter, device, queue, surface, config.
+        //    wgpu 29 tiene API async (request_adapter, request_device retornan Future).
+        //    Usamos block_on() local (sin pollster) para bloquear en nativo.
+        // El mut solo se usa en la rama cfg(windows) de abajo.
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut instance_desc =
+            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display_handle));
+        // En DX12 la swapchain desde HWND solo ofrece alpha Opaque; el visual
+        // de DirectComposition es el unico camino a transparencia real (y a
+        // que el material Mica se vea). Solo aplica con opacidad < 1.0.
+        #[cfg(windows)]
+        if opacity < 1.0 {
+            instance_desc.backend_options.dx12.presentation_system =
+                wgpu::Dx12SwapchainKind::DxgiFromVisual;
+        }
+        let instance = wgpu::Instance::new(instance_desc);
+
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("no se pudo crear la surface wgpu");
+
+        let t_gpu_init = Instant::now();
+        tracing::info!("wgpu: solicitando adaptador GPU...");
+        let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::default(),
+            compatible_surface: Some(&surface),
+            ..Default::default()
+        }))
+        .expect("no se encontro adaptador GPU compatible");
+        tracing::info!(
+            "wgpu: adaptador listo en {}ms",
+            t_gpu_init.elapsed().as_millis()
+        );
+
+        let t_device = Instant::now();
+        tracing::info!("wgpu: solicitando device...");
+        // Performance es el default de wgpu; MemoryUsage pide bloques de
+        // suballocacion menores y el buffer de glifos se recrea a menudo.
+        let make_desc = |limits: wgpu::Limits| wgpu::DeviceDescriptor {
+            label: None,
+            required_features: wgpu::Features::empty(),
+            required_limits: limits,
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
+        };
+        // downlevel_defaults() es el piso nativo garantizado; si una GPU vieja
+        // no lo satisface se degrada al piso WebGL2 en vez de paniquear.
+        let (device, queue) = match block_on(adapter.request_device(&make_desc(
+            wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+        ))) {
+            Ok(pair) => pair,
+            Err(err) => {
+                tracing::warn!(
+                    "wgpu: device con downlevel_defaults fallo ({err}); \
+                     reintentando con el piso WebGL2"
+                );
+                block_on(adapter.request_device(&make_desc(
+                    wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
+                )))
+                .expect("no se pudo crear el device GPU")
+            }
+        };
+        tracing::info!(
+            "wgpu: device listo en {}ms (init GPU total {}ms)",
+            t_device.elapsed().as_millis(),
+            t_gpu_init.elapsed().as_millis()
+        );
+
+        let t_surface_cfg = Instant::now();
+        let size = window.inner_size();
+        let surface_w = size.width.clamp(1, 16_384);
+        let surface_h = size.height.clamp(1, 16_384);
+        let caps = surface.get_capabilities(&adapter);
+        let mut config = surface
+            .get_default_config(&adapter, surface_w, surface_h)
+            .expect("no se encontro formato de surface compatible");
+        // get_default_config toma el primer formato en el orden del driver,
+        // que varia entre backends y servidores graficos; se fija uno de la
+        // lista de preferencia para que el pipeline de color sea estable.
+        config.format = pick_surface_format(&caps.formats);
+        if !matches!(
+            config.format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+        ) {
+            tracing::warn!(
+                "wgpu: surface sin formato no-sRGB de 8 bits; elegido {:?} \
+                 (soportados: {:?}). El pipeline de color queda en el camino \
+                 degradado",
+                config.format,
+                caps.formats,
+            );
+        }
+        // Las variantes Auto* degradan solas si el backend no soporta
+        // Mailbox/Immediate; las crudas pueden paniquear en configure.
+        config.present_mode = if self.config.render.vsync {
+            wgpu::PresentMode::AutoVsync
+        } else {
+            wgpu::PresentMode::AutoNoVsync
+        };
+        // wgpu traduce esto a `min_image_count = valor + 1`
+        // (wgpu-hal/src/vulkan/swapchain/native.rs). Con 1 el swapchain queda
+        // en 2 imagenes, que es el minimo absoluto para FIFO: cada `acquire`
+        // bloquea hasta que el compositor libera la anterior, y si tarda
+        // (workspace oculto, direct scanout de otra ventana, VRR) se agota el
+        // timeout interno de wgpu — 1000 ms con el event loop entero parado.
+        // 2 da 3 imagenes: un frame de cola a cambio de que el hilo GUI no se
+        // bloquee. El frame de latencia se recupera en el plan 002, que quita
+        // el throttle de max_fps del camino del eco.
+        config.desired_maximum_frame_latency = 2;
+        // Si hay transparencia, asegurar que el alpha mode sea compatible
+        if opacity < 1.0 {
+            match select_alpha_mode(opacity, &caps.alpha_modes) {
+                Some(mode) => {
+                    config.alpha_mode = mode;
+                    config.view_formats = vec![config.format.add_srgb_suffix()];
+                }
+                // Sin swapchain translucida disponible la ventana queda
+                // opaca; mejor degradar que paniquear en configure.
+                None => tracing::warn!(
+                    "window.opacity < 1.0 pero el backend GPU no soporta \
+                     swapchain translucida (alpha modes: {:?}); \
+                     la ventana sera opaca",
+                    caps.alpha_modes
+                ),
+            }
+        }
+        surface.configure(&device, &config);
+        tracing::info!(
+            "startup: surface config lista en {}ms",
+            t_surface_cfg.elapsed().as_millis()
+        );
+        // El formato de surface decide todo el pipeline de color del frame;
+        // se registra con las capacidades crudas para diagnosticar diferencias
+        // entre servidores graficos (Wayland vs X11) y drivers.
+        let adapter_info = adapter.get_info();
+        tracing::info!(
+            "wgpu: surface formato={:?} alpha_mode={:?} present_mode={:?} \
+             frame_latency={} backend={:?} adaptador={:?} \
+             formatos_soportados={:?}",
+            config.format,
+            config.alpha_mode,
+            config.present_mode,
+            config.desired_maximum_frame_latency,
+            adapter_info.backend,
+            adapter_info.name,
+            caps.formats,
+        );
+
+        // Pintar el fondo del tema y presentar ya: la ventana no queda vacia
+        // mientras el hilo de fuentes sigue escaneando en segundo plano.
+        let t_early_present = Instant::now();
+        let (bg_r, bg_g, bg_b) = crate::config::parse_hex(&self.config.theme.background);
+        let clear_color = crate::renderer::frame_clear_color(
+            (bg_r, bg_g, bg_b),
+            opacity,
+            config.format.is_srgb(),
+        );
+        if let wgpu::CurrentSurfaceTexture::Success(frame)
+        | wgpu::CurrentSurfaceTexture::Suboptimal(frame) = surface.get_current_texture()
+        {
+            let view = frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+            {
+                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("early background clear"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(clear_color),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    ..Default::default()
+                });
+            }
+            queue.submit(std::iter::once(encoder.finish()));
+            frame.present();
+            tracing::info!(
+                "startup: ventana pintada (fondo) en {}ms",
+                t_early_present.elapsed().as_millis()
+            );
+        }
+
+        let t_font_join = Instant::now();
+        let font_system = match font_thread.join() {
+            Ok(font_system) => font_system,
+            Err(panic) => std::panic::resume_unwind(panic),
+        };
+        tracing::info!(
+            "startup: join del hilo de fonts esperado {}ms",
+            t_font_join.elapsed().as_millis()
+        );
+
+        // 4. Crear Renderer.
+        let t_renderer = Instant::now();
+        self.renderer = Some(Renderer::new(
+            window.clone(),
+            device,
+            queue,
+            surface,
+            config,
+            &self.config.font,
+            font_system,
+            self.scale_factor as f32,
+        ));
+        tracing::info!(
+            "startup: renderer construido en {}ms",
+            t_renderer.elapsed().as_millis()
+        );
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_content_padding(wcfg.padding_x, wcfg.padding_y);
+            if let Some(source) = self.pending_config_source.take() {
+                match source {
+                    ConfigSource::NotFound => {
+                        renderer.set_status_with_config(
+                            "Sin archivo de config, usando defaults",
+                            "⚡",
+                            &self.config.theme,
+                            &self.config.status,
+                        );
+                    }
+                    ConfigSource::ParseError { path, message } => {
+                        let msg = format!("Error en {path}: {message}");
+                        renderer.set_status_with_config(
+                            &msg,
+                            "✗",
+                            &self.config.theme,
+                            &self.config.status,
+                        );
+                    }
+                    ConfigSource::Ok => {}
+                }
+            }
+        }
+
+        // Verificar si hay que mostrar el modal de consentimiento de primer arranque.
+        self.check_first_run_consent();
+
+        clipboard::warm_up();
+
+        let size = window.inner_size();
+        if let Some(renderer) = &self.renderer {
+            let (_, _, _, _, deferred) = self.sync_grid_to_window(
+                size.width,
+                size.height,
+                renderer.cell_w,
+                renderer.cell_h,
+                false,
+                true,
+            );
+            self.pending_pane_sync = deferred;
+        }
+
+        // 5. Primer present según quirks: en Wayland la superficie no aparece
+        // hasta dibujar; ciertas familias además marcan la ventana como colgada
+        // si no hay redraw temprano.
+        if self.display_quirks.force_initial_redraw {
+            window.request_redraw();
+        }
+        self.update_ime_area();
+
+        let cfg = self.config.clone();
+        self.apply_config(cfg);
     }
 
     fn close_tab(&mut self) {
@@ -3815,6 +4303,9 @@ impl App {
             self.begin_event_loop_exit(event_loop);
             return;
         }
+        if self.window.is_none() {
+            return;
+        }
         self.apply_pending_input_reset();
         let close_fade_changed = self.tick_tab_close_fade();
         let tab_hover_changed = self.tick_tab_hover_fade();
@@ -3914,8 +4405,6 @@ impl ApplicationHandler<UserEvent> for App {
         self.watchdog.mark_idle(true);
     }
 
-    // Sin ventana o GPU no hay terminal: abortar en arranque es la politica.
-    #[allow(clippy::expect_used)]
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         // El arranque bloquea el hilo GUI (join del hilo de fuentes, init de
         // wgpu). Sin esta fase, el watchdog reporta el bloqueo como "idle" y el
@@ -3926,398 +4415,10 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-
-        let t_start = Instant::now();
-        self.startup_instant = Some(t_start);
-        self.display_quirks = display_quirks::snapshot_for_event_loop(event_loop);
-
-        // El escaneo de fuentes del sistema no depende de la GPU: arrancar el
-        // hilo ya mismo lo solapa con la negociacion de adapter/device de wgpu
-        // en vez de esperar a que termine antes de tocar wgpu.
-        let font_fallback = self.config.font.fallback.clone();
-        let font_thread = std::thread::spawn(move || {
-            crate::renderer::create_font_system_with_fallback(&font_fallback)
-        });
-
-        // 1. Crear ventana.
-        let t_window = Instant::now();
-        let wcfg = &self.config.window;
-        let initial_title = self.initial_title.as_deref().unwrap_or("baud");
-        let decorations_kind = wcfg.decorations.kind();
-        let mut attrs = Window::default_attributes()
-            .with_title(initial_title)
-            .with_inner_size(winit::dpi::LogicalSize::new(wcfg.width, wcfg.height))
-            .with_decorations(decorations_kind != DecorationsKind::None);
-        #[cfg(windows)]
-        if decorations_kind == DecorationsKind::Custom {
-            use winit::platform::windows::WindowAttributesExtWindows;
-            attrs = attrs.with_undecorated_shadow(true);
+        if self.sessions.is_empty() {
+            return;
         }
-        #[cfg(all(unix, not(target_os = "macos")))]
-        if let Some(app_id) = &self.app_id {
-            // Los dos traits escriben en el mismo campo platform_specific.name,
-            // asi que el orden no importa; con valores iguales ambos lados quedan
-            // app_id para Wayland (general) y X11 (instance/class).
-            attrs = WindowAttributesExtWayland::with_name(attrs, app_id.clone(), app_id.clone());
-            attrs = WindowAttributesExtX11::with_name(attrs, app_id.clone(), app_id.clone());
-        }
-        match wcfg.startup {
-            StartupState::Maximized => {
-                tracing::info!("window: width/height del config no aplican con startup=maximized");
-                attrs = attrs.with_maximized(true);
-            }
-            StartupState::Fullscreen => {
-                tracing::info!("window: width/height del config no aplican con startup=fullscreen");
-                attrs = attrs.with_fullscreen(Some(Fullscreen::Borderless(None)));
-            }
-            StartupState::Windowed => {}
-        }
-        // Solo activar transparencia si la opacidad es < 1.0
-        let opacity = self.config.window.opacity;
-        let attrs = if opacity < 1.0 {
-            attrs.with_transparent(true)
-        } else {
-            attrs
-        };
-        // En Windows el alfa por framebuffer no basta para que el escritorio
-        // se vea a traves: se pide el material Mica al DWM. Ambas ramas leen
-        // el mismo umbral, y `restart_required_fields` ya marca el cruce.
-        #[cfg(windows)]
-        let attrs = match select_windows_backdrop(opacity) {
-            WindowsBackdropChoice::Mica => {
-                use winit::platform::windows::{BackdropType, WindowAttributesExtWindows};
-                attrs.with_system_backdrop(BackdropType::MainWindow)
-            }
-            WindowsBackdropChoice::None => attrs,
-        };
-        let window = Arc::new(
-            event_loop
-                .create_window(attrs)
-                .expect("no se pudo crear la ventana"),
-        );
-        self.window = Some(window.clone());
-        self.scale_factor = window.scale_factor();
-        // Esquema de color del SO vía winit (Win/Mac). En Linux winit devuelve
-        // None y el portal lo resuelve aparte; el `apply_config` final de
-        // `resumed` re-resuelve con lo que ya se conozca aquí.
-        if let Some(scheme) = color_scheme::system_color_scheme(&window) {
-            self.system_color_scheme = Some(scheme);
-            self.system_scheme_source = SchemeSource::Winit;
-        }
-        // Resolver el refresco del monitor para `max_fps` automático.
-        // current_monitor() devuelve None en algunos compositores Wayland y
-        // en headless; refresh_rate_millihertz() puede devolver None igualmente.
-        // El fallback a 60 Hz cubre ambos casos.
-        let monitor_hz = window
-            .current_monitor()
-            .and_then(|m| m.refresh_rate_millihertz())
-            .map(|millihz| millihz / 1000);
-        if let Some(hz) = monitor_hz {
-            tracing::info!("startup: monitor refresco {} Hz", hz);
-        } else {
-            tracing::info!("startup: monitor refresco desconocido, fallback 60 Hz");
-        }
-        self.monitor_refresh_hz = monitor_hz;
-        self.redraw_interval_nanos.store(
-            self.config
-                .render
-                .redraw_interval_nanos_for_monitor(monitor_hz),
-            Ordering::Relaxed,
-        );
-        window.set_ime_allowed(true);
-        tracing::info!(
-            "startup: ventana creada en {}ms",
-            t_window.elapsed().as_millis()
-        );
-        if self.config.remote_control {
-            if let Some(proxy) = self.proxy.clone() {
-                match crate::remote::server::spawn_with_proxy(proxy) {
-                    Ok(handle) => {
-                        tracing::info!(
-                            target: "baud::remote",
-                            "remote control listening on {}",
-                            handle.target()
-                        );
-                        self.remote_server = Some(handle);
-                    }
-                    Err(e) => tracing::error!("remote control failed to start: {e}"),
-                }
-            }
-        }
-
-        // 2. Obtener display handle para wgpu (evita el lifetime de ActiveEventLoop).
-        let display_handle = event_loop.owned_display_handle();
-
-        // 3. Inicializar wgpu: instance, adapter, device, queue, surface, config.
-        //    wgpu 29 tiene API async (request_adapter, request_device retornan Future).
-        //    Usamos block_on() local (sin pollster) para bloquear en nativo.
-        // El mut solo se usa en la rama cfg(windows) de abajo.
-        #[cfg_attr(not(windows), allow(unused_mut))]
-        let mut instance_desc =
-            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display_handle));
-        // En DX12 la swapchain desde HWND solo ofrece alpha Opaque; el visual
-        // de DirectComposition es el unico camino a transparencia real (y a
-        // que el material Mica se vea). Solo aplica con opacidad < 1.0.
-        #[cfg(windows)]
-        if opacity < 1.0 {
-            instance_desc.backend_options.dx12.presentation_system =
-                wgpu::Dx12SwapchainKind::DxgiFromVisual;
-        }
-        let instance = wgpu::Instance::new(instance_desc);
-
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("no se pudo crear la surface wgpu");
-
-        let t_gpu_init = Instant::now();
-        tracing::info!("wgpu: solicitando adaptador GPU...");
-        let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }))
-        .expect("no se encontro adaptador GPU compatible");
-        tracing::info!(
-            "wgpu: adaptador listo en {}ms",
-            t_gpu_init.elapsed().as_millis()
-        );
-
-        let t_device = Instant::now();
-        tracing::info!("wgpu: solicitando device...");
-        // Performance es el default de wgpu; MemoryUsage pide bloques de
-        // suballocacion menores y el buffer de glifos se recrea a menudo.
-        let make_desc = |limits: wgpu::Limits| wgpu::DeviceDescriptor {
-            label: None,
-            required_features: wgpu::Features::empty(),
-            required_limits: limits,
-            experimental_features: wgpu::ExperimentalFeatures::disabled(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: wgpu::Trace::Off,
-        };
-        // downlevel_defaults() es el piso nativo garantizado; si una GPU vieja
-        // no lo satisface se degrada al piso WebGL2 en vez de paniquear.
-        let (device, queue) = match block_on(adapter.request_device(&make_desc(
-            wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
-        ))) {
-            Ok(pair) => pair,
-            Err(err) => {
-                tracing::warn!(
-                    "wgpu: device con downlevel_defaults fallo ({err}); \
-                     reintentando con el piso WebGL2"
-                );
-                block_on(adapter.request_device(&make_desc(
-                    wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
-                )))
-                .expect("no se pudo crear el device GPU")
-            }
-        };
-        tracing::info!(
-            "wgpu: device listo en {}ms (init GPU total {}ms)",
-            t_device.elapsed().as_millis(),
-            t_gpu_init.elapsed().as_millis()
-        );
-
-        let t_surface_cfg = Instant::now();
-        let size = window.inner_size();
-        let surface_w = size.width.clamp(1, 16_384);
-        let surface_h = size.height.clamp(1, 16_384);
-        let caps = surface.get_capabilities(&adapter);
-        let mut config = surface
-            .get_default_config(&adapter, surface_w, surface_h)
-            .expect("no se encontro formato de surface compatible");
-        // get_default_config toma el primer formato en el orden del driver,
-        // que varia entre backends y servidores graficos; se fija uno de la
-        // lista de preferencia para que el pipeline de color sea estable.
-        config.format = pick_surface_format(&caps.formats);
-        if !matches!(
-            config.format,
-            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
-        ) {
-            tracing::warn!(
-                "wgpu: surface sin formato no-sRGB de 8 bits; elegido {:?} \
-                 (soportados: {:?}). El pipeline de color queda en el camino \
-                 degradado",
-                config.format,
-                caps.formats,
-            );
-        }
-        // Las variantes Auto* degradan solas si el backend no soporta
-        // Mailbox/Immediate; las crudas pueden paniquear en configure.
-        config.present_mode = if self.config.render.vsync {
-            wgpu::PresentMode::AutoVsync
-        } else {
-            wgpu::PresentMode::AutoNoVsync
-        };
-        // wgpu traduce esto a `min_image_count = valor + 1`
-        // (wgpu-hal/src/vulkan/swapchain/native.rs). Con 1 el swapchain queda
-        // en 2 imagenes, que es el minimo absoluto para FIFO: cada `acquire`
-        // bloquea hasta que el compositor libera la anterior, y si tarda
-        // (workspace oculto, direct scanout de otra ventana, VRR) se agota el
-        // timeout interno de wgpu — 1000 ms con el event loop entero parado.
-        // 2 da 3 imagenes: un frame de cola a cambio de que el hilo GUI no se
-        // bloquee. El frame de latencia se recupera en el plan 002, que quita
-        // el throttle de max_fps del camino del eco.
-        config.desired_maximum_frame_latency = 2;
-        // Si hay transparencia, asegurar que el alpha mode sea compatible
-        if opacity < 1.0 {
-            match select_alpha_mode(opacity, &caps.alpha_modes) {
-                Some(mode) => {
-                    config.alpha_mode = mode;
-                    config.view_formats = vec![config.format.add_srgb_suffix()];
-                }
-                // Sin swapchain translucida disponible la ventana queda
-                // opaca; mejor degradar que paniquear en configure.
-                None => tracing::warn!(
-                    "window.opacity < 1.0 pero el backend GPU no soporta \
-                     swapchain translucida (alpha modes: {:?}); \
-                     la ventana sera opaca",
-                    caps.alpha_modes
-                ),
-            }
-        }
-        surface.configure(&device, &config);
-        tracing::info!(
-            "startup: surface config lista en {}ms",
-            t_surface_cfg.elapsed().as_millis()
-        );
-        // El formato de surface decide todo el pipeline de color del frame;
-        // se registra con las capacidades crudas para diagnosticar diferencias
-        // entre servidores graficos (Wayland vs X11) y drivers.
-        let adapter_info = adapter.get_info();
-        tracing::info!(
-            "wgpu: surface formato={:?} alpha_mode={:?} present_mode={:?} \
-             frame_latency={} backend={:?} adaptador={:?} \
-             formatos_soportados={:?}",
-            config.format,
-            config.alpha_mode,
-            config.present_mode,
-            config.desired_maximum_frame_latency,
-            adapter_info.backend,
-            adapter_info.name,
-            caps.formats,
-        );
-
-        // Pintar el fondo del tema y presentar ya: la ventana no queda vacia
-        // mientras el hilo de fuentes sigue escaneando en segundo plano.
-        let t_early_present = Instant::now();
-        let (bg_r, bg_g, bg_b) = crate::config::parse_hex(&self.config.theme.background);
-        let clear_color = crate::renderer::frame_clear_color(
-            (bg_r, bg_g, bg_b),
-            opacity,
-            config.format.is_srgb(),
-        );
-        if let wgpu::CurrentSurfaceTexture::Success(frame)
-        | wgpu::CurrentSurfaceTexture::Suboptimal(frame) = surface.get_current_texture()
-        {
-            let view = frame
-                .texture
-                .create_view(&wgpu::TextureViewDescriptor::default());
-            let mut encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-            {
-                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("early background clear"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(clear_color),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: None,
-                    ..Default::default()
-                });
-            }
-            queue.submit(std::iter::once(encoder.finish()));
-            frame.present();
-            tracing::info!(
-                "startup: ventana pintada (fondo) en {}ms",
-                t_early_present.elapsed().as_millis()
-            );
-        }
-
-        let t_font_join = Instant::now();
-        let font_system = match font_thread.join() {
-            Ok(font_system) => font_system,
-            Err(panic) => std::panic::resume_unwind(panic),
-        };
-        tracing::info!(
-            "startup: join del hilo de fonts esperado {}ms",
-            t_font_join.elapsed().as_millis()
-        );
-
-        // 4. Crear Renderer.
-        let t_renderer = Instant::now();
-        self.renderer = Some(Renderer::new(
-            window.clone(),
-            device,
-            queue,
-            surface,
-            config,
-            &self.config.font,
-            font_system,
-            self.scale_factor as f32,
-        ));
-        tracing::info!(
-            "startup: renderer construido en {}ms",
-            t_renderer.elapsed().as_millis()
-        );
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_content_padding(wcfg.padding_x, wcfg.padding_y);
-            if let Some(source) = self.pending_config_source.take() {
-                match source {
-                    ConfigSource::NotFound => {
-                        renderer.set_status_with_config(
-                            "Sin archivo de config, usando defaults",
-                            "⚡",
-                            &self.config.theme,
-                            &self.config.status,
-                        );
-                    }
-                    ConfigSource::ParseError { path, message } => {
-                        let msg = format!("Error en {path}: {message}");
-                        renderer.set_status_with_config(
-                            &msg,
-                            "✗",
-                            &self.config.theme,
-                            &self.config.status,
-                        );
-                    }
-                    ConfigSource::Ok => {}
-                }
-            }
-        }
-
-        // Verificar si hay que mostrar el modal de consentimiento de primer arranque.
-        self.check_first_run_consent();
-
-        clipboard::warm_up();
-
-        let size = window.inner_size();
-        if let Some(renderer) = &self.renderer {
-            let (_, _, _, _, deferred) = self.sync_grid_to_window(
-                size.width,
-                size.height,
-                renderer.cell_w,
-                renderer.cell_h,
-                false,
-                true,
-            );
-            self.pending_pane_sync = deferred;
-        }
-
-        // 5. Primer present según quirks: en Wayland la superficie no aparece
-        // hasta dibujar; ciertas familias además marcan la ventana como colgada
-        // si no hay redraw temprano.
-        if self.display_quirks.force_initial_redraw {
-            window.request_redraw();
-        }
-        self.update_ime_area();
-
-        let cfg = self.config.clone();
-        self.apply_config(cfg);
+        self.ensure_window(event_loop);
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -5638,7 +5739,16 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UserEvent) {
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        if let UserEvent::SpawnTab { params, tx } = event {
+            let _guard = self.watchdog.enter("UserEvent::SpawnTab");
+            let resp = match self.apply_spawn_tab(event_loop, params) {
+                Ok(()) => crate::remote::Response::ok(0, serde_json::json!({})),
+                Err(msg) => crate::remote::Response::err(0, "spawn_failed", msg),
+            };
+            let _ = tx.send(resp);
+            return;
+        }
         let phase = match &event {
             UserEvent::RedrawNeeded(_) => "UserEvent::RedrawNeeded",
             UserEvent::PtyExited(_, _) => "UserEvent::PtyExited",
@@ -5879,6 +5989,23 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn app_new_should_allow_zero_sessions() {
+        let id = SessionId::next();
+        let app = App::new(
+            vec![],
+            Config::default(),
+            test_config_watch(),
+            None,
+            BlinkFocus::new(id),
+            ConfigSource::Ok,
+            EventLoopWatchdog::noop(),
+            None,
+            None,
+        );
+        assert_eq!(app.session_count(), 0);
     }
 
     fn test_app_with_pty(term: Arc<Mutex<Term>>) -> (App, mpsc::Receiver<PtyCommand>) {

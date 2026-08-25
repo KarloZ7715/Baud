@@ -29,13 +29,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             baud::diagnostics::hooks::install_panic_hook();
             let _log_guard = baud::diagnostics::logging::init(attached_console);
-            tracing::info!("baud starting");
+            tracing::info!("baud server starting");
             let opts = baud::cli::LaunchOptions {
                 config_path,
                 overrides,
                 ..baud::cli::LaunchOptions::default()
             };
-            baud::event_loop::run(opts)?;
+            baud::event_loop::run_server(opts)?;
             Ok(())
         }
         baud::cli::CliOutcome::LaunchGui(opts) => {

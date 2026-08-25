@@ -769,7 +769,7 @@ fn pty_thread_main(
 /// Combina la configuracion de proceso de la aplicacion con las opciones de
 /// lanzamiento de la CLI. El directorio se valida y, si no existe, se ignora
 /// con un warning para no abortar el arranque.
-fn merge_launch_options(cfg: &Config, opts: &LaunchOptions) -> ProcessConfig {
+pub(crate) fn merge_launch_options(cfg: &Config, opts: &LaunchOptions) -> ProcessConfig {
     let mut process_cfg = cfg.process_config();
 
     if let Some(command) = &opts.command {
@@ -951,6 +951,111 @@ pub fn run(opts: LaunchOptions) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     tracing::info!("event loop started, shell running in PTY");
+
+    event_loop.run_app(&mut app)?;
+
+    app.join_session_threads();
+
+    Ok(())
+}
+
+/// Daemon de sesion: el socket de spawn se enlaza antes de fuentes y GPU.
+pub fn run_server(opts: LaunchOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let load_result = load_config(opts.config_path.as_deref());
+    let mut app_config = load_result.config;
+    apply_cli_overrides(&mut app_config, &opts.overrides, true);
+    apply_window_launch_flags(&mut app_config, &opts);
+    crate::diagnostics::logging::apply_log_level(app_config.diagnostics.log_level.as_deref());
+
+    let listener = match crate::spawn::try_bind()? {
+        crate::spawn::BindOutcome::AlreadyHeld => {
+            tracing::info!("spawn socket already held; exiting");
+            return Ok(());
+        }
+        crate::spawn::BindOutcome::Held(listener) => listener,
+    };
+
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build()?;
+    let proxy = event_loop.create_proxy();
+    let redraw_interval_nanos = Arc::new(AtomicU64::new(app_config.render.redraw_interval_nanos()));
+    let spawn_server = crate::spawn::server::serve(listener, proxy.clone());
+
+    let font_fallback = app_config.font.fallback.clone();
+    let font_thread =
+        thread::spawn(move || crate::renderer::create_font_system_with_fallback(&font_fallback));
+
+    let blink_focus = BlinkFocus::new(SessionId::next());
+
+    let watch_path: Option<PathBuf> = opts.config_path.as_deref().map(PathBuf::from);
+    let watch_overrides = opts.overrides.clone();
+    let watch_window_size = opts.window_size;
+    let watch_maximized = opts.maximized;
+    let watch_fullscreen = opts.fullscreen;
+    let config_watch = Arc::new(Mutex::new(crate::config::watch::WatchState::new(
+        config_watch_mtime(watch_path.as_deref()),
+    )));
+    if let Ok(mut watch) = config_watch.lock() {
+        watch.set_import_targets(app_config.theme_import_watch_paths.clone());
+    }
+    let watch_for_thread = Arc::clone(&config_watch);
+    let proxy_cfg = proxy.clone();
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(1000));
+        let now = config_watch_mtime(watch_path.as_deref());
+        if let Ok(mut state) = watch_for_thread.lock() {
+            if state.changed(now) {
+                match reload_config(watch_path.as_deref()) {
+                    Ok(mut cfg) => {
+                        apply_cli_overrides(&mut cfg, &watch_overrides, false);
+                        apply_window_launch_flags(
+                            &mut cfg,
+                            &LaunchOptions {
+                                window_size: watch_window_size,
+                                maximized: watch_maximized,
+                                fullscreen: watch_fullscreen,
+                                ..LaunchOptions::default()
+                            },
+                        );
+                        let _ = proxy_cfg.send_event(UserEvent::ConfigReloaded(Box::new(cfg)));
+                    }
+                    Err(msg) => {
+                        let _ = proxy_cfg.send_event(UserEvent::ConfigReloadFailed(msg));
+                    }
+                }
+            }
+        }
+    });
+
+    crate::color_scheme::spawn_portal_watcher(proxy.clone());
+
+    let watchdog = EventLoopWatchdog::spawn_if(app_config.diagnostics.watchdog);
+    if app_config.diagnostics.watchdog {
+        tracing::info!(
+            "event loop watchdog active (handler telemetry, stall={}s)",
+            2
+        );
+    }
+
+    init_reporter_if_accepted(&app_config);
+
+    let resolved_app_id = app_config.window.resolve_app_id(opts.app_id.as_deref());
+    let mut app = App::new(
+        vec![],
+        app_config,
+        config_watch,
+        Some(proxy),
+        blink_focus,
+        load_result.source,
+        watchdog,
+        opts.title,
+        Some(resolved_app_id),
+    );
+    app.set_redraw_interval_handle(redraw_interval_nanos);
+    app.set_linger(true);
+    app.set_spawn_server(spawn_server);
+    app.set_font_thread(font_thread);
+
+    tracing::info!("event loop started, waiting for new_tab");
 
     event_loop.run_app(&mut app)?;
 
