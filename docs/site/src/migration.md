@@ -25,7 +25,7 @@ A few things these terminals offer have no Baud equivalent today:
 - **Keyboard-driven URL hints** (foot's `show-urls-launch`, kitty's `open_url_with_hints`) — Baud only opens a URL via `ctrl+click`; see [Notifications and URLs](features/notifications-and-urls.md).
 - **Clear scrollback / full terminal reset as a bound action** (foot and kitty both bind this by default) — no equivalent action exists yet.
 - **Background images** (kitty's `background_image`) — not supported.
-- **Sixel graphics** (foot) or **kitty's own graphics protocol** — neither is implemented; see the [Terminal API](vt/index.md#not-supported) page.
+- **Sixel graphics** (foot) — not implemented; see the [Terminal API](vt/index.md#not-supported) page. The [Kitty graphics protocol](vt/index.md#kitty-graphics-protocol) subset is supported.
 
 ## `window.decorations`
 

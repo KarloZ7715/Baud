@@ -120,12 +120,33 @@ features that are not there, which fails in a far more confusing way than not cl
 
 See [TERM and terminfo](term-and-terminfo.md) for what Baud reports as its terminal type and why.
 
+## Kitty graphics protocol
+
+Baud implements a useful subset of the Kitty graphics protocol (APC `ESC _ G`).
+Clients discover it by sending `a=q` and reading `OK` before DA1.
+
+| Area | Supported | Not in this version |
+| ---- | --------- | ------------------- |
+| Transmission | `t=d` (direct base64, chunked `m=0/1`), `t=f`/`t=t` (file/temp) | `t=s` (shared memory) |
+| Formats | `f=100` (PNG), `f=32` (RGBA), `f=24` (RGB), compression `o=z` | animations (`a=a`, frames) |
+| Actions | `a=T` (transmit+display), `a=t`, `a=p` (placement), `a=d` (deletes: `d=a,i`) | Unicode placeholders (`U=1`), composition |
+| Geometry | `c,r` (cells), crop `x,y,w,h`, `z` (z-index; negative draws under text) | sub-cell offsets `X,Y` |
+| Responses | `OK` and error codes (`ENOENT`, `EINVAL`, …) with `q=0/1/2` | — |
+
+Quotas: 320 MB of decoded image RAM per session, 4096×4096 px per image, 4 MB
+accumulated APC payload per image. Crossing any of those answers with an error
+instead of growing without bound.
+
+`t=f` accepts only absolute paths without `..` and never deletes the file.
+`t=t` deletes the temp file after reading it only if the path is under a system
+temp directory and contains `tty-graphics-protocol`.
+
+Pixel size is reported through `TIOCGWINSZ` (`ws_xpixel`/`ws_ypixel` on Unix)
+and CSI `14t`/`16t`/`18t`, so clients can size placements without guessing.
+
 ## Not supported
 
 - **Scaled text (`OSC 66` with `s`, `n` or `d`)** — the text is printed at normal size rather
   than dropped. Drawing it scaled needs a grid cell that knows it belongs to a multi-cell block,
   which is a change to the grid model rather than to the parser.
 - **Sixel graphics** — no support yet; tracked internally as follow-up work.
-- **Kitty graphics protocol** — no support yet; tracked internally as follow-up work.
-
-Neither is probed above because there is nothing to probe; both are simply absent.

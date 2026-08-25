@@ -16,7 +16,7 @@ There is no macOS build. The self-update command (`baud update`) and the install
 
 ## What Baud does not do (yet)
 
-- No Sixel or kitty graphics protocol support. See the [Terminal API](vt/index.md) page for the full support matrix.
+- No Sixel graphics. The Kitty graphics protocol is supported for a documented subset; see the [Terminal API](vt/index.md) page.
 - No macOS build.
 - Self-update is Linux-only.
 

@@ -9,7 +9,7 @@ A consolidated list of things Baud does not do yet, gathered from the rest of th
 
 ## Rendering
 
-- **No Sixel graphics, no kitty graphics protocol.** See the [Terminal API](../vt/index.md#not-supported) page.
+- **No Sixel graphics.** See the [Terminal API](../vt/index.md#not-supported) page. The [Kitty graphics protocol](../vt/index.md#kitty-graphics-protocol) subset is supported.
 - **No background images.**
 - Grapheme clustering (DEC mode 2027) is always on and cannot be turned off.
 
