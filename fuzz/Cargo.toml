@@ -19,6 +19,9 @@ path = ".."
 [workspace]
 members = ["."]
 
+[patch.crates-io]
+vte = { path = "../vendor/vte" }
+
 [[bin]]
 name = "parser_feed"
 path = "fuzz_targets/parser_feed.rs"

@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use crate::copy_mode::CopyModeState;
 use crate::cursor::Cursor;
+use crate::graphics::{self, Action, ChunkAssembler, ExecContext, GraphicsResponse, GraphicsStore};
 use crate::grid::{Grid, DEFAULT_COLS, DEFAULT_ROWS};
 use crate::search::{self, SearchState};
 use crate::selection::Selection;
@@ -671,7 +672,19 @@ pub struct Term {
     dcs_action: Option<char>,
     /// Payload del DCS activo (nombres hex separados por `;`).
     dcs_payload: Vec<u8>,
+    /// Cuerpo de la APC en curso (se descarta al superar `APC_MAX_BYTES`).
+    apc_buf: Vec<u8>,
+    apc_overflow: bool,
+    /// Imágenes y placements del protocolo de gráficos.
+    pub(crate) graphics: GraphicsStore,
+    graphics_chunks: ChunkAssembler,
+    /// Tamaño de una celda en píxeles (ancho, alto). Lo actualiza el layout.
+    cell_px: (u16, u16),
+    /// Área de texto en píxeles (ancho, alto) para CSI 14 t.
+    window_px: (u16, u16),
 }
+
+const APC_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 fn default_tab_stops(cols: usize) -> Vec<bool> {
     let mut stops = vec![false; cols];
@@ -827,6 +840,12 @@ impl Term {
             dcs_intermediates: Vec::new(),
             dcs_action: None,
             dcs_payload: Vec::new(),
+            apc_buf: Vec::new(),
+            apc_overflow: false,
+            graphics: GraphicsStore::default(),
+            graphics_chunks: ChunkAssembler::default(),
+            cell_px: (10, 20),
+            window_px: (0, 0),
         }
     }
 
@@ -1339,6 +1358,91 @@ impl Term {
         std::mem::take(&mut self.pty_response)
     }
 
+    /// Actualiza la geometría en píxeles que responden CSI 14/16 t.
+    /// Devuelve true si cambió respecto al valor anterior.
+    pub fn set_pixel_geometry(
+        &mut self,
+        cell_w: f32,
+        cell_h: f32,
+        cols: usize,
+        rows: usize,
+    ) -> bool {
+        let cw = cell_w.round().clamp(1.0, 65535.0) as u16;
+        let ch = cell_h.round().clamp(1.0, 65535.0) as u16;
+        let ww = (u32::from(cw) * cols as u32).min(u32::from(u16::MAX)) as u16;
+        let wh = (u32::from(ch) * rows as u32).min(u32::from(u16::MAX)) as u16;
+        let changed = self.cell_px != (cw, ch) || self.window_px != (ww, wh);
+        self.cell_px = (cw, ch);
+        self.window_px = (ww, wh);
+        changed
+    }
+
+    fn dispatch_apc(&mut self) {
+        let overflow = self.apc_overflow;
+        self.apc_overflow = false;
+        let buf = std::mem::take(&mut self.apc_buf);
+        if overflow {
+            self.graphics_chunks.abort();
+            if let Some(bytes) = GraphicsResponse::err(0, "EINVAL").encode(0) {
+                self.respond(&bytes);
+            }
+            return;
+        }
+        if buf.first() != Some(&b'G') {
+            return;
+        }
+        match graphics::parse(&buf) {
+            Ok(cmd) => {
+                if matches!(cmd.action, Action::Delete) {
+                    self.graphics_chunks.abort();
+                }
+                if let Some(full) = self.graphics_chunks.push(cmd) {
+                    let quiet = full.quiet();
+                    let resp = self.run_graphics(full);
+                    if let Some(bytes) = resp.encode(quiet) {
+                        self.respond(&bytes);
+                    }
+                }
+            }
+            Err(e) => {
+                self.graphics_chunks.abort();
+                if let Some(bytes) = GraphicsResponse::err(0, e.code()).encode(0) {
+                    self.respond(&bytes);
+                }
+            }
+        }
+    }
+
+    fn run_graphics(&mut self, cmd: graphics::GraphicsCommand) -> GraphicsResponse {
+        let action = cmd.action;
+        let no_move = cmd.keys.no_cursor_move.unwrap_or(false);
+        let ctx = ExecContext {
+            cursor_col: self.cursor.col,
+            logical_row: self.cursor_logical_row(),
+            grid_rows: self.cursor.rows_count,
+            grid_cols: self.cursor.cols_count,
+            cell_px: (u32::from(self.cell_px.0), u32::from(self.cell_px.1)),
+        };
+        let resp = self.graphics.execute(cmd, &ctx);
+        if resp.error.is_none()
+            && !no_move
+            && matches!(action, Action::TransmitDisplay | Action::Put)
+        {
+            if let Some((cols, rows)) = self.graphics.last_placement_cells() {
+                let row =
+                    (self.cursor.row + rows as usize).min(self.cursor.rows_count.saturating_sub(1));
+                let col =
+                    (self.cursor.col + cols as usize).min(self.cursor.cols_count.saturating_sub(1));
+                self.cursor.move_to(row, col);
+            }
+        }
+        if resp.error.is_none() && !matches!(action, Action::Query) {
+            self.dirty = true;
+            self.active_grid_mut().damage.mark_all();
+        }
+        resp
+    }
+
     fn clear_dcs_state(&mut self) {
         self.dcs_intermediates.clear();
         self.dcs_action = None;
@@ -1529,6 +1633,7 @@ impl Term {
         self.alt_grid.clear();
         self.saved_cursor = Some((self.cursor.row, self.cursor.col));
         self.alt_screen = true;
+        self.graphics.enter_alt_screen();
         self.cursor.move_to(0, 0);
         self.scroll_region = (0, rows.saturating_sub(1));
         self.pending_wrap = false;
@@ -1536,6 +1641,7 @@ impl Term {
 
     /// Sale de alt screen. Restaura el cursor primario, contenido primario intacto.
     pub fn exit_alt_screen(&mut self) {
+        self.graphics.exit_alt_screen();
         self.alt_screen = false;
         if let Some((row, col)) = self.saved_cursor.take() {
             self.cursor.move_to(row, col);
@@ -1578,6 +1684,8 @@ impl Term {
         let blink_interval_ms = self.blink_interval_ms;
         let cursor_style = self.cursor_style;
         let cursor_blink_enabled = self.cursor_blink_enabled;
+        let cell_px = self.cell_px;
+        let window_px = self.window_px;
         *self = Self::new_sized(rows, cols, max_scrollback);
         self.default_colors = default_colors;
         self.config_cursor_color = config_cursor_color;
@@ -1586,6 +1694,8 @@ impl Term {
         self.blink_interval_ms = blink_interval_ms;
         self.cursor_style = cursor_style;
         self.cursor_blink_enabled = cursor_blink_enabled;
+        self.cell_px = cell_px;
+        self.window_px = window_px;
     }
 
     /// Cambia el tamano del grid primario y alt grid.
@@ -2081,6 +2191,7 @@ impl Term {
             }
         });
         self.last_reconciled_trim = total_trim;
+        self.graphics.reconcile_trim(total_trim);
     }
 
     /// Marcas de prompt con índices reconciliados contra el scrollback actual.
@@ -2993,6 +3104,28 @@ impl vte::Perform for Term {
                     self.respond(b"\x1b[?62;22c");
                 }
             }
+            't' => {
+                let ps = flat_params.first().copied().unwrap_or(0);
+                match ps {
+                    14 => {
+                        let (w, h) = self.window_px;
+                        let resp = format!("\x1b[4;{h};{w}t");
+                        self.respond(resp.as_bytes());
+                    }
+                    16 => {
+                        let (cw, ch) = self.cell_px;
+                        let resp = format!("\x1b[6;{ch};{cw}t");
+                        self.respond(resp.as_bytes());
+                    }
+                    18 => {
+                        let rows = self.cursor.rows_count;
+                        let cols = self.cursor.cols_count;
+                        let resp = format!("\x1b[8;{rows};{cols}t");
+                        self.respond(resp.as_bytes());
+                    }
+                    _ => {}
+                }
+            }
             'n' => {
                 let ps = flat_params.first().copied().unwrap_or(0);
                 match ps {
@@ -3134,6 +3267,29 @@ impl vte::Perform for Term {
         if is_xtgettcap {
             self.handle_xtgettcap(&payload);
         }
+    }
+
+    fn apc_start(&mut self) {
+        self.clear_pending_grapheme();
+        self.apc_buf.clear();
+        self.apc_overflow = false;
+    }
+
+    fn apc_put(&mut self, byte: u8) {
+        if self.apc_overflow {
+            return;
+        }
+        if self.apc_buf.len() >= APC_MAX_BYTES {
+            self.apc_overflow = true;
+            self.apc_buf.clear();
+            return;
+        }
+        self.apc_buf.push(byte);
+    }
+
+    fn apc_end(&mut self) {
+        self.clear_pending_grapheme();
+        self.dispatch_apc();
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
@@ -3679,6 +3835,37 @@ mod tests {
         let out = term.take_pty_response();
         assert_eq!(out, b"\x1b[0nAB");
         assert!(term.take_pty_response().is_empty());
+    }
+
+    #[test]
+    fn apc_g_llega_entera_al_dispatch() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b_Ga=q,i=1,s=1,v=1,t=d,f=24;AAAA\x1b\\");
+        assert!(term.apc_buf.is_empty());
+        assert!(!term.take_pty_response().is_empty());
+    }
+
+    #[test]
+    fn apc_no_g_se_ignora_sin_rastro() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b_Xcualquiercosa\x1b\\");
+        assert!(term.take_pty_response().is_empty());
+    }
+
+    #[test]
+    fn query_de_deteccion_responde_ok() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
+        assert_eq!(term.take_pty_response(), b"\x1b_Gi=31;OK\x1b\\");
+        assert!(term.graphics.image(crate::graphics::ImageId(31)).is_none());
+    }
+
+    #[test]
+    fn csi_16t_reporta_el_tamano_de_celda() {
+        let mut term = Term::new();
+        term.set_pixel_geometry(10.0, 20.0, 80, 24);
+        feed(&mut term, b"\x1b[16t");
+        assert_eq!(term.take_pty_response(), b"\x1b[6;20;10t");
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub mod diagnostics;
 pub mod display_quirks;
 pub mod event_loop;
 pub mod grapheme;
+pub mod graphics;
 pub mod grid;
 pub mod input;
 pub mod installation;
