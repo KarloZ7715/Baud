@@ -53,7 +53,7 @@ fn wait_for_window<C: Connection>(conn: &C, root: Window, timeout: Duration) -> 
 
 fn spawn_baud() -> Child {
     Command::new(env!("CARGO_BIN_EXE_baud"))
-        .args(["--app-id", APP_ID, "-e", "sleep", "300"])
+        .args(["--new-instance", "--app-id", APP_ID, "-e", "sleep", "300"])
         .env("BAUD_SKIP_CONSENT_UI", "1")
         .spawn()
         .expect("no se pudo lanzar el binario de baud")

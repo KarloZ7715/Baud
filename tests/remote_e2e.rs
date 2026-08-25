@@ -89,7 +89,7 @@ fn spawn_baud() -> Harness {
     // Runtime propio y escribible (en CI /run/user/<uid> a menudo no existe).
     // Sin WAYLAND para usar X11/Xvfb; DISPLAY lo hereda el job.
     let child = Command::new(env!("CARGO_BIN_EXE_baud"))
-        .args(["--app-id", APP_ID, "-e", "/bin/sh"])
+        .args(["--new-instance", "--app-id", APP_ID, "-e", "/bin/sh"])
         .env("XDG_RUNTIME_DIR", &runtime)
         .env("XDG_CONFIG_HOME", &config_home)
         .env("XDG_STATE_HOME", &state_home)

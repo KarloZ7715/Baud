@@ -56,6 +56,8 @@ fi
 LOG="${TMPDIR:-/tmp}/baud-linux-session-smoke.log"
 
 # Arranque breve: si el proceso vive ~1s, el smoke de crash pasó.
+# `--new-instance` mantiene el proceso GUI; `baud` sin flags es un cliente
+# corto que pide tab al daemon y sale.
 # Feeling completo (ASCII/resize/paste) es manual; ver docs/standards/linux-session-matrix.md.
 run_baud_smoke() {
   local timeout_bin=""
@@ -66,9 +68,9 @@ run_baud_smoke() {
   fi
 
   if [[ -n "$timeout_bin" ]]; then
-    "$timeout_bin" 3s "$BIN" >"$LOG" 2>&1 &
+    "$timeout_bin" 3s "$BIN" --new-instance >"$LOG" 2>&1 &
   else
-    "$BIN" >"$LOG" 2>&1 &
+    "$BIN" --new-instance >"$LOG" 2>&1 &
   fi
   local pid=$!
   sleep 1

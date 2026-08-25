@@ -16,8 +16,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 fn close_while_tui_running_exits_cleanly() {
     let exe = env!("CARGO_BIN_EXE_baud");
     let dummy = env!("CARGO_BIN_EXE_tui_dummy");
+    // Sin --new-instance, `baud -e` es un cliente de spawn: pide tab y sale 0
+    // antes de crear HWND. Este test cierra por PID del proceso GUI.
     let mut child = Command::new(exe)
-        .args(["-e", dummy])
+        .args(["--new-instance", "-e", dummy])
         .env("RUST_BACKTRACE", "full")
         .spawn()
         .expect("lanzar baud");

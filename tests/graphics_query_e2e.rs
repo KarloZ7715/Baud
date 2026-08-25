@@ -38,7 +38,15 @@ fn query_de_graficos_recibe_ok() {
     }
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_baud"))
-        .args(["--app-id", APP_ID, "-e", "python3", "-c", QUERY_PY])
+        .args([
+            "--new-instance",
+            "--app-id",
+            APP_ID,
+            "-e",
+            "python3",
+            "-c",
+            QUERY_PY,
+        ])
         .env("BAUD_SKIP_CONSENT_UI", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
