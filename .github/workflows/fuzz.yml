@@ -114,7 +114,7 @@ jobs:
           set -eu
           shopt -s nullglob
           for t in parser_feed feed_and_resize theme_import config_toml; do
-            crashes=(fuzz/artifacts/"$t"/crash-*)
+            crashes=(fuzz/artifacts/"$t"/crash-* fuzz/artifacts/"$t"/oom-*)
             if [ ${#crashes[@]} -eq 0 ]; then
               continue
             fi
