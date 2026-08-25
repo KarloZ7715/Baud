@@ -11,6 +11,7 @@ mod display_list;
 mod geometry;
 mod glyph;
 mod glyph_cache;
+mod images;
 pub mod limits;
 mod metrics;
 mod palette;
@@ -400,6 +401,9 @@ pub struct Renderer {
     title_bar_button_glyphs: [Vec<glyphon::CustomGlyph>; 3],
     /// Pista de fondo de la barra de título propia.
     title_bar_track_glyphs: Vec<glyphon::CustomGlyph>,
+    /// Pipeline de imágenes; se crea en el primer frame que las necesita.
+    image_pass: Option<images::ImagePass>,
+    pane_images: HashMap<SessionId, Vec<images::ImageDraw>>,
 }
 
 impl Renderer {
@@ -708,6 +712,8 @@ impl Renderer {
             tab_close_glyphs: Vec::new(),
             title_bar_button_glyphs,
             title_bar_track_glyphs: Vec::new(),
+            image_pass: None,
+            pane_images: HashMap::new(),
         }
     }
 
@@ -1472,6 +1478,20 @@ impl Renderer {
             window_opacity,
             self.config.format.is_srgb(),
         );
+        let mut frame_draws = Vec::new();
+        for pane in panes {
+            if let Some(d) = self.pane_images.get(&pane.session_id) {
+                frame_draws.extend_from_slice(d);
+            }
+        }
+        if !frame_draws.is_empty() {
+            let (sw, sh) = (self.config.width as f32, self.config.height as f32);
+            let device = self.device.clone();
+            let queue = self.queue.clone();
+            if let Some(pass) = self.image_pass.as_mut() {
+                pass.prepare(&device, &queue, &frame_draws, sw, sh);
+            }
+        }
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cell renderer pass"),
@@ -1488,9 +1508,21 @@ impl Renderer {
                 ..Default::default()
             });
 
+            if !frame_draws.is_empty() {
+                if let Some(pass) = self.image_pass.as_ref() {
+                    pass.draw_below(&mut render_pass);
+                }
+            }
+
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut render_pass)
                 .map_err(|e| format!("error al renderizar cell renderer: {e}"))?;
+
+            if !frame_draws.is_empty() {
+                if let Some(pass) = self.image_pass.as_ref() {
+                    pass.draw_above(&mut render_pass);
+                }
+            }
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -1559,6 +1591,70 @@ impl Renderer {
         Ok(true)
     }
 
+    fn collect_pane_images(
+        &mut self,
+        session_id: SessionId,
+        term: &mut Term,
+        metrics: &CellMetrics,
+        cols: usize,
+        rows: usize,
+    ) {
+        term.reconcile_prompt_marks();
+        if term.graphics.is_empty() {
+            self.pane_images.insert(session_id, Vec::new());
+            let evicted = term.graphics.take_evictions();
+            if let Some(pass) = self.image_pass.as_mut() {
+                pass.drop_ids(&evicted);
+            }
+            return;
+        }
+        let vp = crate::graphics::Viewport {
+            rows,
+            cols,
+            scrollback_len: if term.alt_screen {
+                0
+            } else {
+                term.grid.scrollback.len()
+            },
+            scrollback_offset: if term.alt_screen {
+                0
+            } else {
+                term.scrollback_offset
+            },
+        };
+        let vis = term.graphics.visible_placements(vp);
+        let origin_x = metrics.padding_x;
+        let origin_y = metrics.padding_y;
+        let surf_w = self.config.width;
+        let surf_h = self.config.height;
+        let sx = (origin_x.max(0.0) as u32).min(surf_w);
+        let sy = (origin_y.max(0.0) as u32).min(surf_h);
+        let sw = ((cols as f32 * self.cell_w).max(1.0) as u32).min(surf_w.saturating_sub(sx));
+        let sh = ((rows as f32 * self.cell_h).max(1.0) as u32).min(surf_h.saturating_sub(sy));
+        let draws = images::draws_for_placements(
+            &vis,
+            origin_x,
+            origin_y,
+            self.cell_w,
+            self.cell_h,
+            (sx, sy, sw, sh),
+        );
+        if self.image_pass.is_none() {
+            self.image_pass = Some(images::ImagePass::new(&self.device, self.config.format));
+        }
+        let device = self.device.clone();
+        let queue = self.queue.clone();
+        if let Some(pass) = self.image_pass.as_mut() {
+            for d in &draws {
+                if let Some(img) = term.graphics.image(d.placement.image_id) {
+                    pass.sync_image(&device, &queue, d.placement.image_id, img);
+                }
+            }
+            pass.drop_ids(&term.graphics.take_evictions());
+        }
+        self.pane_images.insert(session_id, draws);
+    }
+
     /// Construye custom glyphs de un pane y los agrega a `out`.
     #[allow(clippy::too_many_arguments)]
     fn append_pane_glyphs(
@@ -1573,6 +1669,7 @@ impl Renderer {
         bold_is_bright: bool,
         out: &mut Vec<glyphon::CustomGlyph>,
     ) -> Result<(), String> {
+        self.collect_pane_images(session_id, term, metrics, cols_count, rows_count);
         term.ensure_search_cache();
         let overrides = ColorOverrides::from_term(term);
         let palette = Palette {
