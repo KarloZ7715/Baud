@@ -1391,6 +1391,9 @@ impl Term {
         if buf.first() != Some(&b'G') {
             return;
         }
+        if graphics::protocol::is_protocol_reply(&buf) {
+            return;
+        }
         match graphics::parse(&buf) {
             Ok(cmd) => {
                 if matches!(cmd.action, Action::Delete) {
@@ -3858,6 +3861,17 @@ mod tests {
         feed(&mut term, b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
         assert_eq!(term.take_pty_response(), b"\x1b_Gi=31;OK\x1b\\");
         assert!(term.graphics.image(crate::graphics::ImageId(31)).is_none());
+    }
+
+    #[test]
+    fn respuesta_reinyectada_no_genera_otro_error() {
+        let mut term = Term::new();
+        feed(&mut term, b"\x1b_Gi=31;OK\x1b\\");
+        assert!(term.take_pty_response().is_empty());
+        feed(&mut term, b"\x1b_G;EINVAL\x1b\\");
+        assert!(term.take_pty_response().is_empty());
+        feed(&mut term, b"\x1b_Gi=31;EINVAL:bad\x1b\\");
+        assert!(term.take_pty_response().is_empty());
     }
 
     #[test]

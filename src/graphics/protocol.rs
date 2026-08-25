@@ -164,6 +164,27 @@ fn append_key(out: &mut Vec<u8>, first: &mut bool, prefix: &[u8], value: u32) {
     out.extend_from_slice(value.to_string().as_bytes());
 }
 
+/// True si el cuerpo es una respuesta del protocolo reinyectada al parser
+/// (`OK` o un código de error), no un comando nuevo.
+pub fn is_protocol_reply(apc: &[u8]) -> bool {
+    let body = match apc.first() {
+        Some(b'G') => &apc[1..],
+        _ => return false,
+    };
+    let payload = match body.iter().position(|&b| b == b';') {
+        Some(i) => &body[i + 1..],
+        None => return false,
+    };
+    payload == b"OK"
+        || payload.starts_with(b"EINVAL")
+        || payload.starts_with(b"ENOENT")
+        || payload.starts_with(b"ENOSPC")
+        || payload.starts_with(b"EFBIG")
+        || payload.starts_with(b"EIO")
+        || payload.starts_with(b"ENODATA")
+        || payload.starts_with(b"EPERM")
+}
+
 /// Parsea el cuerpo de una APC que empieza por `G`.
 pub fn parse(apc: &[u8]) -> Result<GraphicsCommand, GraphicsError> {
     let body = match apc.first() {
@@ -305,6 +326,13 @@ mod tests {
         let r = GraphicsResponse::ok(31);
         assert_eq!(r.encode(0).unwrap(), b"\x1b_Gi=31;OK\x1b\\".to_vec());
         assert!(r.encode(1).is_none());
+    }
+
+    #[test]
+    fn reconoce_respuestas_reinyectadas() {
+        assert!(is_protocol_reply(b"Gi=31;OK"));
+        assert!(is_protocol_reply(b"G;EINVAL"));
+        assert!(!is_protocol_reply(b"Ga=q,i=31,s=1,v=1,t=d,f=24;AAAA"));
     }
 
     #[test]
