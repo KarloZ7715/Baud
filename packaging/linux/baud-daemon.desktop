@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Baud daemon
+Exec=baud --server
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

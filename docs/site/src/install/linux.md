@@ -27,7 +27,7 @@ Root installs go to `${BAUD_INSTALL_PREFIX:-/usr/local}/bin` and `${BAUD_INSTALL
 
 ## Distribution packages
 
-Release builds also produce a `.deb` and an `.rpm` package (built with `cargo-deb` and `cargo-generate-rpm`) containing the binary, the desktop entry, icons, and the man page (`man baud`). Install whichever matches your distribution from the [Releases page](https://github.com/KarloZ7715/Baud/releases).
+Release builds also produce a `.deb` and an `.rpm` package (built with `cargo-deb` and `cargo-generate-rpm`) containing the binary, the desktop entry, icons, the man page (`man baud`), a user systemd unit, and an XDG autostart entry for the session daemon. Install whichever matches your distribution from the [Releases page](https://github.com/KarloZ7715/Baud/releases). After installing a package, enable the daemon with `systemctl --user enable --now baud.service` — see [Session daemon](../features/daemon.md).
 
 ## After installing
 

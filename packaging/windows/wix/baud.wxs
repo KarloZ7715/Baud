@@ -53,6 +53,19 @@
       </Directory>
     </StandardDirectory>
 
+    <StandardDirectory Id="StartupFolder">
+      <Component Id="BaudDaemonStartup" Guid="CF8FBB77-9697-48B4-B539-E9268DC18F92">
+        <Shortcut Id="BaudDaemonStartupShortcut"
+                  Name="Baud daemon"
+                  Description="Baud session daemon"
+                  Target="[INSTALLFOLDER]baud.exe"
+                  Arguments="--server"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="BaudIcon" />
+        <RegistryValue Root="HKCU" Key="Software\Baud" Name="daemonStartup" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
     <Feature Id="MainFeature" Title="Baud" Level="1">
       <ComponentRef Id="BaudExecutable" />
       <ComponentRef Id="BaudLicense" />
@@ -60,6 +73,7 @@
       <ComponentRef Id="ConptyDll" />
       <ComponentRef Id="OpenConsoleExe" />
       <ComponentRef Id="BaudShortcut" />
+      <ComponentRef Id="BaudDaemonStartup" />
     </Feature>
 
     <!-- Sin esto, WiX genera un cabinet externo (cab1.cab) que el instalador

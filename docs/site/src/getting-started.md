@@ -2,7 +2,7 @@
 
 ## Launching
 
-Run `baud` with no arguments to open a new terminal window running your default shell.
+Run `baud` with no arguments to open a tab on the session daemon (it creates the window if none is open) running your default shell. See [Session daemon](features/daemon.md).
 
 ```sh
 baud
@@ -19,6 +19,8 @@ These flags configure the window and initial process before it launches; they ne
 | `--title <text>` | Set the initial window title. |
 | `--app-id <id>` | Override the Wayland `app_id` / X11 `WM_CLASS` (config `window.app_id`, default `baud`). |
 | `--hold` | Keep the window open after the command exits, instead of closing it. |
+| `--server` | Run the session daemon in the foreground. |
+| `--new-instance` | Open a GUI that does not talk to the daemon. |
 
 Flags accept either `--flag value` or `--flag=value` form, and can appear in any order (except `-e`, which must come last).
 

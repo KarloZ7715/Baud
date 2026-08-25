@@ -15,7 +15,7 @@ Download `baud-<version>-windows-x64.zip` from the [Releases page](https://githu
 
 ## MSI installer
 
-Download `baud-<version>-windows-x64.msi` and run it. It installs to `Program Files` (per-machine, admin rights required), adds a Start Menu shortcut, and supports a clean uninstall through Windows' standard "Add or remove programs".
+Download `baud-<version>-windows-x64.msi` and run it. It installs to `Program Files` (per-machine, admin rights required), adds a Start Menu shortcut, a Startup-folder shortcut that runs `baud --server`, and supports a clean uninstall through Windows' standard "Add or remove programs".
 
 ## Unsigned builds
 

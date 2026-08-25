@@ -1,0 +1,11 @@
+[Unit]
+Description=Baud terminal daemon
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/baud --server
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target
