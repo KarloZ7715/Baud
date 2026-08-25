@@ -699,6 +699,34 @@ impl Grid {
         let _ = self.reflow_with_cursor(new_cols, None);
     }
 
+    fn pad_reflow_row(mut row: Vec<Cell>, new_cols: usize) -> Vec<Cell> {
+        while row.len() < new_cols {
+            row.push(Cell::default());
+        }
+        row
+    }
+
+    /// Encaja `row` en la ventana visible. Lo que sobra por arriba va al
+    /// scrollback de inmediato, para no materializar N*M filas al angostar.
+    fn emit_reflow_row(
+        &mut self,
+        row: Vec<Cell>,
+        continuation: bool,
+        visible: &mut VecDeque<Vec<Cell>>,
+        continuations: &mut VecDeque<bool>,
+        overflow: &mut usize,
+    ) {
+        visible.push_back(row);
+        continuations.push_back(continuation);
+        if visible.len() > self.rows_count {
+            if let Some(old) = visible.pop_front() {
+                self.push_scrollback(old);
+                *overflow += 1;
+            }
+            let _ = continuations.pop_front();
+        }
+    }
+
     /// Reflow: concatena todo el contenido logico del grid en una secuencia
     /// plana de celdas (preservando filas vacias como marcadores de nueva linea)
     /// y lo re-divide en filas de `new_cols` columnas.
@@ -787,112 +815,94 @@ impl Grid {
             });
         }
 
-        // ---- Step 5: re-divide the flat sequence into rows of new_cols ----
-        // Also compute row_continuations: rows split by width (soft wrap) get
-        // continuation=true, rows separated by newline in the flat get
-        // continuation=false.
+        // ---- Step 5: re-divide. Solo se retienen `rows_count` filas visibles;
+        // el resto va al scrollback al vuelo (tope `max_scrollback`).
 
-        let mut new_rows: Vec<Vec<Cell>> = Vec::new();
-        let mut new_continuations: Vec<bool> = Vec::new();
+        let mut visible: VecDeque<Vec<Cell>> = VecDeque::new();
+        let mut visible_cont: VecDeque<bool> = VecDeque::new();
+        let mut overflow = 0usize;
         let mut row_after_newline = true;
 
         let mut current_row: Vec<Cell> = Vec::with_capacity(new_cols);
         let mut col = 0usize;
 
         for cell in &flat {
-            // Newline marker: flush the current row (preserving empty rows).
             if cell.ch == '\n' && cell.width() == 0 {
-                if current_row.is_empty() {
-                    new_rows.push(vec![Cell::default(); new_cols]);
+                let row = if current_row.is_empty() {
+                    vec![Cell::default(); new_cols]
                 } else {
-                    while current_row.len() < new_cols {
-                        current_row.push(Cell::default());
-                    }
-                    new_rows.push(current_row);
-                }
-                new_continuations.push(!row_after_newline);
+                    Self::pad_reflow_row(current_row, new_cols)
+                };
+                self.emit_reflow_row(
+                    row,
+                    !row_after_newline,
+                    &mut visible,
+                    &mut visible_cont,
+                    &mut overflow,
+                );
                 current_row = Vec::with_capacity(new_cols);
                 col = 0;
-                row_after_newline = true; // next row starts after a newline
+                row_after_newline = true;
                 continue;
             }
 
             let w = cell.width() as usize;
-
-            // Skip zero-width placeholders (shouldn't appear, but be safe).
             if w == 0 {
                 continue;
             }
 
             if col + w <= new_cols {
-                // Fits in the current row.
                 current_row.push(*cell);
                 for _ in 1..w {
                     Self::push_wide_continuation(&mut current_row);
                 }
                 col += w;
             } else if col == 0 && w > new_cols {
-                // Doesn't fit even as the first character: force it in.
                 current_row.push(*cell);
                 for _ in 1..w.min(new_cols) {
                     Self::push_wide_continuation(&mut current_row);
                 }
                 col = w.min(new_cols);
             } else {
-                // Doesn't fit at the end: flush current row, start a new one.
-                while current_row.len() < new_cols {
-                    current_row.push(Cell::default());
-                }
-                new_rows.push(current_row);
-                // This new row is a soft wrap continuation (unless it's right
-                // after a newline, in which case row_after_newline is still
-                // true and we push false).
-                new_continuations.push(!row_after_newline);
-
+                let flushed = Self::pad_reflow_row(current_row, new_cols);
+                self.emit_reflow_row(
+                    flushed,
+                    !row_after_newline,
+                    &mut visible,
+                    &mut visible_cont,
+                    &mut overflow,
+                );
                 current_row = Vec::with_capacity(new_cols);
                 current_row.push(*cell);
                 for _ in 1..w {
                     Self::push_wide_continuation(&mut current_row);
                 }
                 col = w;
-                row_after_newline = false; // no hard break before this continuation
+                row_after_newline = false;
             }
         }
 
-        // Flush any remaining content in the last row.
         if !current_row.is_empty() {
-            while current_row.len() < new_cols {
-                current_row.push(Cell::default());
-            }
-            new_rows.push(current_row);
-            // Last row: its continuation flag depends on how it started.
-            new_continuations.push(!row_after_newline);
+            let flushed = Self::pad_reflow_row(current_row, new_cols);
+            self.emit_reflow_row(
+                flushed,
+                !row_after_newline,
+                &mut visible,
+                &mut visible_cont,
+                &mut overflow,
+            );
         }
-
-        // ---- Step 6: overflow rows (oldest first) go to scrollback ----
 
         let pre_overflow_cursor =
             cursor_offset.map(|offset| Self::cursor_from_offset_in_flat(&flat, new_cols, offset));
-        let overflow = new_rows.len().saturating_sub(self.rows_count);
 
-        if overflow > 0 {
-            for row in new_rows.drain(..overflow) {
-                self.push_scrollback(row);
-            }
-            new_continuations.drain(..overflow);
+        while visible.len() < self.rows_count {
+            visible.push_back(vec![Cell::default(); new_cols]);
+            visible_cont.push_back(false);
         }
 
-        // ---- Step 7: pad with empty rows up to rows_count ----
-
-        while new_rows.len() < self.rows_count {
-            new_rows.push(vec![Cell::default(); new_cols]);
-            new_continuations.push(false);
-        }
-
-        // ---- Step 8: assign ----
-
-        self.rows = new_rows.into();
-        self.row_continuations = new_continuations;
+        self.rows = visible;
+        self.row_continuations = visible_cont.into_iter().collect();
         self.cols_count = new_cols;
         self.damage.mark_all();
 
@@ -1408,6 +1418,37 @@ mod tests {
             row0_x >= 100,
             "la fila 0 debe tener la mayoria tras pipeline completo"
         );
+    }
+
+    /// Reflow a 1 columna con tope de historial chico: el contenido extra
+    /// se recorta. No reproducir aquí el trophy de fuzz (OOM en CI).
+    #[test]
+    fn reflow_a_una_columna_respeta_max_scrollback() {
+        let visible = 12;
+        let cols = 40;
+        let max_sb = 8;
+        let mut grid = Grid::new_sized_with_scrollback(visible, cols, max_sb);
+        for r in 0..visible {
+            for c in 0..cols {
+                grid.rows[r][c].ch = 'X';
+            }
+        }
+        grid.reflow(1);
+        assert_eq!(grid.cols_count, 1);
+        assert_eq!(grid.rows.len(), visible);
+        assert!(
+            grid.scrollback.len() <= max_sb,
+            "scrollback {} > max {max_sb}",
+            grid.scrollback.len()
+        );
+        assert!(grid.rows.iter().all(|row| row.len() == 1));
+        let xs = grid.rows.iter().filter(|row| row[0].ch == 'X').count()
+            + grid
+                .scrollback
+                .iter()
+                .filter(|row| !row.is_empty() && row[0].ch == 'X')
+                .count();
+        assert_eq!(xs, visible + max_sb);
     }
 
     #[test]
