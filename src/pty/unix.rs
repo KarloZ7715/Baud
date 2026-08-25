@@ -41,11 +41,16 @@ impl Pty {
 
     /// Actualiza el winsize del PTY via ioctl(TIOCSWINSZ).
     pub fn set_winsize(&self, rows: u16, cols: u16) -> io::Result<()> {
+        self.set_winsize_px(rows, cols, 0, 0)
+    }
+
+    /// Igual que [`Self::set_winsize`] e incluye el tamaño en píxeles.
+    pub fn set_winsize_px(&self, rows: u16, cols: u16, xpixel: u16, ypixel: u16) -> io::Result<()> {
         let ws = nix::libc::winsize {
             ws_row: rows,
             ws_col: cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
+            ws_xpixel: xpixel,
+            ws_ypixel: ypixel,
         };
         let res = unsafe { nix::libc::ioctl(self.fd.as_raw_fd(), nix::libc::TIOCSWINSZ, &ws) };
         if res < 0 {
@@ -67,6 +72,10 @@ impl SessionBackend for Pty {
 
     fn resize(&mut self, rows: u16, cols: u16) -> io::Result<()> {
         self.set_winsize(rows, cols)
+    }
+
+    fn resize_px(&mut self, rows: u16, cols: u16, xpixel: u16, ypixel: u16) -> io::Result<()> {
+        self.set_winsize_px(rows, cols, xpixel, ypixel)
     }
 
     fn interrupt(&mut self) -> io::Result<()> {

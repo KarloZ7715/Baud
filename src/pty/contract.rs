@@ -20,6 +20,11 @@ pub trait SessionBackend: Send {
     /// Actualiza el winsize del hijo / tamaño de la pseudo-consola.
     fn resize(&mut self, rows: u16, cols: u16) -> io::Result<()>;
 
+    /// Resize con tamaño en píxeles. En Windows se ignora el tamaño en px.
+    fn resize_px(&mut self, rows: u16, cols: u16, _xpixel: u16, _ypixel: u16) -> io::Result<()> {
+        self.resize(rows, cols)
+    }
+
     /// Entrega semántica de Ctrl+C (byte `0x03` en la entrada de la sesión).
     fn interrupt(&mut self) -> io::Result<()>;
 

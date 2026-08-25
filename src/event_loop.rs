@@ -251,8 +251,13 @@ fn process_pty_commands(master: &mut pty::Pty, rx_gui_to_pty: &mpsc::Receiver<Pt
                 tracing::trace!("pty_thread: write {} bytes: {:02x?}", bytes.len(), bytes);
                 let _ = master.write_input(&bytes);
             }
-            PtyCommand::Resize { rows, cols } => {
-                if let Err(e) = master.resize(rows, cols) {
+            PtyCommand::Resize {
+                rows,
+                cols,
+                xpixel,
+                ypixel,
+            } => {
+                if let Err(e) = master.resize_px(rows, cols, xpixel, ypixel) {
                     tracing::warn!("error setting winsize: {e}");
                 }
             }

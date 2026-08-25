@@ -9,7 +9,12 @@ pub enum PtyCommand {
     /// Bytes de input para escribir al master.
     Input(Vec<u8>),
     /// Redimensionar: el child debe actualizar su winsize.
-    Resize { rows: u16, cols: u16 },
+    Resize {
+        rows: u16,
+        cols: u16,
+        xpixel: u16,
+        ypixel: u16,
+    },
     /// Semántica de Ctrl+C (el backend escribe `0x03`).
     Interrupt,
     /// Apagado: pedir salida ordenada al child.

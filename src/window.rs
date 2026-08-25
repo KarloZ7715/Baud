@@ -1510,10 +1510,15 @@ impl App {
             } else if !preserve_scrollback {
                 guard.scrollback_offset = 0;
             }
-            if old_r != new_rows || old_c != new_cols {
+            let px_changed = guard.set_pixel_geometry(cell_w, cell_h, new_cols, new_rows);
+            let xpixel = (cell_w * new_cols as f32).round().clamp(0.0, 65535.0) as u16;
+            let ypixel = (cell_h * new_rows as f32).round().clamp(0.0, 65535.0) as u16;
+            if old_r != new_rows || old_c != new_cols || px_changed {
                 let _ = host.session.pty_tx.send(PtyCommand::Resize {
                     rows: new_rows as u16,
                     cols: new_cols as u16,
+                    xpixel,
+                    ypixel,
                 });
             }
         }
@@ -2595,6 +2600,8 @@ impl App {
                 let _ = host.session.pty_tx.send(PtyCommand::Resize {
                     rows: old_rect.rows as u16,
                     cols: old_rect.cols as u16,
+                    xpixel: 0,
+                    ypixel: 0,
                 });
             } else {
                 self.pending_pane_sync = true;
